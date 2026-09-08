@@ -151,7 +151,7 @@ interface ProviderAdapter {
     readonly loginPageUrl: string;      // 面板"登录"打开的页面
     readonly cookieDomain: string;      // chrome.cookies 作用域
     readonly requiredCookies: string[]; // DeepSeek: ['user_token']（spike 实测核准）
-    getAuthStatus(session: ProviderSession): Promise<AuthStatus>;
+    getAuthStatus(ctx: ProviderContext): Promise<AuthStatus>;   // 以 ctx.token 探测
     // AuthStatus = { state: 'logged_in' } | { state: 'logged_out' } | { state: 'expired', message }
   };
 
@@ -171,7 +171,7 @@ interface ProviderAdapter {
   capabilities: { thinking: boolean; functionCalling: 'none' | 'prompt-engineered' };
 }
 
-interface ProviderSession  { providerId: ProviderId; webSessionId: string; parentMessageId: number | null; }
+interface ProviderSession  { providerId: ProviderId; webSessionId: string; parentMessageId: number | string | null; }
 interface ProviderCompletion {
   session: ProviderSession;
   prompt: string;            // 核心层渲染好的完整转录或增量尾部（单轮）
