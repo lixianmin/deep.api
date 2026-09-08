@@ -26,6 +26,17 @@ describe('renderTranscript', () => {
     if (!r.ok) throw new Error('expected ok');
     expect(r.prompt).toContain('c1');
     expect(r.prompt).toContain('result');
+    expect(r.prompt).toContain('assistant-tool-call');
+    expect(r.prompt).toContain('"f"');
+  });
+  it('does not merge assistant with tool_calls into a plain assistant', () => {
+    const r = renderTranscript([
+      m('assistant', 'plain'),
+      m('assistant', '', { tool_calls: [{ id: 'c2', type: 'function', function: { name: 'g', arguments: '{}' } }] }),
+    ]);
+    if (!r.ok) throw new Error('expected ok');
+    expect(r.prompt).toContain('assistant-tool-call');
+    expect(r.prompt).toContain('"g"');
   });
 });
 

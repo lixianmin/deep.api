@@ -8,7 +8,7 @@ function mergeAdjacent(msgs: Message[]): Message[] {
   const out: Message[] = [];
   for (const msg of msgs) {
     const last = out[out.length - 1];
-    if (last && last.role === msg.role && msg.role !== 'tool' && !last.tool_calls) {
+    if (last && last.role === msg.role && msg.role !== 'tool' && !last.tool_calls && !msg.tool_calls) {
       last.content = `${last.content}\n\n${msg.content}`;
     } else {
       out.push({ ...msg });
