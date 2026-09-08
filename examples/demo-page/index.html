@@ -137,18 +137,24 @@ document.querySelectorAll('button[data-act]').forEach(btn => {
       } else if (act === 'tool-required') {
         await runToolScenario(m, 'required');
       } else if (act === 'rebuild') {
+        // 场景：修改历史 assistant 回复（'4' → '五'）重发。deep.api 会判 mirror 不匹配 → rebuild → 开新 session。
         const m1 = [{ role: 'user', content: '2+2 等于几？' }];
         const a1 = [{ role: 'assistant', content: '4' }];
         const m2 = [{ role: 'user', content: '2+2 等于几？' }, { role: 'assistant', content: '五' }, { role: 'user', content: '再说一遍？' }];
         const r1 = await window.deepApi.chat.completions.create({ model: m, messages: m1.concat(a1), ...opts });
         log('[第一次] ' + r1.choices[0].message.content);
         const r2 = await window.deepApi.chat.completions.create({ model: m, messages: m2, ...opts });
-        log('[修改历史重发] ' + r2.choices[0].message.content);
+        log('[修改历史重发（rebuild 预期）] ' + r2.choices[0].message.content);
       } else if (act === 'conv') {
         const cid = 'demo-' + Date.now();
-        await window.deepApi.chat.completions.create({ model: m, messages: [{ role: 'user', content: '记住数字 42。' }], conversation_id: cid, ...opts });
-        const r = await window.deepApi.chat.completions.create({ model: m, messages: [{ role: 'user', content: '刚才那个数字是什么？' }], conversation_id: cid, ...opts });
-        log('[续聊] ' + r.choices[0].message.content);
+        // 多轮调用契约：messages 必须包含完整历史（仿 OpenAI SDK），不能只传新一条
+        const history = [{ role: 'user', content: '记住数字 42。' }];
+        const r1 = await window.deepApi.chat.completions.create({ model: m, messages: history, conversation_id: cid, ...opts });
+        log('[第一轮] ' + r1.choices[0].message.content);
+        history.push({ role: 'assistant', content: r1.choices[0].message.content });
+        history.push({ role: 'user', content: '刚才那个数字是什么？' });
+        const r2 = await window.deepApi.chat.completions.create({ model: m, messages: history, conversation_id: cid, ...opts });
+        log('[续聊] ' + r2.choices[0].message.content);
       } else if (act === 'vision') {
         log('[vision] 未启用：deep.api 网页 web API 不支持 in-line image（详见面板说明）。');
         const dataUrl = await new Promise((res, rej) => {

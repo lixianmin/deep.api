@@ -41,6 +41,8 @@ export function completionPayload(
     ref_file_ids: [] as string[],
     thinking_enabled: thinkingEnabled,
     search_enabled: searchEnabled,
+    // action: null 与上游 reference 项目（zhu1090093659/deepseek-pp）字段对齐——多轮靠服务端按 parent_message_id 关联历史
+    action: null,
     preempt: false,
   };
   // reasoning_effort：与 DeepSeek 官方默认一致（high）；调用方可覆盖为 low/medium/max
