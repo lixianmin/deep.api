@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>deep.api demo</title>
+<style>
+  body { font: 13px/1.5 system-ui, -apple-system, sans-serif; max-width: 760px; margin: 24px auto; padding: 0 16px; }
+  h1 { font-size: 16px; }
+  textarea, pre, code { font: 12px ui-monospace, monospace; }
+  pre { background: #f6f6f6; padding: 8px; border-radius: 4px; white-space: pre-wrap; word-break: break-word; }
+  .row { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+  button { padding: 6px 10px; font-size: 12px; border: 1px solid #ccc; border-radius: 4px; background: #fff; cursor: pointer; }
+  input { padding: 4px; border: 1px solid #ccc; border-radius: 3px; }
+  #out { min-height: 80px; }
+  .small { color: #888; font-size: 11px; }
+</style>
+</head>
+<body>
+  <h1>deep.api demo</h1>
+  <p class="small">需在已加载 deep.api 扩展的 Chrome 中打开本页（<code>chrome://extensions</code> 加载 <code>deep.api</code> 目录）。</p>
+
+  <p>API Key（默认从 <code>window.deepApiConfig</code> 读取，也可手动覆盖）：<input id="apikey" size="40" placeholder="（沿用 deepApiConfig.apiKey）"></p>
+
+  <div class="row">
+    <button data-act="one">1. 非流式</button>
+    <button data-act="stream">2. 流式</button>
+    <button data-act="tool">3. 工具调用</button>
+    <button data-act="rebuild">4. 修改历史重发（重建）</button>
+    <button data-act="conv">5. conversation_id 续聊</button>
+  </div>
+
+  <pre id="out"></pre>
+
+<script>
+  const out = document.getElementById('out');
+  const apikeyEl = document.getElementById('apikey');
+  const log = (s) => { out.textContent += s + '\n'; };
+  const reset = () => { out.textContent = ''; };
+  const withApiKey = (p) => p.apiKey ? p : (() => { const k = apikeyEl.value.trim(); return k ? { ...p, apiKey: k } : p; })();
+  const model = document.querySelector('button[data-act="one"]').textContent.includes('非流式') ? 'deepseek-chat' : 'deepseek-chat';
+
+  document.querySelectorAll('button[data-act]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      reset();
+      const act = btn.dataset.act;
+      try {
+        if (act === 'one') {
+          const r = await window.deepApi.chat.completions.create(withApiKey({ model, messages: [{ role: 'user', content: '用一句话介绍 DeepSeek。' }] }));
+          log('[非流式] ' + r.choices[0].message.content);
+        } else if (act === 'stream') {
+          const res = await window.deepApi.chat.completions.create(withApiKey({ model, messages: [{ role: 'user', content: '用三句话讲讲 R1 推理模型。' }], stream: true }));
+          log('[流式] ');
+          for await (const c of res) {
+            const d = c.choices[0].delta;
+            if (d.reasoning_content) log('[reasoning] ' + d.reasoning_content);
+            if (d.content) log(d.content);
+          }
+        } else if (act === 'tool') {
+          const tools = [{ type: 'function', function: { name: 'get_weather', description: '取某地天气', parameters: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'] } } }];
+          let msgs = [{ role: 'user', content: '北京天气如何？' }];
+          const r1 = await window.deepApi.chat.completions.create(withApiKey({ model, messages: msgs, tools }));
+          const tc = r1.choices[0].message.tool_calls?.[0];
+          log('[工具调用] ' + JSON.stringify(tc));
+          if (tc) {
+            msgs.push({ role: 'assistant', tool_calls: [tc] });
+            msgs.push({ role: 'tool', tool_call_id: tc.id, content: '晴 26°C 微风' });
+            const r2 = await window.deepApi.chat.completions.create(withApiKey({ model, messages: msgs, tools }));
+            log('[第二轮] ' + r2.choices[0].message.content);
+          }
+        } else if (act === 'rebuild') {
+          const m1 = [{ role: 'user', content: '2+2 等于几？' }];
+          const a1 = [{ role: 'assistant', content: '4' }];
+          const m2 = [{ role: 'user', content: '2+2 等于几？' }, { role: 'assistant', content: '五' }, { role: 'user', content: '再说一遍？' }];
+          const r1 = await window.deepApi.chat.completions.create(withApiKey({ model, messages: m1.concat(a1) }));
+          log('[第一次] ' + r1.choices[0].message.content);
+          const r2 = await window.deepApi.chat.completions.create(withApiKey({ model, messages: m2 }));
+          log('[修改历史重发] ' + r2.choices[0].message.content);
+        } else if (act === 'conv') {
+          const cid = 'demo-' + Date.now();
+          await window.deepApi.chat.completions.create(withApiKey({ model, messages: [{ role: 'user', content: '记住数字 42。' }], conversation_id: cid }));
+          const r = await window.deepApi.chat.completions.create(withApiKey({ model, messages: [{ role: 'user', content: '刚才那个数字是什么？' }], conversation_id: cid }));
+          log('[续聊] ' + r.choices[0].message.content);
+        }
+      } catch (e) {
+        log('[错误] ' + (e?.message ?? JSON.stringify(e)));
+      }
+    });
+  });
+</script>
+</body>
+</html>
