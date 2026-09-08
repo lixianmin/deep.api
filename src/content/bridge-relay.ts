@@ -6,22 +6,42 @@ export interface RelayPort {
 }
 
 export function createRelay(target: Window, port: RelayPort): void {
+  // 监听来自 page 的请求包 → 转发给 SW
   target.addEventListener('message', (ev: MessageEvent) => {
-    // ev.source 在 jsdom/同窗口 postMessage 下为 null；接受 null 与 === target 两种来源
     if (ev.source !== null && ev.source !== target) return;
     if (!isBridgeRequest(ev.data)) return;
-    port.postMessage(ev.data);
+    try {
+      port.postMessage(ev.data);
+    } catch {
+      // port died (SW 重载/禁用)；静默忽略，onDisconnect 会触发重连
+    }
   });
+  // SW 响应/事件 → 转发给 page
   port.onMessage((m) => { target.postMessage(m, '*'); });
-  // 流活跃保活：每 20s 一次 ping；SW 侧 ping/pong 单独处理，不走 Router。
-  setInterval(() => port.postMessage({ __deepApi: { kind: 'ping' } }), 20_000);
+  // 流活跃保活
+  setInterval(() => {
+    try { port.postMessage({ __deepApi: { kind: 'ping' } }); }
+    catch { /* port died, ignore */ }
+  }, 20_000);
 }
 
-// 内容脚本入口：连 MV3 SW 并启动 relay
-if (typeof chrome !== 'undefined' && chrome.runtime?.connect) {
-  const port = chrome.runtime.connect({ name: 'deepapi' });
-  createRelay(window, {
-    postMessage: (m) => port.postMessage(m),
-    onMessage: (cb) => port.onMessage.addListener((m: unknown) => cb(m)),
-  });
-}
+// 内容脚本入口：连 MV3 SW；SW 重载/失效时自动重连
+(function startRelay() {
+  if (typeof chrome === 'undefined' || !chrome.runtime?.connect) return;
+  let currentPort: chrome.runtime.Port | null = null;
+  function open(): chrome.runtime.Port | null {
+    try {
+      const p = chrome.runtime.connect({ name: 'deepapi' });
+      currentPort = p;
+      p.onDisconnect.addListener(() => {
+        if (currentPort === p) { currentPort = null; setTimeout(open, 1000); }
+      });
+      createRelay(window, {
+        postMessage: (m) => { try { p.postMessage(m); } catch { /* ignore */ } },
+        onMessage: (cb) => p.onMessage.addListener((m: unknown) => cb(m)),
+      });
+      return p;
+    } catch { return null; }
+  }
+  open();
+})();
