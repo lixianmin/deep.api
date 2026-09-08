@@ -34,13 +34,13 @@ export function createDeepSeekAdapter(deps: AdapterDeps): ProviderAdapter {
   }
 
   async function createSessionRaw(ctx: ProviderContext): Promise<ProviderSession> {
-    const r: any = await fetchJsonSafe('/api/v0/chat_session/create', baseHeaders(ctx.token), {});
+    const r: any = await fetchJsonSafe('/chat_session/create', baseHeaders(ctx.token), {});
     const id: string | undefined = r?.data?.chat_session?.id ?? r?.data?.chat_session_id;
     if (!id) throw classifyErr(new Error('create_session: id missing'));
     return { providerId: 'deepseek', webSessionId: id, parentMessageId: null };
   }
   async function deleteSessionRaw(ctx: ProviderContext, webSessionId: string): Promise<void> {
-    await fetchJsonSafe('/api/v0/chat_session/delete', baseHeaders(ctx.token), { chat_session_id: webSessionId });
+    await fetchJsonSafe('/chat_session/delete', baseHeaders(ctx.token), { chat_session_id: webSessionId });
   }
 
   return {
@@ -61,14 +61,14 @@ export function createDeepSeekAdapter(deps: AdapterDeps): ProviderAdapter {
     async deleteSession(ctx, s) { await deleteSessionRaw(ctx, s.webSessionId); },
     async stopStream(ctx, s, messageId) {
       try {
-        await fetchJsonSafe('/api/v0/chat/stop_stream', baseHeaders(ctx.token), { chat_session_id: s.webSessionId, message_id: messageId });
+        await fetchJsonSafe('/chat/stop_stream', baseHeaders(ctx.token), { chat_session_id: s.webSessionId, message_id: messageId });
       } catch { /* best-effort per spec */ }
     },
 
     async *streamCompletion(ctx, req) {
       const model = { modelType: req.model.modelType, thinking: req.model.thinking };
       const headers = await withPowHeaders(ctx);
-      const res = await fetchStreamSafe('/api/v0/chat/completion', headers, completionPayload(req.session, req.prompt, model));
+      const res = await fetchStreamSafe('/chat/completion', headers, completionPayload(req.session, req.prompt, model));
       if (res.status !== 200) {
         throw classifyErr(Object.assign(new Error(`completion http ${res.status}`), { status: res.status, headers: res.headers }));
       }

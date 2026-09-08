@@ -27,7 +27,7 @@ describe('PowSolver', () => {
     const challenge = { algorithm: 'DeepSeekHashV1', challenge: 'abc', difficulty: 3, target_path: '/api/v0/chat/completion', salt: 's1', expire_at: 1700000000 };
     const solver = new PowSolver({
       fetchJson: async (path, _h, body) => {
-        expect(path).toBe('/api/v0/chat/create_pow_challenge');
+        expect(path).toBe('/chat/create_pow_challenge');
         expect((body as any).target_path).toBe('/api/v0/chat/completion');
         return challenge;
       },

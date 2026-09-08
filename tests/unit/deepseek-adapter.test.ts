@@ -65,15 +65,15 @@ describe('DeepSeekAdapter', () => {
   it('getAuthStatus returns logged_in when token + probe succeeds', async () => {
     const deps = mkDeps({
       fetchJson: vi.fn(async (path: string) => {
-        if (path === '/api/v0/chat_session/create') return { data: { chat_session: { id: 'sess-x' } } };
-        if (path === '/api/v0/chat_session/delete') return { data: null };
+        if (path === '/chat_session/create') return { data: { chat_session: { id: 'sess-x' } } };
+        if (path === '/chat_session/delete') return { data: null };
         throw new Error('unexpected ' + path);
       }),
     });
     const a = createDeepSeekAdapter(deps);
     const status = await a.auth.getAuthStatus({ token: 'tok', requestId: 'r' });
     expect(status.state).toBe('logged_in');
-    expect(deps.fetchJson).toHaveBeenCalledWith('/api/v0/chat_session/create', expect.objectContaining({ Authorization: 'Bearer tok' }), {});
+    expect(deps.fetchJson).toHaveBeenCalledWith('/chat_session/create', expect.objectContaining({ Authorization: 'Bearer tok' }), {});
   });
 
   it('getAuthStatus returns expired on 401 with clear message', async () => {

@@ -57,7 +57,7 @@ export class PowSolver {
   }) {}
 
   async getChallenge(ctx: ProviderContext, targetPath: string): Promise<Challenge> {
-    const r = await this.deps.fetchJson('/api/v0/chat/create_pow_challenge', { Authorization: `Bearer ${ctx.token}` }, { target_path: targetPath });
+    const r = await this.deps.fetchJson('/chat/create_pow_challenge', { Authorization: `Bearer ${ctx.token}` }, { target_path: targetPath });
     const data = (r as { data?: { challenge?: Challenge } }).data?.challenge;
     if (!data) throw new PowFailedError('challenge payload missing');
     return data;
