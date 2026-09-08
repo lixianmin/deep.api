@@ -16,8 +16,12 @@ const WASM_URL = 'https://fe-static.deepseek.com/chat/static/sha3_wasm_bg.7b9ca6
 interface ProviderConfig { poolSize: number; ttlMinutes: number; lastAuthStatus?: { state: string; message?: string } }
 
 async function getProviderConfig(providerId: string): Promise<ProviderConfig> {
-  const got = (await STORAGE.get(`providers.${providerId}`)) as unknown as ProviderConfig | undefined;
-  return { poolSize: got?.poolSize ?? 2, ttlMinutes: got?.ttlMinutes ?? 30, lastAuthStatus: got?.lastAuthStatus };
+  // SW 环境下 await chrome.storage.local.get(singleKey) 返回的形状不稳定（实测返回裸值，丢掉 lastAuthStatus）；
+  // 改用数组形式 get([key])，包裹层始终为 {key: value}，跟 callback 形式行为一致。
+  const k = `providers.${providerId}`;
+  const got = (await STORAGE.get([k])) as unknown as Record<string, ProviderConfig | undefined> | undefined;
+  const cfg = got?.[k];
+  return { poolSize: cfg?.poolSize ?? 2, ttlMinutes: cfg?.ttlMinutes ?? 30, lastAuthStatus: cfg?.lastAuthStatus };
 }
 async function setProviderConfig(providerId: string, patch: Partial<ProviderConfig>): Promise<void> {
   const cur = await getProviderConfig(providerId);
