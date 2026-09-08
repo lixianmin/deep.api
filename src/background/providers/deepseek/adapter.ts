@@ -35,7 +35,8 @@ export function createDeepSeekAdapter(deps: AdapterDeps): ProviderAdapter {
 
   async function createSessionRaw(ctx: ProviderContext): Promise<ProviderSession> {
     const r: any = await fetchJsonSafe('/chat_session/create', baseHeaders(ctx.token), {});
-    const id: string | undefined = r?.data?.chat_session?.id ?? r?.data?.chat_session_id;
+    // 实测响应结构：{code:0, data:{biz_code:0, biz_data:{id:"<UUID>"}}}，id 在 data.biz_data.id
+    const id: string | undefined = r?.data?.biz_data?.id ?? r?.data?.chat_session?.id ?? r?.data?.chat_session_id ?? r?.data?.biz_data?.chat_session_id;
     if (!id) throw classifyErr(new Error('create_session: id missing'));
     return { providerId: 'deepseek', webSessionId: id, parentMessageId: null };
   }

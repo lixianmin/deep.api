@@ -140,7 +140,7 @@ async function probeAuthStatus(): Promise<{ state: string; message?: string }> {
       method: 'POST', headers: probeHeaders(token), body: JSON.stringify({}),
     });
     if (r.status === 200 || r.status === 201) {
-      try { const j: any = await r.json(); const id = j?.data?.chat_session?.id ?? j?.data?.chat_session_id; if (id) await fetch(`${DEEPSEEK_API_BASE}/chat_session/delete`, { method: 'POST', headers: probeHeaders(token), body: JSON.stringify({ chat_session_id: id }) }); } catch { /* best-effort */ }
+      try { const j: any = await r.json(); const id = j?.data?.biz_data?.id ?? j?.data?.chat_session?.id ?? j?.data?.chat_session_id; if (id) await fetch(`${DEEPSEEK_API_BASE}/chat_session/delete`, { method: 'POST', headers: probeHeaders(token), body: JSON.stringify({ chat_session_id: id }) }); } catch { /* best-effort */ }
       return { state: 'logged_in' };
     }
     if (r.status === 401 || r.status === 403) return { state: 'expired', message: `登录失效（HTTP ${r.status}）` };
