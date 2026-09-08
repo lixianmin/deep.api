@@ -10,10 +10,12 @@ export const MODELS: ModelInfo[] = [
 // 内部 web API 模型类型（chat.deepseek.com/api/v0 用 default/expert/vision）
 // 公开模型 ID → 内部模型类型 + 字符上限 + 是否开启 thinking
 // 字符上限按 ds-free-api 默认（待 spike 实测调整）
+// 默认 thinking=true：与 DeepSeek 官方文档对齐（官方：thinking 默认 enabled，effort 默认 high）
+// 调用方传 thinking:false 可显式关
 const LIMITS = {
-  'deepseek-v4-flash': { modelType: 'default' as const, thinking: false, limitChars: 2_621_440 },
+  'deepseek-v4-flash': { modelType: 'default' as const, thinking: true, limitChars: 2_621_440 },
   'deepseek-v4-pro': { modelType: 'expert' as const, thinking: true, limitChars: 163_840 },
-  'deepseek-v4-flash-vision-exp': { modelType: 'vision' as const, thinking: false, limitChars: 2_621_440 },
+  'deepseek-v4-flash-vision-exp': { modelType: 'vision' as const, thinking: true, limitChars: 2_621_440 },
 };
 
 export function resolveModel(modelId: string): ResolvedModel | null {
@@ -41,8 +43,10 @@ export function completionPayload(
     search_enabled: searchEnabled,
     preempt: false,
   };
-  // reasoning_effort 是 OpenAI 兼容字段；网页端是否生效待实测（多余字段会被忽略）
-  if (overrides?.reasoningEffort) payload.reasoning_effort = overrides.reasoningEffort;
+  // reasoning_effort：与 DeepSeek 官方默认一致（high）；调用方可覆盖为 low/medium/max
+  // 官方字段在网页 web API 是否生效待实测（多余字段被忽略不会报错）
+  const effort = overrides?.reasoningEffort ?? 'high';
+  payload.reasoning_effort = effort;
   return payload;
 }
 

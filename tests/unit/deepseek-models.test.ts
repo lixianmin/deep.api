@@ -10,9 +10,9 @@ describe('DeepSeek model registry', () => {
   });
 
   it('resolves public model ids to internal web model types', () => {
-    expect(resolveModel('deepseek-v4-flash')).toMatchObject({ modelType: 'default', thinking: false });
+    expect(resolveModel('deepseek-v4-flash')).toMatchObject({ modelType: 'default', thinking: true });
     expect(resolveModel('deepseek-v4-pro')).toMatchObject({ modelType: 'expert', thinking: true });
-    expect(resolveModel('deepseek-v4-flash-vision-exp')).toMatchObject({ modelType: 'vision', thinking: false });
+    expect(resolveModel('deepseek-v4-flash-vision-exp')).toMatchObject({ modelType: 'vision', thinking: true });
     expect(resolveModel('gpt-4o')).toBeNull();
   });
 });

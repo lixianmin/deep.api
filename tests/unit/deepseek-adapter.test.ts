@@ -17,9 +17,9 @@ function mkDeps(over: Partial<AdapterDeps> = {}): AdapterDeps {
 describe('DeepSeekAdapter', () => {
   it('resolves current public models and rejects unknown', () => {
     const a = createDeepSeekAdapter(mkDeps());
-    expect(a.resolveModel('deepseek-v4-flash')).toMatchObject({ modelType: 'default', thinking: false });
+    expect(a.resolveModel('deepseek-v4-flash')).toMatchObject({ modelType: 'default', thinking: true });
     expect(a.resolveModel('deepseek-v4-pro')).toMatchObject({ modelType: 'expert', thinking: true });
-    expect(a.resolveModel('deepseek-v4-flash-vision-exp')).toMatchObject({ modelType: 'vision', thinking: false });
+    expect(a.resolveModel('deepseek-v4-flash-vision-exp')).toMatchObject({ modelType: 'vision', thinking: true });
     expect(a.resolveModel('gpt-4o')).toBeNull();
     const ids = a.models.map(m => m.id);
     expect(ids).toEqual(expect.arrayContaining(['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-v4-flash-vision-exp']));

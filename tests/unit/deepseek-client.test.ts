@@ -5,11 +5,11 @@ describe('deepseek client', () => {
   describe('completionPayload', () => {
     const session = { providerId: 'deepseek', webSessionId: 'sess-1', parentMessageId: 'msg-0' };
 
-    it('uses model defaults when no overrides', () => {
-      const p = completionPayload(session, 'hi', { modelType: 'default', thinking: false });
-      expect(p.thinking_enabled).toBe(false);
+    it('defaults to thinking=true and reasoning_effort=high (matches DeepSeek official default)', () => {
+      const p = completionPayload(session, 'hi', { modelType: 'default', thinking: true });
+      expect(p.thinking_enabled).toBe(true);
       expect(p.search_enabled).toBe(false);
-      expect(p).not.toHaveProperty('reasoning_effort');
+      expect(p.reasoning_effort).toBe('high');
     });
 
     it('uses model default thinking when override is undefined', () => {
@@ -17,7 +17,7 @@ describe('deepseek client', () => {
       expect(p.thinking_enabled).toBe(true);
     });
 
-    it('explicit true overrides default off', () => {
+    it('explicit true overrides default off (rare; only when caller sets model.thinking=false)', () => {
       const p = completionPayload(session, 'hi', { modelType: 'default', thinking: false }, { thinking: true });
       expect(p.thinking_enabled).toBe(true);
     });
@@ -33,18 +33,18 @@ describe('deepseek client', () => {
     });
 
     it('passes search_enabled=true', () => {
-      const p = completionPayload(session, 'hi', { modelType: 'default', thinking: false }, { search: true });
+      const p = completionPayload(session, 'hi', { modelType: 'default', thinking: true }, { search: true });
       expect(p.search_enabled).toBe(true);
     });
 
-    it('omits reasoning_effort when not set', () => {
+    it('default reasoning_effort is high when not overridden', () => {
       const p = completionPayload(session, 'hi', { modelType: 'expert', thinking: true });
-      expect(p).not.toHaveProperty('reasoning_effort');
+      expect(p.reasoning_effort).toBe('high');
     });
 
-    it('passes reasoning_effort through', () => {
-      const p = completionPayload(session, 'hi', { modelType: 'expert', thinking: true }, { reasoningEffort: 'high' });
-      expect(p.reasoning_effort).toBe('high');
+    it('passes reasoning_effort override through', () => {
+      const p = completionPayload(session, 'hi', { modelType: 'expert', thinking: true }, { reasoningEffort: 'low' });
+      expect(p.reasoning_effort).toBe('low');
     });
 
     it('preserves session/prompt fields', () => {
@@ -62,14 +62,17 @@ describe('deepseek client', () => {
       expect(resolveModel('unknown')).toBeNull();
     });
 
-    it('resolves flash and pro with distinct modelType/thinking defaults', () => {
+    it('resolves flash/pro/vision with thinking=true by default (matches DeepSeek official default)', () => {
       const flash = resolveModel('deepseek-v4-flash')!;
       const pro = resolveModel('deepseek-v4-pro')!;
+      const vision = resolveModel('deepseek-v4-flash-vision-exp')!;
       expect(flash.modelType).toBe('default');
       expect(pro.modelType).toBe('expert');
-      // flash 默认 thinking=false（保守不自动开），调用方传 thinking:true 才打开
-      expect(flash.thinking).toBe(false);
+      expect(vision.modelType).toBe('vision');
+      // 所有模型默认 thinking=true（DeepSeek 官方默认：thinking enabled）
+      expect(flash.thinking).toBe(true);
       expect(pro.thinking).toBe(true);
+      expect(vision.thinking).toBe(true);
     });
 
     it('lists three models including vision', () => {
