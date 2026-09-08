@@ -34,7 +34,7 @@ async function setAuthStatus(providerId: string, status: { state: string; messag
 
 /** 取第一个能找到的 DeepSeek 登录 cookie。多个候选名（spike #2 校准）。 */
 async function getDeepSeekToken(): Promise<string | null> {
-  for (const name of ['user_token', 'ds_session', 'sessionid']) {
+  for (const name of ['userToken', 'user_token', 'ds_session', 'sessionid']) {
     try {
       const c = await chrome.cookies.get({ url: 'https://chat.deepseek.com/', name });
       if (c?.value) return c.value;
@@ -145,7 +145,7 @@ async function probeAuthStatus(): Promise<{ state: string; message?: string }> {
 // 启动：注册 cookie 监听 + 周期探测
 chrome.cookies.onChanged.addListener(async (info) => {
   if (!info.cookie.domain.includes('chat.deepseek.com')) return;
-  if (!['user_token', 'ds_session', 'sessionid'].includes(info.cookie.name)) return;
+  if (!['userToken', 'user_token', 'ds_session', 'sessionid'].includes(info.cookie.name)) return;
   if (info.removed) await setAuthStatus('deepseek', { state: 'expired', message: 'cookie 已失效，请重新登录 chat.deepseek.com' });
   else await setAuthStatus('deepseek', await probeAuthStatus());
   await broadcastPanelState();

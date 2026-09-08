@@ -2,7 +2,7 @@ import type { AuthStatus, ProviderContext } from '../adapter';
 
 export const DEEPSEEK_LOGIN_PAGE = 'https://chat.deepseek.com/';
 // DeepSeek web 可能使用的 cookie 名（spike 任务 #2 校准）。chrome.cookies 取 cookie 时域名必须用 . 前缀。
-export const DEEPSEEK_COOKIE_NAMES = ['user_token', 'ds_session', 'sessionid'] as const;
+export const DEEPSEEK_COOKIE_NAMES = ['userToken', 'user_token', 'ds_session', 'sessionid'] as const;
 
 /** 根据 ProviderContext 的 token 决定登录态。probe 是适配器自己发探测请求验证 token 有效。 */
 export async function getAuthStatus(

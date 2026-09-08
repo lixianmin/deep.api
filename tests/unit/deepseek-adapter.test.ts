@@ -31,7 +31,7 @@ describe('DeepSeekAdapter', () => {
     expect(a.id).toBe('deepseek');
     expect(a.auth.loginPageUrl).toBe('https://chat.deepseek.com/');
     expect(a.auth.cookieDomain).toBe('chat.deepseek.com');
-    expect(a.auth.requiredCookies).toEqual(expect.arrayContaining(['user_token']));
+    expect(a.auth.requiredCookies).toEqual(expect.arrayContaining(['userToken']));
   });
 
   it('classifies errors: 429 → rate-limited', () => {
