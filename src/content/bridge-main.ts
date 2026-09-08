@@ -79,3 +79,6 @@ export function bridgeMainFactory(target: Window): void {
   };
   Object.defineProperty(target, 'deepApi', { value: api, configurable: true, writable: true, enumerable: true });
 }
+
+// 内容脚本入口：自动在当前 window 上挂载 deepApi
+bridgeMainFactory(window as Window);
