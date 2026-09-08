@@ -54,6 +54,7 @@ function authHeaders(token: string): Record<string, string> {
 }
 
 let cached: { router: Router; log: RingLog } | null = null;
+const panelPorts = new Set<chrome.runtime.Port>();   // 当前打开的 popup 面板 port
 
 async function build(): Promise<{ router: Router; log: RingLog }> {
   if (cached) return cached;
@@ -147,6 +148,7 @@ chrome.cookies.onChanged.addListener(async (info) => {
   if (!['user_token', 'ds_session', 'sessionid'].includes(info.cookie.name)) return;
   if (info.removed) await setAuthStatus('deepseek', { state: 'expired', message: 'cookie 已失效，请重新登录 chat.deepseek.com' });
   else await setAuthStatus('deepseek', await probeAuthStatus());
+  await broadcastPanelState();
 });
 
 chrome.runtime.onInstalled.addListener(() => { void refreshAuthAndLog(); });
@@ -156,6 +158,23 @@ async function refreshAuthAndLog(): Promise<void> {
   const status = await probeAuthStatus();
   await setAuthStatus('deepseek', status);
   console.log('[deep.api] auth probe:', status);
+  await broadcastPanelState();
+}
+
+async function broadcastPanelState(): Promise<void> {
+  if (panelPorts.size === 0) return;
+  try {
+    const { router, log } = await build();
+    const provCfg = await getProviderConfig('deepseek');
+    const logList = (await STORAGE.get('log')) as unknown as { log?: any[] };
+    const state = {
+      providers: { deepseek: { ...provCfg, models: router.models ? (await router.models()).data : [] } },
+      log: (logList?.log as any[]) ?? log.list(),
+    };
+    for (const p of panelPorts) {
+      try { p.postMessage({ kind: 'state', payload: state }); } catch { /* port closed mid-broadcast */ }
+    }
+  } catch (e) { console.warn('[deep.api] broadcastPanelState failed', e); }
 }
 
 chrome.alarms.create(AUTH_POLL_ALARM, { periodInMinutes: AUTH_POLL_MINUTES });
@@ -204,6 +223,8 @@ chrome.runtime.onConnect.addListener((port) => {
       }
     });
   } else if (port.name === 'deepapi-panel') {
+    panelPorts.add(port);
+    port.onDisconnect.addListener(() => { panelPorts.delete(port); });
     port.onMessage.addListener(async (msg: any) => {
       const { router, log } = await build();
       if (msg?.kind === 'panel.getState') {
@@ -222,8 +243,7 @@ chrome.runtime.onConnect.addListener((port) => {
         await chrome.tabs.create({ url: 'https://chat.deepseek.com/' });
       } else if (msg?.kind === 'panel.refreshAuth') {
         await refreshAuthAndLog();
-        const provCfg = await getProviderConfig('deepseek');
-        port.postMessage({ kind: 'state', payload: { providers: { deepseek: provCfg }, log: log.list() } });
+        await broadcastPanelState();
       } else if (msg?.kind === 'panel.setPool') {
         await setProviderConfig('deepseek', { poolSize: msg.payload.poolSize });
       } else if (msg?.kind === 'panel.setTtl') {

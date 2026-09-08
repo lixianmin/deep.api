@@ -73,3 +73,5 @@ document.getElementById('pool-size')!.addEventListener('change', (e) => send('pa
 document.getElementById('ttl-min')!.addEventListener('change', (e) => send('panel.setTtl', { ttlMinutes: Number((e.target as HTMLInputElement).value) }));
 
 send('panel.getState');
+// 后台心跳：每 2s 主动拉一次最新状态（防御 SW 探测未完成时 popup 早开的情况）
+setInterval(() => send('panel.getState'), 2000);
