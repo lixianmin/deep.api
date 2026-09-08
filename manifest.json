@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "deep.api — DeepSeek web as OpenAI API",
-  "version": "0.1.20",
+  "version": "0.1.21",
   "description": "把 DeepSeek 网页版转成 OpenAI 形态接口供其他网站调用（无伴生进程）",
   "permissions": [
     "cookies",
@@ -14,6 +14,9 @@
     "https://chat.deepseek.com/*",
     "https://fe-static.deepseek.com/*"
   ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  },
   "background": {
     "service_worker": "sw.js",
     "type": "module"
