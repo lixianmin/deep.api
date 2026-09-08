@@ -80,18 +80,11 @@ fetch(chrome.runtime.getURL('manifest.json')).then(r => r.json()).then(m => {
   document.getElementById('version')!.textContent = 'v' + m.version;
 }).catch(() => {});
 
-// 后台心跳：每 2s 同时从 port + chrome.storage 直读双路拉取最新状态
+// 后台心跳：每 2s 主动向 SW 请求完整 state（SW 是 storage 的唯一权威）。
+// popup 不再直读 chrome.storage，避免心跳读到与 popup state 不一致的中间态。
 function refresh() {
+  console.log('[deep.api popup] heartbeat → panel.getState');
   send('panel.getState');
-  chrome.storage.local.get('providers.deepseek').then((g) => {
-    const cfg = g?.providers?.deepseek;
-    if (cfg?.lastAuthStatus && (!state.providers?.deepseek?.lastAuthStatus ||
-        JSON.stringify(cfg.lastAuthStatus) !== JSON.stringify(state.providers?.deepseek?.lastAuthStatus))) {
-      state = { ...(state || {}), providers: { ...(state?.providers || {}), deepseek: { ...(state.providers?.deepseek || {}), ...cfg } } };
-      render();
-      console.log('[deep.api popup] auth 直读:', cfg.lastAuthStatus);
-    }
-  }).catch(() => {});
 }
 refresh();
 setInterval(refresh, 2000);
