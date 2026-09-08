@@ -137,14 +137,16 @@ document.querySelectorAll('button[data-act]').forEach(btn => {
       } else if (act === 'tool-required') {
         await runToolScenario(m, 'required');
       } else if (act === 'rebuild') {
-        // 场景：修改历史 assistant 回复（'4' → '五'）重发。deep.api 会判 mirror 不匹配 → rebuild → 开新 session。
+        // 演示 deep.api mapper 的 rebuild 分支：修改历史 assistant 回复（'4' → '五'）重发。
+        // deep.api 不支持运行时编辑已发送的消息（edit_message 端点 v1 未实现），因此 mirror 不匹配 → rebuild → 开新 session。
+        // 网页端会看到两个 chat thread（这是设计行为，不是 bug）。需要“真正在同一 session 上修改历史”需走 DeepSeek 网页 UI 的“编辑”按钮或 v2 spike edit_message 端点。
         const m1 = [{ role: 'user', content: '2+2 等于几？' }];
         const a1 = [{ role: 'assistant', content: '4' }];
         const m2 = [{ role: 'user', content: '2+2 等于几？' }, { role: 'assistant', content: '五' }, { role: 'user', content: '再说一遍？' }];
         const r1 = await window.deepApi.chat.completions.create({ model: m, messages: m1.concat(a1), ...opts });
-        log('[第一次] ' + r1.choices[0].message.content);
+        log('[第一次（新建 session）] ' + r1.choices[0].message.content);
         const r2 = await window.deepApi.chat.completions.create({ model: m, messages: m2, ...opts });
-        log('[修改历史重发（rebuild 预期）] ' + r2.choices[0].message.content);
+        log('[第二次（rebuild：新 session；网页端会看到两个 thread）] ' + r2.choices[0].message.content);
       } else if (act === 'conv') {
         const cid = 'demo-' + Date.now();
         // 多轮调用契约：messages 必须包含完整历史（仿 OpenAI SDK），不能只传新一条
