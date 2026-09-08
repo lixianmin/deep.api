@@ -169,7 +169,7 @@ document.querySelectorAll('button[data-act]').forEach(btn => {
         for await (const frame of res) {
           buf += frame;
           // 按 \n\n 切帧；每帧形如 "data: {...json...}\n\n" 或 "data: [DONE]\n\n"
-          let nl: number;
+          let nl;
           while ((nl = buf.indexOf('\n\n')) >= 0) {
             const chunk = buf.slice(0, nl); buf = buf.slice(nl + 2);
             const dataLine = chunk.split('\n').find(l => l.startsWith('data: '));
