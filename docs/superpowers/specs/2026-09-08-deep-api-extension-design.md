@@ -91,7 +91,7 @@ interface ThreadState {
 请求 `messages = [m1..mn]`（n≥1，末尾为最新消息）到来时：
 
 1. `prefix = [m1..m(n-1)]`；找一个 `kind='auto'` 且 `mirror` 是 `prefix` 前缀的线程作为候选（**镜像 ⊆ prefix 即命中**，允许 prefix 比镜像长——工具循环产生的 tool/function 消息自然成为"增量尾部"；多候选时取镜像最长者，保证确定性）。
-2. **增量分支**：命中且 `tail = prefix - mirror` 非空且 `tail[0].role === 'user'`：
+2. **增量分支**：命中且 `tail = prefix - mirror` 非空且 `tail[0].role ∈ {'user', 'tool'}`（tool 为工具结果消息，渲染规则 §4.2/§4.4 已支持；assistant 头仍走重建）：
    - `prompt = renderTail(tail)`（尾部多轮带角色标记渲染）；
    - `parentMessageId = thread.parentMessageId`，同一线程继续。
 3. **重建分支**（三者任一即触发）：
