@@ -35,12 +35,10 @@ export function completionPayload(session: ProviderSession, prompt: string, mode
   };
 }
 
-export function baseHeaders(token: string): Record<string, string> {
+export // 与 SW 侧 authHeaders/probeHeaders 对齐：DeepSeek 对带 X-Client-* 的请求返回 HTML/401（用户 curl 实测）
+function baseHeaders(token: string): Record<string, string> {
   return {
     Authorization: `Bearer ${token}`,
-    'X-Client-Version': '2.0.0',
-    'X-Client-Platform': 'android',
-    'X-Client-Locale': 'zh_CN',
     'Content-Type': 'application/json',
   };
 }

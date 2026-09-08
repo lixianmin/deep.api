@@ -45,12 +45,10 @@ async function setCachedToken(t: string | null): Promise<void> {
   await STORAGE.set({ authToken: t ?? '' });   // 空字符串表示无 token
 }
 
+// 主调用链路 header：与 probeHeaders 对齐（DeepSeek 对 X-Client-* / cookie 请求返回 HTML/401）
 function authHeaders(token: string): Record<string, string> {
   return {
     Authorization: `Bearer ${token}`,
-    'X-Client-Version': '2.0.0',
-    'X-Client-Platform': 'android',
-    'X-Client-Locale': 'zh_CN',
     'Content-Type': 'application/json',
   };
 }
@@ -88,7 +86,7 @@ async function build(): Promise<{ router: Router; log: RingLog }> {
       const t = await loadCachedToken();
       if (!t) throw Object.assign(new Error('no token'), { status: 401 });
       const r = await fetch(DEEPSEEK_API_BASE + path, {
-        method: 'POST', headers: { ...headers, Authorization: `Bearer ${t}` }, credentials: 'include',
+        method: 'POST', headers: { ...headers, Authorization: `Bearer ${t}` },
         body: body === undefined || body === null ? undefined : JSON.stringify(body),
       });
       const text = await r.text();
@@ -100,14 +98,14 @@ async function build(): Promise<{ router: Router; log: RingLog }> {
     fetchStream: async (path, headers, body) => {
       const t = await loadCachedToken();
       if (!t) throw Object.assign(new Error('no token'), { status: 401 });
-      const r = await fetch(DEEPSEEK_API_BASE + path, { method: 'POST', headers: { ...headers, Authorization: `Bearer ${t}` }, credentials: 'include', body: JSON.stringify(body) });
+      const r = await fetch(DEEPSEEK_API_BASE + path, { method: 'POST', headers: { ...headers, Authorization: `Bearer ${t}` }, body: JSON.stringify(body) });
       if (!r.body) throw Object.assign(new Error(`no body http ${r.status}`), { status: r.status, headers: r.headers });
       return { status: r.status, headers: r.headers, body: r.body as unknown as AsyncIterable<Uint8Array> };
     },
     pow: new PowSolver({
       fetchJson: async (path, _h, body) => {
         const t = await loadCachedToken();
-        const r = await fetch(DEEPSEEK_API_BASE + path, { method: 'POST', headers: authHeaders(t ?? ''), credentials: 'include', body: JSON.stringify(body) });
+        const r = await fetch(DEEPSEEK_API_BASE + path, { method: 'POST', headers: authHeaders(t ?? ''), body: JSON.stringify(body) });
         return r.json();
       },
       fetchBytes: async (url) => {
