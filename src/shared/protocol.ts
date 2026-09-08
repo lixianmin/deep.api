@@ -13,7 +13,7 @@ export function isBridgeRequest(v: unknown): v is BridgeRequestMsg {
   const inner = (v as { __deepApi?: unknown }).__deepApi;
   if (typeof inner !== 'object' || inner === null) return false;
   const m = inner as { id?: unknown; method?: unknown; params?: unknown };
-  return typeof m.id === 'number' && (m.method === 'chat.completions.create' || m.method === 'chat.completions.cancel' || m.method === 'models.list') && typeof m.params === 'object' && m.params !== null;
+  return typeof m.id === 'number' && (m.method === 'chat.completions.create' || m.method === 'chat.completions.cancel' || m.method === 'models.list' || m.method === 'auth.sync' || m.method === 'auth.requested') && typeof m.params === 'object' && m.params !== null;
 }
 export class BridgeError extends Error {
   constructor(public error: ApiErrorBody, public status: number) { super(error.error.message); this.name = 'BridgeError'; }
