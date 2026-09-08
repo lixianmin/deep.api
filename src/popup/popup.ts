@@ -77,5 +77,19 @@ send('panel.getState');
 fetch(chrome.runtime.getURL('manifest.json')).then(r => r.json()).then(m => {
   document.getElementById('version')!.textContent = 'v' + m.version;
 }).catch(() => {});
-// 后台心跳：每 2s 主动拉一次最新状态（防御 SW 探测未完成时 popup 早开的情况）
-setInterval(() => send('panel.getState'), 2000);
+
+// 后台心跳：每 2s 同时从 port + chrome.storage 直读双路拉取最新状态
+function refresh() {
+  send('panel.getState');
+  chrome.storage.local.get('providers.deepseek').then((g) => {
+    const cfg = g?.providers?.deepseek;
+    if (cfg?.lastAuthStatus && (!state.providers?.deepseek?.lastAuthStatus ||
+        JSON.stringify(cfg.lastAuthStatus) !== JSON.stringify(state.providers?.deepseek?.lastAuthStatus))) {
+      state = { ...(state || {}), providers: { ...(state?.providers || {}), deepseek: { ...(state.providers?.deepseek || {}), ...cfg } } };
+      render();
+      console.log('[deep.api popup] auth 直读:', cfg.lastAuthStatus);
+    }
+  }).catch(() => {});
+}
+refresh();
+setInterval(refresh, 2000);
