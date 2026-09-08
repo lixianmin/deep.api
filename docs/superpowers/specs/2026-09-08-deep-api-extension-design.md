@@ -157,6 +157,7 @@ interface ProviderAdapter {
 
   createSession(ctx: ProviderContext): Promise<ProviderSession>;
   deleteSession(ctx: ProviderContext, s: ProviderSession): Promise<void>;
+  stopStream(ctx: ProviderContext, s: ProviderSession, messageId: number | string | null): Promise<void>; // cancel 用，best-effort
 
   streamCompletion(ctx: ProviderContext, req: ProviderCompletion): AsyncIterable<ProviderStreamEvent>;
 
@@ -174,12 +175,16 @@ interface ProviderSession  { providerId: ProviderId; webSessionId: string; paren
 interface ProviderCompletion {
   session: ProviderSession;
   prompt: string;            // 核心层渲染好的完整转录或增量尾部（单轮）
+  model: { modelType: 'default' | 'expert'; thinking: boolean };  // 已解析的模型配置（适配器据此组载荷）
   requestId: string;
 }
 type ProviderStreamEvent =
+  | { kind: 'message_id'; id: number | string }   // 本轮响应消息 id（ready 事件），先于内容增量发出；父链更新的依据
   | { kind: 'think_delta';  content: string }
   | { kind: 'content_delta'; content: string; finish_reason?: 'stop' | string }
   | { kind: 'usage'; inputTokens: number; outputTokens: number };
+
+ProviderContext = { token: string; requestId: string }（适配器使用凭证与诊断信息；不持状态）
 ```
 
 - 会话生命周期完全由核心层驱动（创建/删除/复用），适配器不持有自己的映射。
@@ -223,7 +228,7 @@ POST /chat/completion
 
 - `model_type` 映射：`deepseek-chat` → `default`、`deepseek-reasoner` → `expert`（ds-free-api 默认表 `["default","expert","vision"]`，spike 复核）；`vision` v1 不接入。
 - `thinking_enabled`：reasoner 为 true（同时 `capabilities.thinking` 声明），chat 为 false。
-- 响应为 SSE 事件流，payload 是 **JSON-Patch 协议**：`response/status`、`response/fragments`（APPEND）、`response/fragments/-1/content`、`response/accumulated_token_usage`；fragment 类型 think/response。解析器状态机对齐前端 DeltaParser（路径 + op 应用，增量内容按片段类型分发）。
+- 响应为 SSE 事件流：先到 **ready 事件**（含 `request_message_id`/`response_message_id`，i64，源码 parse_ready_message_ids 核实）→ 适配器据此发 `message_id` 事件；其后 payload 是 **JSON-Patch 协议**：`response/status`、`response/fragments`（APPEND）、`response/fragments/-1/content`、`response/accumulated_token_usage`；fragment 类型 think/response。解析器状态机对齐前端 DeltaParser（路径 + op 应用，增量内容按片段类型分发）。
 - 完成：`finish_reason` 以内容增量事件携带（`stop`；tool_calls 由核心层产生）。
 
 ### 6.4 会话与限制
