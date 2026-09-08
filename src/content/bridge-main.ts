@@ -5,14 +5,19 @@ declare global { interface Window { deepApi: unknown; deepApiConfig?: Record<str
 
 type Pending = { resolve(v: unknown): void; reject(e: unknown): void; onChunk(c: ChatCompletionChunk): void; onDone(): void; cancelled: boolean };
 
+const AUTH_KEY = 'userToken';   // DeepSeek web 登录态存放在 localStorage 的这个 key；spike 实测（与 ds2api 等同源项目一致）
+
 export function bridgeMainFactory(target: Window): void {
   let seq = 0;
   const pending = new Map<number, Pending>();
-  const send = (method: 'chat.completions.create' | 'chat.completions.cancel' | 'models.list', params: unknown): number => {
+
+  type Method = 'chat.completions.create' | 'chat.completions.cancel' | 'models.list' | 'auth.sync' | 'auth.requested';
+  const send = (method: Method, params: unknown): number => {
     const id = ++seq;
     target.postMessage({ __deepApi: { id, method, params } }, '*');
     return id;
   };
+
   target.addEventListener('message', (ev: MessageEvent) => {
     if (ev.source !== null && ev.source !== target) return;
     const env = (ev.data as { __deepApi?: any } | undefined)?.__deepApi;
@@ -80,5 +85,40 @@ export function bridgeMainFactory(target: Window): void {
   Object.defineProperty(target, 'deepApi', { value: api, configurable: true, writable: true, enumerable: true });
 }
 
-// 内容脚本入口：自动在当前 window 上挂载 deepApi
+/** 从 localStorage 解析当前 userToken（DeepSeek web 的登录态存储格式：{"value":"<JWT>","__version":"0"}）。 */
+function readAuthToken(): string | null {
+  try {
+    const raw = window.localStorage.getItem(AUTH_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { value?: unknown };
+    return typeof parsed.value === 'string' && parsed.value.length > 0 ? parsed.value : null;
+  } catch { return null; }
+}
+
+/** 初始化：读 token 一次推给 SW；监听 storage 变化实时推送；定期心跳保活。 */
+function startAuthSync() {
+  // 1) 首次推送
+  send('auth.sync', { token: readAuthToken() });
+
+  // 2) 同源页面 storage 变化时推送（包括其他标签页修改、退出登录等）
+  window.addEventListener('storage', (ev) => {
+    if (ev.key === AUTH_KEY || ev.key === null) send('auth.sync', { token: readAuthToken() });
+  });
+  // 3) 当前页面内 localStorage.setItem 不触发 storage 事件（仅跨窗口触发）—— 用自定义钩子包一层兜底
+  const origSet = Storage.prototype.setItem;
+  Storage.prototype.setItem = function (key: string, value: string) {
+    origSet.call(this, key, value);
+    if (key === AUTH_KEY) send('auth.sync', { token: readAuthToken() });
+  };
+  const origRemove = Storage.prototype.removeItem;
+  Storage.prototype.removeItem = function (key: string) {
+    origRemove.call(this, key);
+    if (key === AUTH_KEY) send('auth.sync', { token: readAuthToken() });
+  };
+  // 4) 定时心跳（防御 storage 事件/钩子漏掉的极端场景，例如登录流程中 token 写入的时机）
+  setInterval(() => send('auth.sync', { token: readAuthToken() }), 5000);
+}
+
+// 内容脚本入口：自动在当前 window 上挂载 deepApi 并启动 auth 同步
 bridgeMainFactory(window as Window);
+startAuthSync();
