@@ -12,6 +12,7 @@ export type FinishReason = 'stop' | 'tool_calls' | string;
 export interface ChatCompletionChunk {
   id: string; object: 'chat.completion.chunk'; created: number; model: string;
   choices: [{ index: 0; delta: { role?: Role; content?: string; reasoning_content?: string; tool_calls?: ToolCall[] }; finish_reason: FinishReason | null }];
+  usage?: ChatCompletionUsage;   // spec §4.5：末尾 usage 分块（仅 input/output 都可得时）
 }
 export interface ChatCompletion {
   id: string; object: 'chat.completion'; created: number; model: string;
