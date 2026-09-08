@@ -18,3 +18,16 @@ ul { padding-left: 18px; margin: 0; max-height: 140px; overflow: auto; font-size
 li { margin: 2px 0; }
 li .err { color: #b91c1c; }
 li .ok { color: #15803d; }
+
+/* Demo 面板（popup 内嵌 v0.1.46） */
+#demo-mount { margin-top: 8px; max-height: 60vh; overflow: auto; }
+.demo-panel { font-size: 12px; }
+.demo-section { background: #fff; border: 1px solid #eee; border-radius: 4px; padding: 6px 8px; margin: 6px 0; }
+.demo-section-title { font-size: 11px; color: #666; font-weight: 600; margin-bottom: 4px; }
+.demo-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.demo-row label { display: inline-flex; align-items: center; gap: 4px; margin: 0; font-size: 11px; }
+.demo-row select, .demo-row input[type=text] { padding: 2px 4px; border: 1px solid #ccc; border-radius: 3px; font-size: 11px; }
+.demo-warn-block { background: #fff7e6; border-left: 3px solid #f59e0b; padding: 4px 6px; margin: 4px 0; font-size: 11px; }
+.demo-warn-block summary { cursor: pointer; user-select: none; }
+.demo-warn-body { padding-top: 4px; }
+.demo-out { background: #f6f6f6; padding: 6px; border-radius: 3px; white-space: pre-wrap; word-break: break-word; max-height: 300px; overflow: auto; margin: 6px 0 0; }
