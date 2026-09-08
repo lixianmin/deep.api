@@ -3,6 +3,7 @@ import { BridgeError } from '../shared/protocol';
 
 declare global { interface Window { deepApi: unknown; deepApiConfig?: Record<string, unknown> } }
 
+// Pending 内部仍接收 ChatCompletionChunk 对象（从 SW postMessage 过来），但在 streamHandle 内部序列化为 SSE 字符串输出
 type Pending = { resolve(v: unknown): void; reject(e: unknown): void; onChunk(c: ChatCompletionChunk): void; onDone(): void; cancelled: boolean };
 
 const AUTH_KEY = 'userToken';
@@ -63,7 +64,7 @@ window.addEventListener('message', (ev: MessageEvent) => {
   if (env.kind === undefined) return;   // 请求包（由 bridge-relay 转发，不在此处理）
   const p = pending.get(env.id);
   if (!p) return;
-  if (env.kind === 'chunk') { if (!p.cancelled) { p.onChunk(env.chunk as ChatCompletionChunk); console.log('[deep.api bridge-main] chunk', env.chunk?.choices?.[0]?.delta?.content ?? ''); } return; }
+  if (env.kind === 'chunk') { if (!p.cancelled) p.onChunk(env.chunk as ChatCompletionChunk); return; }
   pending.delete(env.id);
   if (env.kind === 'done') {
     if (p.cancelled) p.reject(new BridgeError({ error: { message: 'cancelled', type: 'api_error', code: 'invalid_request_error' } }, 400));
@@ -80,15 +81,19 @@ window.addEventListener('message', (ev: MessageEvent) => {
 });
 
 function streamHandle(id: number) {
-  const q: ChatCompletionChunk[] = [];
+  // OpenAI SSE 兼容：yield 的是 `data: {json}\n\n` 字符串帧，不是 JS 对象。
+  // bridge-main 在这里统一加上 SSE 帧边界 + 末尾 [DONE] 帧，让下游可以使用标准 SSE 解析器。
+  const q: string[] = [];
   let settled = false;
   let wake: () => void = () => undefined;
   const notify = (): void => { const w = wake; wake = (): void => undefined; w(); };
   const p: Pending = {
     resolve: () => undefined,
     reject: () => undefined,
-    onChunk: (c) => { q.push(c); notify(); },
-    onDone: () => { settled = true; notify(); },
+    onChunk: (c) => {
+      try { q.push('data: ' + JSON.stringify(c) + '\n\n'); notify(); } catch { /* ignore unserializable */ }
+    },
+    onDone: () => { q.push('data: [DONE]\n\n'); settled = true; notify(); },
     cancelled: false,
   };
   pending.set(id, p);
@@ -108,7 +113,7 @@ function streamHandle(id: number) {
 // ---- 暴露给 page 的 API ----
 const api = {
   chat: { completions: {
-    create: (params: { model: string; messages: Array<{ role: string; content: string; [k: string]: unknown }>; stream?: boolean; tools?: unknown[]; tool_choice?: unknown; conversation_id?: string }): Promise<ChatCompletion> | (AsyncIterable<ChatCompletionChunk> & { cancel(): Promise<void> }) => {
+    create: (params: { model: string; messages: Array<{ role: string; content: string; [k: string]: unknown }>; stream?: boolean; tools?: unknown[]; tool_choice?: unknown; conversation_id?: string; thinking?: boolean | null; search?: boolean; reasoning_effort?: 'low' | 'medium' | 'high' | 'max' }): Promise<ChatCompletion> | (AsyncIterable<string> & { cancel(): Promise<void> }) => {
       const id = postRequest('chat.completions.create', params);
       if (params.stream === true) return streamHandle(id);
       return new Promise<ChatCompletion>((resolve, reject) => {

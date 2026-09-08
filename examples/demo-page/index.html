@@ -163,13 +163,29 @@ document.querySelectorAll('button[data-act]').forEach(btn => {
       } else if (act === 'stream') {
         const msgs = [{ role: 'user', content: '用三句话讲讲 R1 推理模型。' }];
         const res = await window.deepApi.chat.completions.create({ model: m, messages: msgs, ...opts, stream: true });
-        log('[流式开始]');
+        log('[流式开始；收到 SSE 帧：');
         let content = '', reasoning = '';
-        for await (const c of res) {
-          const d = c.choices[0].delta;
-          if (d.reasoning_content) reasoning += d.reasoning_content;
-          if (d.content) content += d.content;
+        let buf = '';
+        for await (const frame of res) {
+          buf += frame;
+          // 按 \n\n 切帧；每帧形如 "data: {...json...}\n\n" 或 "data: [DONE]\n\n"
+          let nl: number;
+          while ((nl = buf.indexOf('\n\n')) >= 0) {
+            const chunk = buf.slice(0, nl); buf = buf.slice(nl + 2);
+            const dataLine = chunk.split('\n').find(l => l.startsWith('data: '));
+            if (!dataLine) continue;
+            const payload = dataLine.slice(6);
+            if (payload === '[DONE]') continue;
+            try {
+              const j = JSON.parse(payload);
+              const d = j.choices?.[0]?.delta;
+              if (!d) continue;
+              if (d.reasoning_content) reasoning += d.reasoning_content;
+              if (d.content) content += d.content;
+            } catch { /* ignore malformed frame */ }
+          }
         }
+        log(']');
         msgs.push({ role: 'assistant', content });
         dump('流式问答', msgs);
         dumpChoice('[流式]', { message: { content, reasoning_content: reasoning || null, tool_calls: null }, finish_reason: 'stop' });

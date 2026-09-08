@@ -4,7 +4,7 @@ import type { ProviderAdapter, ProviderCompletion, ProviderContext, ProviderId, 
 import { SessionMapper, type ThreadEntry } from './session-mapper';
 import { Queue, QueueTimeoutError } from './queue';
 import { renderTranscript, renderTail, limitCharsFor } from './transcript-renderer';
-import { eventToChunks, finalChunk, toAggregate, type StreamAggregate, type StreamContext } from './chunk-encoder';
+import { eventToChunks, finalChunk, toAggregate, toolCallDeltaChunks, type StreamAggregate, type StreamContext } from './chunk-encoder';
 import { buildToolPrompt, parseToolCalls, hasToolTags, type ToolContext } from './tool-pipeline';
 import type { RingLog } from './log';
 
@@ -220,8 +220,8 @@ export class Router {
           const parsed = parseToolCalls(agg.content);
           if (parsed) {
             agg.toolCalls = parsed.calls; agg.content = parsed.remainder; agg.finishReason = 'tool_calls';
-            const toolChunk: ChatCompletionChunk = { ...cctx, object: 'chat.completion.chunk', choices: [{ index: 0, delta: { tool_calls: parsed.calls }, finish_reason: 'tool_calls' }] };
-            yield toolChunk;
+            // OpenAI SSE 兼容：每个 tool_call 拆为独立 chunk，带 index，让消费者可按 index 增量拼接
+            for (const tc of toolCallDeltaChunks(cctx, parsed.calls)) yield tc;
           } else if (!hasToolTags(agg.content)) {
             // 模型未输出工具标签：合法（tool_choice:auto 可不调用），正常 stop
             agg.finishReason = agg.finishReason ?? 'stop';

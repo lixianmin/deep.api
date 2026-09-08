@@ -14,9 +14,11 @@ export interface ToolDef { type: 'function'; function: { name: string; descripti
 export type ToolChoice = 'none' | 'auto' | 'required' | { type: 'function'; function: { name: string } };
 export interface ChatCompletionUsage { prompt_tokens: number; completion_tokens: number; total_tokens: number }
 export type FinishReason = 'stop' | 'tool_calls' | string;
+/** OpenAI SSE 增量分块。每个分块可以是 content / reasoning_content / tool_calls 增量。
+ *  tool_calls 增量支持 partial（仅含 index + 要追加的字段）：下游按 index 拼接完整 ToolCall。 */
 export interface ChatCompletionChunk {
   id: string; object: 'chat.completion.chunk'; created: number; model: string;
-  choices: [{ index: 0; delta: { role?: Role; content?: string; reasoning_content?: string; tool_calls?: ToolCall[] }; finish_reason: FinishReason | null }];
+  choices: [{ index: 0; delta: { role?: Role; content?: string | null; reasoning_content?: string; tool_calls?: Partial<ToolCall>[] }; finish_reason: FinishReason | null }];
   usage?: ChatCompletionUsage;   // spec §4.5：末尾 usage 分块（仅 input/output 都可得时）
 }
 export interface ChatCompletion {
