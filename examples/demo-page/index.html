@@ -189,8 +189,9 @@ async function runToolScenario(modelId, choice) {
   if (tc) {
     msgs.push({ role: 'assistant', tool_calls: [tc] });
     msgs.push({ role: 'tool', tool_call_id: tc.id, content: '晴 26°C 微风' });
+    msgs.push({ role: 'user', content: '那明天呢？' });  // 多轮工具调用：工具结果 + 追问
     const r2 = await window.deepApi.chat.completions.create({ model: modelId, messages: msgs, tools, tool_choice: choice, ...opts });
-    log('[第二轮] ' + r2.choices[0].message.content);
+    log('[第二轮 finish_reason=' + r2.choices[0].finish_reason + '] ' + (r2.choices[0].message.content || JSON.stringify(r2.choices[0].message)));
   } else {
     log('[第二轮] （跳过——第一轮未调用工具）');
   }
