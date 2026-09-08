@@ -69,7 +69,7 @@ export function createDeepSeekAdapter(deps: AdapterDeps): ProviderAdapter {
     async *streamCompletion(ctx, req) {
       const model = { modelType: req.model.modelType, thinking: req.model.thinking };
       const headers = await withPowHeaders(ctx);
-      const res = await fetchStreamSafe('/chat/completion', headers, completionPayload(req.session, req.prompt, model));
+      const res = await fetchStreamSafe('/chat/completion', headers, completionPayload(req.session, req.prompt, model, req.overrides));
       if (res.status !== 200) {
         throw classifyErr(Object.assign(new Error(`completion http ${res.status}`), { status: res.status, headers: res.headers }));
       }

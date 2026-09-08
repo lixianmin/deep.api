@@ -4,7 +4,22 @@ export type ProviderId = 'deepseek' | (string & {});
 export interface ProviderContext { token: string; requestId: string }
 export type AuthStatus = { state: 'logged_in' } | { state: 'logged_out' } | { state: 'expired'; message: string };
 export interface ProviderSession { providerId: ProviderId; webSessionId: string; parentMessageId: number | string | null }
-export interface ProviderCompletion { session: ProviderSession; prompt: string; model: { modelType: 'default' | 'expert' | 'vision'; thinking: boolean }; requestId: string }
+/** 调用方可覆盖的模型层开关；undefined 表示沿用 ResolvedModel/LIMITS 默认。 */
+export interface CompletionOverrides {
+  /** 覆盖 thinking_enabled；null/false 显式关闭，true 开启。undefined 沿用默认。 */
+  thinking?: boolean | null;
+  /** 覆盖 search_enabled。 */
+  search?: boolean;
+  /** 思考力度（OpenAI 兼容字段）；透传到请求体（网页端字段是否生效待实测）。 */
+  reasoningEffort?: 'low' | 'medium' | 'high' | 'max';
+}
+export interface ProviderCompletion {
+  session: ProviderSession;
+  prompt: string;
+  model: { modelType: 'default' | 'expert' | 'vision'; thinking: boolean };
+  overrides?: CompletionOverrides;
+  requestId: string;
+}
 export interface ResolvedModel { modelId: string; modelType: 'default' | 'expert' | 'vision'; thinking: boolean; limitChars: number }
 export interface ProviderAdapter {
   readonly id: ProviderId;

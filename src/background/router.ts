@@ -53,7 +53,13 @@ export class Router {
     if (!Array.isArray(messages) || messages.length === 0) throw err('invalid_request_error', 'messages array required', 400);
     const ctx = { token, requestId: `req-${started}-${Math.random().toString(36).slice(2, 8)}` };
     const toolCtx = buildToolPrompt((p.tools as ToolDef[] | undefined) ?? [], (p.tool_choice as ToolChoice | undefined) ?? 'auto');
-    const handle = await this.runCompletion(provider, resolved, messages, toolCtx, p.conversation_id as string | undefined, ctx);
+    // 调用方可覆盖 thinking/search/reasoning_effort；undefined 字段被下游忽略
+    const overrides = {
+      thinking: (p.thinking ?? undefined) as boolean | null | undefined,
+      search: (p.search ?? undefined) as boolean | undefined,
+      reasoningEffort: (p.reasoning_effort ?? undefined) as 'low' | 'medium' | 'high' | 'max' | undefined,
+    };
+    const handle = await this.runCompletion(provider, resolved, messages, toolCtx, p.conversation_id as string | undefined, ctx, overrides);
     const done = (ok: boolean, ms: number, error?: string) => this.d.log.push({ at: this.d.now(), provider: provider.id, model: modelId, ok, ms, error });
     if (p.stream === true) return this.encodeStream(provider, handle, ctx, modelId, started, messages, toolCtx, done);
     const agg: StreamAggregate = { content: '', reasoning: '', toolCalls: [], finishReason: null };
@@ -76,6 +82,7 @@ export class Router {
   private async runCompletion(
     provider: ProviderAdapter, resolved: ResolvedModel, messages: Message[], toolCtx: ToolContext,
     conversationId: string | undefined, ctx: ProviderContext,
+    overrides?: { thinking?: boolean | null; search?: boolean; reasoningEffort?: 'low' | 'medium' | 'high' | 'max' },
   ): Promise<{ stream: AsyncIterable<ProviderStreamEvent>; session: ProviderSession; convId: string; thread: ThreadEntry; run: RunState }> {
     const pid = provider.id;
     const decision = this.d.mapper.decide(pid, messages, conversationId);
@@ -103,7 +110,7 @@ export class Router {
       throw err('invalid_request_error', `transcript too long: ${prompt.length} > ${resolved.limitChars}（建议缩短历史或分批）`, 400);
     }
     const run: RunState = { parentMessageId: null, repairDone: false, model: resolved };
-    const req: ProviderCompletion = { session, prompt, model: { modelType: resolved.modelType, thinking: resolved.thinking }, requestId: ctx.requestId };
+    const req: ProviderCompletion = { session, prompt, model: { modelType: resolved.modelType, thinking: resolved.thinking }, overrides, requestId: ctx.requestId };
     const stream = this.runExclusiveStream(provider, ctx, req);
     return { stream, session, convId, thread, run };
   }

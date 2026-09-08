@@ -22,17 +22,28 @@ export function resolveModel(modelId: string): ResolvedModel | null {
   return { modelId, ...cfg };
 }
 
-export function completionPayload(session: ProviderSession, prompt: string, model: { modelType: 'default' | 'expert' | 'vision'; thinking: boolean }) {
-  return {
+export function completionPayload(
+  session: ProviderSession,
+  prompt: string,
+  model: { modelType: 'default' | 'expert' | 'vision'; thinking: boolean },
+  overrides?: { thinking?: boolean | null; search?: boolean; reasoningEffort?: 'low' | 'medium' | 'high' | 'max' },
+) {
+  // thinking: undefined → 用模型默认；null/false 显式关；true 显式开
+  const thinkingEnabled = overrides?.thinking === undefined ? model.thinking : Boolean(overrides.thinking);
+  const searchEnabled = overrides?.search === undefined ? false : Boolean(overrides.search);
+  const payload: Record<string, unknown> = {
     chat_session_id: session.webSessionId,
     parent_message_id: session.parentMessageId ?? null,
     model_type: model.modelType,
     prompt,
     ref_file_ids: [] as string[],
-    thinking_enabled: model.thinking,
-    search_enabled: false,
+    thinking_enabled: thinkingEnabled,
+    search_enabled: searchEnabled,
     preempt: false,
   };
+  // reasoning_effort 是 OpenAI 兼容字段；网页端是否生效待实测（多余字段会被忽略）
+  if (overrides?.reasoningEffort) payload.reasoning_effort = overrides.reasoningEffort;
+  return payload;
 }
 
 export // 与 SW 侧 authHeaders/probeHeaders 对齐：DeepSeek 对带 X-Client-* 的请求返回 HTML/401（用户 curl 实测）
