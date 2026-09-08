@@ -34,7 +34,7 @@ export class SessionMapper {
       const t = this.threads.get(this.key(providerId, conversationId));
       if (!t) return { action: 'rebuild', existing: null };
       const namedTail = messages.slice(t.mirror.length);
-      if (mirrorIsPrefix(t.mirror, messages) && namedTail.length > 0 && namedTail[0]!.role === 'user') {
+      if (mirrorIsPrefix(t.mirror, messages) && namedTail.length > 0 && (namedTail[0]!.role === 'user' || namedTail[0]!.role === 'tool')) {
         return { action: 'incremental', thread: t, tail: namedTail };
       }
       return { action: 'rebuild', existing: t };
@@ -49,7 +49,7 @@ export class SessionMapper {
     if (best) {
       const tail = messages.slice(best.mirror.length);
       if (tail.length === 0) return { action: 'rebuild', existing: best };        // 完整重放（spec §4.3）
-      if (tail[0]!.role !== 'user') return { action: 'rebuild', existing: best }; // 尾部必须以 user 开头
+      if (tail[0]!.role !== 'user' && tail[0]!.role !== 'tool') return { action: 'rebuild', existing: best }; // 尾部必须以 user 或 tool 开头
       return { action: 'incremental', thread: best, tail };
     }
     return { action: 'rebuild', existing: null };

@@ -77,6 +77,29 @@ describe('SessionMapper', () => {
     expect(deps.deleteSession).toHaveBeenCalledWith('s1');
     expect(mapper.stats().threads).toBe(0);
   });
+  it('incremental allows tool-head tail (tool-loop continuation)', () => {
+    const { mapper } = mk();
+    mapper.register('deepseek', 'auto:1', 's1', [m('user', 'a1'), m('assistant', '', { tool_calls: [{ id: 'c1', type: 'function', function: { name: 'f', arguments: '{}' } }] })]);
+    mapper.commit('deepseek', 'auto:1', [m('user', 'a1'), m('assistant', '', { tool_calls: [{ id: 'c1', type: 'function', function: { name: 'f', arguments: '{}' } }] })], 's1', 5);
+    const d = mapper.decide('deepseek', [
+      m('user', 'a1'),
+      m('assistant', '', { tool_calls: [{ id: 'c1', type: 'function', function: { name: 'f', arguments: '{}' } }] }),
+      m('tool', 'result', { tool_call_id: 'c1' }),
+      m('user', 'a2'),
+    ]);
+    expect(d.action).toBe('incremental');
+    if (d.action === 'incremental') {
+      expect(d.thread.webSessionId).toBe('s1');
+      expect(d.tail).toEqual([m('tool', 'result', { tool_call_id: 'c1' }), m('user', 'a2')]);
+    }
+  });
+  it('assistant-head tail still rebuilds (only user/tool allowed as tail head)', () => {
+    const { mapper } = mk();
+    mapper.register('deepseek', 'auto:1', 's1', [m('user', 'a'), m('assistant', 'b')]);
+    mapper.commit('deepseek', 'auto:1', [m('user', 'a'), m('assistant', 'b')], 's1', 1);
+    const d = mapper.decide('deepseek', [m('user', 'a'), m('assistant', 'b'), m('assistant', 'next')]);
+    expect(d.action).toBe('rebuild');
+  });
   it('returns error decision on empty messages', () => {
     const { mapper } = mk();
     expect(mapper.decide('deepseek', []).action).toBe('error');
