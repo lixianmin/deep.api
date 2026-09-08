@@ -64,13 +64,17 @@
 </div>
 
 <div class="panel">
-  <h2>③ 视觉模型（仅 deepseek-v4-flash-vision-exp）</h2>
+  <h2>③ 视觉模型（仅 deepseek-v4-flash-vision-exp） <span style="color:#888;font-weight:normal">— 未启用（v0.1.37）</span></h2>
   <div class="row">
-    <input type="file" id="img" accept="image/jpeg,image/png,image/gif,image/webp">
-    <input type="text" id="imgQ" placeholder="对图片的提问" value="请描述这张图片">
-    <button data-act="vision">提交</button>
+    <input type="file" id="img" accept="image/jpeg,image/png,image/gif,image/webp" disabled>
+    <input type="text" id="imgQ" placeholder="对图片的提问" value="请描述这张图片" disabled>
+    <button data-act="vision" disabled>提交</button>
   </div>
-  <p class="small">图片以 OpenAI image_url content block 形式传入（data:URL）。网页 web API 是否完整支持未实测。</p>
+  <div class="warn">
+    视觉模型未启用（v1 不接入）。
+    <br>原因：deep.api 走网页 web API（<code>/api/v0/chat/completion</code>），其 <code>prompt</code> 字段是单字符串，不接受 OpenAI 风格 <code>messages[].content</code> 数组（含 <code>image_url</code> block）。网页端使用 <code>ref_file_ids</code> 数组引用已上传的图片，需要独立的上传端点。
+    <br>计划：v2 spike 调研上传接口（<code>POST /api/v0/files/upload</code> 或类似）+ 实现 <code>ref_file_ids</code> 透传链路 + <code>model_type:'vision'</code> 支持。详 docs/01.memory.md。
+  </div>
 </div>
 
 <pre id="out"></pre>
@@ -146,8 +150,7 @@ document.querySelectorAll('button[data-act]').forEach(btn => {
         const r = await window.deepApi.chat.completions.create({ model: m, messages: [{ role: 'user', content: '刚才那个数字是什么？' }], conversation_id: cid, ...opts });
         log('[续聊] ' + r.choices[0].message.content);
       } else if (act === 'vision') {
-        const f = $('img').files[0];
-        if (!f) { log('[错误] 请选择图片'); return; }
+        log('[vision] 未启用：deep.api 网页 web API 不支持 in-line image（详见面板说明）。');
         const dataUrl = await new Promise((res, rej) => {
           const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(f);
         });
