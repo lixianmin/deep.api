@@ -20,6 +20,7 @@ port.onMessage.addListener((m: any) => {
 function send(kind: string, payload: unknown = {}) { port.postMessage({ kind, payload }); }
 
 function render() {
+  console.log('[deep.api popup] render, state:', JSON.stringify(state).slice(0, 200));
   const provider = state.providers?.deepseek;
   const auth = provider?.lastAuthStatus;
   const authEl = document.getElementById('auth-state')!;
@@ -68,6 +69,7 @@ for await (const chunk of res) {
 
 document.getElementById('btn-login')!.addEventListener('click', () => send('panel.openLogin'));
 document.getElementById('btn-refresh-auth')!.addEventListener('click', () => send('panel.refreshAuth'));
+document.getElementById('btn-repush-auth')!.addEventListener('click', () => send('panel.repushAuth'));
 document.getElementById('btn-copy-snippet')!.addEventListener('click', () => navigator.clipboard.writeText((document.getElementById('snippet') as HTMLTextAreaElement).value));
 document.getElementById('pool-size')!.addEventListener('change', (e) => send('panel.setPool', { poolSize: Number((e.target as HTMLInputElement).value) }));
 document.getElementById('ttl-min')!.addEventListener('change', (e) => send('panel.setTtl', { ttlMinutes: Number((e.target as HTMLInputElement).value) }));

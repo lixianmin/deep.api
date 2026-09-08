@@ -5,6 +5,7 @@ declare global { interface Window { deepApi: unknown; deepApiConfig?: Record<str
 
 type Pending = { resolve(v: unknown): void; reject(e: unknown): void; onChunk(c: ChatCompletionChunk): void; onDone(): void; cancelled: boolean };
 
+console.log('[deep.api bridge-main] module loaded on', location.host, 'at', new Date().toISOString());
 const AUTH_KEY = 'userToken';
 
 /** 从 chat.deepseek.com localStorage 解析当前 userToken，格式 {"value":"<JWT>","__version":"0"}。 */
@@ -29,7 +30,8 @@ export function bridgeMainFactory(target: Window): void {
     const id = ++seq;
     try {
       port.postMessage({ __deepApi: { id, method, params } });
-    } catch {
+      console.log('[deep.api bridge-main] sent method=' + method + ' id=' + id);
+    } catch (e) {
       // Extension context invalidated — SW reloaded. Reset and let caller retry.
       port = null;
       return null;
@@ -68,9 +70,14 @@ export function bridgeMainFactory(target: Window): void {
           port = null;
           // 短暂延迟后重连，避免 SW 启动期 race
           setTimeout(() => {
+            console.log('[deep.api bridge-main] reconnecting port...');
             port = openPort();
-            // 重连后立即重推 token（SW 可能丢失内存缓存）
-            if (port) pushAuth();
+            if (port) {
+              console.log('[deep.api bridge-main] reconnected');
+              pushAuth();
+            } else {
+              console.warn('[deep.api bridge-main] reconnect failed (SW unavailable)');
+            }
           }, 1000);
         }
       });
@@ -104,7 +111,7 @@ export function bridgeMainFactory(target: Window): void {
     if (env.kind === undefined) return;   // 请求包由 relay 转发
     const p = pending.get(env.id);
     if (!p) return;
-    if (env.kind === 'chunk') { if (!p.cancelled) p.onChunk(env.chunk as ChatCompletionChunk); return; }
+    if (env.kind === 'chunk') { if (!p.cancelled) p.onChunk(env.chunk as ChatCompletionChunk); console.log('[deep.api bridge-main] chunk', env.chunk?.choices?.[0]?.delta?.content ?? ''); return; }
     pending.delete(env.id);
     if (env.kind === 'done') {
       if (p.cancelled) p.reject(new BridgeError({ error: { message: 'cancelled', type: 'api_error', code: 'invalid_request_error' } }, 400));

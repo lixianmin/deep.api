@@ -247,6 +247,23 @@ chrome.runtime.onConnect.addListener((port) => {
       } else if (msg?.kind === 'panel.refreshAuth') {
         await refreshAuthAndLog();
         await broadcastPanelState();
+      } else if (msg?.kind === 'panel.repushAuth') {
+        // 强制对所有 chat.deepseek.com 标签页重新注入 content script（不需要用户手动 F5）
+        try {
+          const tabs = await chrome.tabs.query({ url: 'https://chat.deepseek.com/*' });
+          console.log('[deep.api sw] repushAuth: found', tabs.length, 'chat.deepseek.com tab(s)');
+          for (const t of tabs) {
+            if (t.id !== undefined) {
+              try {
+                await chrome.scripting.executeScript({
+                  target: { tabId: t.id, allFrames: true },
+                  files: ['bridge-main.js'],
+                });
+                console.log('[deep.api sw] repushAuth: re-injected into tab', t.id, t.url);
+              } catch (e) { console.warn('[deep.api sw] repushAuth: failed for tab', t.id, e); }
+            }
+          }
+        } catch (e) { console.warn('[deep.api sw] repushAuth error', e); }
       } else if (msg?.kind === 'panel.setPool') {
         await setProviderConfig('deepseek', { poolSize: msg.payload.poolSize });
       } else if (msg?.kind === 'panel.setTtl') {
