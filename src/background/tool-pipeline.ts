@@ -25,9 +25,30 @@ export function buildToolPrompt(tools: ToolDef[], toolChoice: ToolChoice): ToolC
   return { promptSuffix: `\n\n${formatBlock}\n\n${defsBlock}\n\n${instructionBlock}\n` };
 }
 
-/** 内容中是否存在工具调用标签（用于区分"模型未调用工具"与"调用了但 JSON 解析失败"）。 */
+/** 内容中是否存在"可能为工具调用"的标签块（用于区分"模型未调用工具"与"调用了但 JSON 解析失败"）。
+ *  相比朴素 findBlocks，额外要求块内 JSON 至少能 coerce 出一个 ToolCall，避免纯文本提及 tool_calls 误判。 */
 export function hasToolTags(content: string): boolean {
-  return findBlocks(content).length > 0;
+  const blocks = findBlocks(content);
+  if (!blocks.length) return false;
+  for (const b of blocks) {
+    const jsonStr = stripCodeFences(b.raw);
+    let parsed: unknown = null;
+    try { parsed = JSON.parse(jsonStr); } catch {
+      const r1 = repairInvalidBackslashes(jsonStr);
+      try { parsed = JSON.parse(r1); } catch {
+        const r2 = repairUnquotedKeys(r1);
+        try { parsed = JSON.parse(r2); } catch {
+          const obj = tryParseSingleObject(r2);
+          if (obj !== undefined) parsed = [obj];
+        }
+      }
+    }
+    if (parsed !== null) {
+      const arr = Array.isArray(parsed) ? parsed : [parsed];
+      for (const item of arr) if (coerceToToolCall(item)) return true;
+    }
+  }
+  return false;
 }
 
 /** Parse tool-call blocks. Returns null if no tag found or irrecoverable. */
@@ -75,26 +96,30 @@ function stripCodeFences(s: string): string {
 }
 
 function findBlocks(content: string): Located[] {
-  // 跳过代码块后再定位
+  // 跳过代码块后再定位（masked 保位不保内容，raw 从原 content 切片）
   const masked = stripCodeFences(content);
   const out: Located[] = [];
-  for (let i = 0; i < TOOL_TAGS.starts.length; i++) {
-    const startTag = TOOL_TAGS.starts[i]!;
-    const endTag = TOOL_TAGS.ends[i]!;
+  const patterns: Array<{ start: RegExp; end: RegExp }> = [
+    { start: /<\|tool_call_begin\|>/i, end: /<\|tool_call_end\|>/i },
+    { start: /<{0,1}\s*tool_calls\s*>?/i, end: /<{0,1}\s*\/tool_calls\s*>?/i },   // 容忍缺 < / 空格 / 大小写
+    { start: /<{0,1}\s*tool_call\s*>?/i, end: /<{0,1}\s*\/tool_call\s*>?/i },
+  ];
+  for (const { start: startRe, end: endRe } of patterns) {
     let cursor = 0;
     while (true) {
-      const idx = masked.indexOf(startTag, cursor);
-      if (idx < 0) break;
-      const endIdx = masked.indexOf(endTag, idx + startTag.length);
-      if (endIdx < 0) break;
-      const realStart = idx;
-      const realEnd = endIdx + endTag.length;
-      const raw = content.slice(realStart + startTag.length, endIdx);
-      out.push({ start: realStart, end: realEnd, raw });
-      cursor = realStart + 1;
+      const m = startRe.exec(masked.slice(cursor));
+      if (!m) break;
+      const idx = cursor + m.index;
+      const after = masked.slice(idx + m[0].length);
+      const em = endRe.exec(after);
+      if (!em) break;
+      const endIdx = idx + m[0].length + em.index;
+      const realEnd = endIdx + em[0].length;
+      const raw = content.slice(idx + m[0].length, endIdx);
+      out.push({ start: idx, end: realEnd, raw });
+      cursor = idx + 1;
     }
   }
-  // 按 start 排序、合并重叠
   out.sort((a, b) => a.start - b.start);
   const merged: Located[] = [];
   for (const b of out) {

@@ -14,14 +14,13 @@ describe('buildToolPrompt', () => {
 
 describe('parseToolCalls', () => {
   it('parses clean json array', () => {
-    const text = '先思考\n<tool_calls>[{"id":"c1","type":"function","function":{"name":"f","arguments":"{\\"a\\":1}"}}]</tool_calls>';
+    const text = ['先思考', '<tool_calls>[{"id":"c1","type":"function","function":{"name":"f","arguments":"{\\"a\\":1}"}}]</tool_calls>'].join('\n');
     const r = parseToolCalls(text);
     expect(r).not.toBeNull();
     expect(r!.calls[0]!.function.name).toBe('f');
   });
 
   it('repairs arguments with valid JSON string after unescape', () => {
-    // arguments is a JSON string; ensure JSON.parse recovers after code-fence masking
     const text = '<tool_calls>[{"id":"c1","type":"function","function":{"name":"f","arguments":"{\\"x\\":1,\\"y\\":2}"}}]</tool_calls>';
     const r = parseToolCalls(text);
     expect(r).not.toBeNull();
@@ -29,7 +28,7 @@ describe('parseToolCalls', () => {
   });
 
   it('skips tags inside code fences', () => {
-    const text = '```\n<tool_calls>x</tool_calls>\n```\n<tool_calls>[{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]</tool_calls>';
+    const text = ['```', '<tool_calls>x</tool_calls>', '```', '<tool_calls>[{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]</tool_calls>'].join('\n');
     const r = parseToolCalls(text);
     expect(r).not.toBeNull();
     expect(r!.calls).toHaveLength(1);
@@ -49,5 +48,13 @@ describe('parseToolCalls', () => {
   it('TOOL_TAGS exposes start/end pairs', () => {
     expect(TOOL_TAGS.starts).toEqual(expect.arrayContaining(['<|tool_call_begin|>', '<tool_calls>', '<tool_call>']));
     expect(TOOL_TAGS.ends).toEqual(expect.arrayContaining(['<|tool_call_end|>', '</tool_calls>', '</tool_call>']));
+  });
+
+  it('parses missing-< opening tag variant (model output deformation)', () => {
+    const text = ['tool_calls>', '[{"id":"c1","type":"function","function":{"name":"f","arguments":"{\\"a\\":1}"}}]', '</tool_calls>', '', '根据查询结果，北京明天晴。'].join('\n');
+    const r = parseToolCalls(text);
+    expect(r).not.toBeNull();
+    expect(r!.calls[0]!.function.name).toBe('f');
+    expect(r!.remainder).toContain('根据查询结果');
   });
 });
