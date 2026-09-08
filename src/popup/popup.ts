@@ -73,5 +73,9 @@ document.getElementById('pool-size')!.addEventListener('change', (e) => send('pa
 document.getElementById('ttl-min')!.addEventListener('change', (e) => send('panel.setTtl', { ttlMinutes: Number((e.target as HTMLInputElement).value) }));
 
 send('panel.getState');
+// 读取同目录的 manifest.json 显示版本号
+fetch(chrome.runtime.getURL('manifest.json')).then(r => r.json()).then(m => {
+  document.getElementById('version')!.textContent = 'v' + m.version;
+}).catch(() => {});
 // 后台心跳：每 2s 主动拉一次最新状态（防御 SW 探测未完成时 popup 早开的情况）
 setInterval(() => send('panel.getState'), 2000);

@@ -5,7 +5,8 @@
   "scripts": {
     "build": "node build.mjs",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "bump": "node scripts/bump-version.mjs"
   },
   "devDependencies": {
     "@types/chrome": "^0.0.280",
@@ -13,5 +14,6 @@
     "jsdom": "^25.0.1",
     "typescript": "^5.6.0",
     "vitest": "^2.1.0"
-  }
+  },
+  "version": "0.1.2"
 }
