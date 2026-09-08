@@ -53,4 +53,18 @@ describe('completionEvents', () => {
     }
     expect(evs.filter(k => k === 'content_delta' || k === 'think_delta' || k === 'usage')).toHaveLength(4);
   });
+  it('aborts with error when the body stalls beyond timeout', async () => {
+    // 真实短定时器（避免 fake timers 干扰；根因见 fix report：finally 不得 await 未决源的 return()）
+    const stalled = (async function* () { await new Promise(() => {}); })();
+    const it = completionEvents(stalled, 100, () => {})[Symbol.asyncIterator]();
+    await expect(it.next()).rejects.toThrow(/no progress/);
+  });
+  it('parses a trailing frame without a final blank line', async () => {
+    const enc = new TextEncoder();
+    const head = 'event: chunk\ndata: {"response/fragments":{"op":"add","path":"response/fragments","value":{"id":9,"type":"response","content":""}}}\n\n';
+    const tail = 'event: chunk\ndata: {"response/fragments/-1/content":{"op":"add","path":"response/fragments/-1/content","value":"尾帧"}}';
+    const evs: ProviderStreamEvent[] = [];
+    for await (const e of completionEvents(async function* () { yield enc.encode(head); yield enc.encode(tail); }(), 10_000, () => {})) evs.push(e);
+    expect(evs.some(e => e.kind === 'content_delta' && e.content === '尾帧')).toBe(true);
+  });
 });

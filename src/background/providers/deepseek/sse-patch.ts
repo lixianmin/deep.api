@@ -55,36 +55,63 @@ export async function* completionEvents(
   onReady: (ids: { requestMessageId: number; responseMessageId: number }) => void,
 ): AsyncIterable<ProviderStreamEvent> {
   const dec = new TextDecoder();
+  const { processBlock } = makeProcessor(onReady);
+  const iter = body[Symbol.asyncIterator]();
   let buf = '';
-  let lastActivity = Date.now();
-  let sentReady = false;
-  const tree = new ResponseTree();
-  const timer = setInterval(() => {
-    if (Date.now() - lastActivity > timeoutMs) throw new Error('stream timeout: no progress');
-  }, 5000);
   try {
-    for await (const chunk of body) {
-      lastActivity = Date.now();
-      buf += dec.decode(chunk, { stream: true });
+    while (true) {
+      const nextP = iter.next();
+      let result: IteratorResult<Uint8Array>;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        // 每轮消费都以 timeout 竞速：body 停顿时本轮 reject，消费者能收到超时错误（契约“无进度断流”）
+        const timeoutP = new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('stream timeout: no progress')), timeoutMs);
+        });
+        result = await Promise.race([nextP, timeoutP]);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+      if (result.done) break;
+      buf += dec.decode(result.value, { stream: true });
       let idx: number;
       while ((idx = buf.indexOf('\n\n')) >= 0) {
         const block = buf.slice(0, idx); buf = buf.slice(idx + 2);
-        for (const ev of parseSseText(block)) {
-          let data: unknown; try { data = JSON.parse(ev.data); } catch { continue; }
-          if (!sentReady) {
-            const ids = extractReadyIds(data);
-            if (ids) { sentReady = true; onReady(ids); yield { kind: 'message_id', id: ids.responseMessageId }; continue; }
-          }
-          if (typeof data === 'object' && data !== null) {
-            for (const [path, v] of Object.entries(data as Record<string, unknown>)) {
-              if (typeof v === 'object' && v !== null) {
-                const op = v as { op?: string; path?: string; value?: unknown };
-                yield* tree.apply({ op: op.op ?? 'replace', path: op.path ?? path, value: op.value });
-              }
-            }
+        yield* processBlock(block);
+      }
+    }
+    // 流结束：flush 残余尾帧（无 \n\n 终止也解析，不静默丢失）
+    buf += dec.decode();
+    if (buf.trim() !== '') yield* processBlock(buf);
+  } finally {
+    // best-effort 关闭底层迭代器；不 await：源停在未决 await 上时 spec 规定 return() 须等其完成（会死锁），故 fire-and-forget
+    void iter.return?.().catch(() => {});
+  }
+}
+
+function makeProcessor(onReady: (ids: { requestMessageId: number; responseMessageId: number }) => void): {
+  processBlock(block: string): ProviderStreamEvent[];
+} {
+  const tree = new ResponseTree();
+  let sentReady = false;
+  const processBlock = (block: string): ProviderStreamEvent[] => {
+    const out: ProviderStreamEvent[] = [];
+    for (const ev of parseSseText(block)) {
+      let data: unknown; try { data = JSON.parse(ev.data); } catch { continue; }
+      if (!sentReady) {
+        const ids = extractReadyIds(data);
+        if (ids) { sentReady = true; onReady(ids); out.push({ kind: 'message_id', id: ids.responseMessageId }); continue; }
+      }
+      if (typeof data === 'object' && data !== null) {
+        for (const [path, v] of Object.entries(data as Record<string, unknown>)) {
+          if (typeof v === 'object' && v !== null) {
+            const op = v as { op?: string; path?: string; value?: unknown };
+            out.push(...tree.apply({ op: op.op ?? 'replace', path: op.path ?? path, value: op.value }));
           }
         }
       }
     }
-  } finally { clearInterval(timer); }
+    return out;
+  };
+  return { processBlock };
 }
