@@ -55,7 +55,45 @@ export function hasToolTags(content: string): boolean {
 export function parseToolCalls(content: string): { calls: ToolCall[]; remainder: string } | null {
   if (!content) return null;
   const blocks = findBlocks(content);
-  if (!blocks.length) return null;
+  if (blocks.length) return parseBlocks(content, blocks);
+  // 无标签块 → fallback：模型可能用代码块包裹工具调用 JSON（本地实测 2026-09）
+  const fence = findCodeFenceBlocks(content);
+  if (fence.length) {
+    const parsed = parseBlocks(content, fence);
+    if (parsed) return parsed;
+  }
+  // 第三层 fallback：模型可能输出裸 JSON（整个 content 就是工具调用 JSON，无任何包裹——2026-09 实测）
+  const bare = parseBareJson(content);
+  if (bare) return bare;
+  return null;
+}
+
+/** 尝试把整个 content 当作裸 JSON（对象/数组）解析为 ToolCall；非纯 JSON 返回 null。 */
+function parseBareJson(content: string): { calls: ToolCall[]; remainder: string } | null {
+  const trimmed = content.trim();
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return null;
+  let parsed: unknown = null;
+  try { parsed = JSON.parse(trimmed); } catch {
+    const r1 = repairInvalidBackslashes(trimmed);
+    try { parsed = JSON.parse(r1); } catch {
+      const r2 = repairUnquotedKeys(r1);
+      try { parsed = JSON.parse(r2); } catch { return null; }
+    }
+  }
+  const arr = Array.isArray(parsed) ? parsed : [parsed];
+  const calls: ToolCall[] = [];
+  for (const item of arr) {
+    const tc = coerceToToolCall(item);
+    if (tc) calls.push(tc);
+  }
+  if (!calls.length) return null;
+  // remainder：去掉 JSON 部分（保留前后文本）
+  const start = content.indexOf(trimmed);
+  return { calls, remainder: content.slice(0, start) + content.slice(start + trimmed.length) };
+}
+
+/** 解析已知块（标签块或代码块）为 ToolCall 数组；返回 null 表示块内容不是合法工具调用。 */
+function parseBlocks(content: string, blocks: Located[]): { calls: ToolCall[]; remainder: string } | null {
   const calls: ToolCall[] = [];
   for (const { raw } of blocks) {
     const jsonStr = stripCodeFences(raw);
@@ -95,6 +133,16 @@ function stripCodeFences(s: string): string {
   return s.replace(/```[\s\S]*?```/g, m => ' '.repeat(m.length));
 }
 
+/** 查找 ```json/``` 代码块（模型输出工具调用的常见形态；parseToolCalls 的 fallback）。 */
+function findCodeFenceBlocks(content: string): Located[] {
+  const out: Located[] = [];
+  const re = /```(?:json)?\s*([\s\S]*?)```/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(content)) !== null) {
+    out.push({ start: m.index, end: m.index + m[0].length, raw: m[1] ?? '' });
+  }
+  return out;
+}
 function findBlocks(content: string): Located[] {
   // 跳过代码块后再定位（masked 保位不保内容，raw 从原 content 切片）
   const masked = stripCodeFences(content);

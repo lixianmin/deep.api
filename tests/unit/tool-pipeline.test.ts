@@ -57,4 +57,22 @@ describe('parseToolCalls', () => {
     expect(r!.calls[0]!.function.name).toBe('f');
     expect(r!.remainder).toContain('根据查询结果');
   });
+
+  it('parses bare JSON object (model outputs tool call JSON without wrapping, 2026-09)', () => {
+    const inner = JSON.stringify({ city: '北京' });
+    const text = JSON.stringify({ id: 'weather_001', type: 'function', function: { name: 'get_weather', arguments: inner } });
+    const r = parseToolCalls(text);
+    expect(r).not.toBeNull();
+    expect(r!.calls[0]!.function.name).toBe('get_weather');
+    expect(r!.calls[0]!.function.arguments).toContain('北京');
+    expect(r!.remainder).toBe('');
+  });
+
+  it('parses JSON inside code fences (model wraps in code block)', () => {
+    const text = '\`\`\`json\n[{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]\n\`\`\`';
+    const r = parseToolCalls(text);
+    expect(r).not.toBeNull();
+    expect(r!.calls[0]!.function.name).toBe('f');
+  });
+
 });
