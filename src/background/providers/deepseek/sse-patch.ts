@@ -96,6 +96,8 @@ function makeProcessor(onReady: (ids: { requestMessageId: number; responseMessag
   let sentReady = false;
   const processBlock = (block: string): ProviderStreamEvent[] => {
     const out: ProviderStreamEvent[] = [];
+    // 调试：打印原始 SSE block（仅本地排查；正式版可去掉）
+    console.log('[deep.api sse]', block.slice(0, 400).replace(/\n/g, '\\n'));
     for (const ev of parseSseText(block)) {
       let data: unknown; try { data = JSON.parse(ev.data); } catch { continue; }
       if (!sentReady) {
