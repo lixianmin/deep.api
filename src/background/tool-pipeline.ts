@@ -18,9 +18,11 @@ export function buildToolPrompt(tools: ToolDef[], toolChoice: ToolChoice): ToolC
   const defsBlock = `### 工具定义\n${defs}`;
   const instruction = toolChoice === 'auto'
     ? '当需要工具时调用；可以零次或多次调用；最后给出一段自然语言总结。'
-    : typeof toolChoice === 'object'
-      ? `仅可调用工具 ${toolChoice.function.name}。`
-      : '按需调用。';
+    : toolChoice === 'required'
+      ? '必须调用至少一个工具；不允许只给出纯文本回答（仅工具调用、不附总结也可）。'
+      : typeof toolChoice === 'object'
+        ? `仅可调用工具 ${toolChoice.function.name}。`
+        : '按需调用。';
   const instructionBlock = `### 调用指令\n${instruction}`;
   return { promptSuffix: `\n\n${formatBlock}\n\n${defsBlock}\n\n${instructionBlock}\n` };
 }

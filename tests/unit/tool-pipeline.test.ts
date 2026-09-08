@@ -10,6 +10,12 @@ describe('buildToolPrompt', () => {
     const specific = buildToolPrompt(tools, { type: 'function', function: { name: 'f' } });
     expect(specific.promptSuffix).toContain('f');
   });
+
+  it('tool_choice required forces must-call instruction (v0.1.36)', () => {
+    const r = buildToolPrompt(tools, 'required');
+    expect(r.promptSuffix).toContain('必须调用至少一个工具');
+    expect(r.promptSuffix).toContain('f');  // 工具定义仍然透传
+  });
 });
 
 describe('parseToolCalls', () => {

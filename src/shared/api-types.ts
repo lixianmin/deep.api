@@ -6,7 +6,12 @@ export interface Message {
   tool_calls?: ToolCall[];                 // role='assistant' 时
 }
 export interface ToolDef { type: 'function'; function: { name: string; description?: string; parameters?: unknown } }
-export type ToolChoice = 'none' | 'auto' | { type: 'function'; function: { name: string } };
+/** OpenAI 兼容工具调用策略：
+ *  - 'none'：不注入工具提示（不调用工具）
+ *  - 'auto'（默认）：模型自主决定是否调用；不保证调用
+ *  - 'required'：强制调用至少一个工具（prompt-engineered 强指令；模型可能不遵守）
+ *  - { type: 'function', function: { name } }：仅可调用指定工具（spec §4.4） */
+export type ToolChoice = 'none' | 'auto' | 'required' | { type: 'function'; function: { name: string } };
 export interface ChatCompletionUsage { prompt_tokens: number; completion_tokens: number; total_tokens: number }
 export type FinishReason = 'stop' | 'tool_calls' | string;
 export interface ChatCompletionChunk {
