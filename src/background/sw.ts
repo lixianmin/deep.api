@@ -181,6 +181,20 @@ chrome.runtime.onStartup.addListener(() => { void refreshAuthAndLog(); });
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name === 'deepapi') {
+    // port 存活追踪：页面进 bfcache / 导航离开时 port 会被 Chrome 关闭，
+    // 后续 postMessage 会抛 Unchecked runtime.lastError。所有发送都走 safePost。
+    let portAlive = true;
+    port.onDisconnect.addListener(() => { portAlive = false; });
+    const safePost = (m: BridgeResponseMsg): boolean => {
+      if (!portAlive) return false;
+      try {
+        port.postMessage(m as unknown as unknown);
+        return true;
+      } catch {
+        portAlive = false;
+        return false;
+      }
+    };
     port.onMessage.addListener(async (msg: unknown) => {
       if (!isBridgeRequest(msg)) return;
       const env = (msg as { __deepApi: { id: number; method: string; params: unknown } }).__deepApi;
@@ -208,7 +222,7 @@ chrome.runtime.onConnect.addListener((port) => {
         const token = await loadCachedToken();
         if (!token) {
           const { error, status } = { error: { error: { message: '未登录 chat.deepseek.com，请先在浏览器中登录', type: 'api_error', code: 'provider_unavailable' } }, status: 503 };
-          port.postMessage({ __deepApi: { id: env.id, kind: 'error', error } } as unknown as BridgeResponseMsg);
+          safePost({ __deepApi: { id: env.id, kind: 'error', error } } as unknown as BridgeResponseMsg);
           return;
         }
         if (env.method === 'chat.completions.create') {
@@ -217,27 +231,27 @@ chrome.runtime.onConnect.addListener((port) => {
           if (params.stream) {
             const iter = resp as AsyncIterable<ChatCompletionChunk>;
             for await (const chunk of iter) {
-              port.postMessage({ __deepApi: { id: env.id, kind: 'chunk', chunk } } as unknown as BridgeResponseMsg);
+              if (!safePost({ __deepApi: { id: env.id, kind: 'chunk', chunk } } as unknown as BridgeResponseMsg)) break;
             }
-            port.postMessage({ __deepApi: { id: env.id, kind: 'done' } } as unknown as BridgeResponseMsg);
+            safePost({ __deepApi: { id: env.id, kind: 'done' } } as unknown as BridgeResponseMsg);
           } else {
-            port.postMessage({ __deepApi: { id: env.id, kind: 'result', value: resp } } as unknown as BridgeResponseMsg);
+            safePost({ __deepApi: { id: env.id, kind: 'result', value: resp } } as unknown as BridgeResponseMsg);
           }
         } else if (env.method === 'chat.completions.cancel') {
-          port.postMessage({ __deepApi: { id: env.id, kind: 'done' } } as unknown as BridgeResponseMsg);
+          safePost({ __deepApi: { id: env.id, kind: 'done' } } as unknown as BridgeResponseMsg);
         } else if (env.method === 'models.list') {
           const models = await router.models();
-          port.postMessage({ __deepApi: { id: env.id, kind: 'result', value: models } } as unknown as BridgeResponseMsg);
+          safePost({ __deepApi: { id: env.id, kind: 'result', value: models } } as unknown as BridgeResponseMsg);
         } else if (env.method === 'auth.requested') {
           // SW 不主动拉 token；仅返回当前缓存状态
-          port.postMessage({ __deepApi: { id: env.id, kind: 'result', value: { token: await loadCachedToken() } } } as unknown as BridgeResponseMsg);
+          safePost({ __deepApi: { id: env.id, kind: 'result', value: { token: await loadCachedToken() } } } as unknown as BridgeResponseMsg);
         }
       } catch (e) {
         const anyE = e as { error?: { error?: { message: string; type: string; code: string } }; status?: number };
         const errPayload = anyE.error && anyE.status !== undefined
           ? { error: anyE.error }
           : { error: { error: { message: (e as Error).message, type: 'api_error', code: 'internal_error' } } };
-        port.postMessage({ __deepApi: { id: env.id, kind: 'error', error: errPayload.error } } as unknown as BridgeResponseMsg);
+        safePost({ __deepApi: { id: env.id, kind: 'error', error: errPayload.error } } as unknown as BridgeResponseMsg);
       }
     });
   } else if (port.name === 'deepapi-panel') {
