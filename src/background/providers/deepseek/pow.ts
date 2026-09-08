@@ -7,43 +7,38 @@ export interface Challenge {
   target_path: string;
   salt: string;
   expire_at: number;
+  signature?: string;
 }
 export interface WasmInstance {
   addToStack(n: number): number;
-  alloc(len: number): number;
+  malloc(size: number, align: number): number;
   solve(retptr: number, cPtr: number, cLen: number, pPtr: number, pLen: number, difficulty: number): void;
   readPtr(ptr: number, len: number): Uint8Array;
+  memoryView(): Uint8Array;
 }
 export class PowFailedError extends Error {
   constructor(m: string) { super(m); this.name = 'PowFailedError'; }
 }
 
-// retptr 结果布局（单点定义，便于 Task 2 spike 用真实 wasm 校准）：
-// wasm-bindgen 返回结构约定：status(i32)@0 + answer(i64, 8 字节对齐)@8 + signature(64B)@16
-// 注：尚未经真实 wasm 实测；Task 2 spike 若显示偏移不同，只改这里并同步 fake 测试。
-const POW_STATUS_OFF = 0;
-const POW_STATUS_LEN = 4;
-const POW_ANSWER_OFF = 8;
-const POW_ANSWER_LEN = 8;
-const POW_SIGN_OFF = 16;
-const POW_SIGN_LEN = 64;
-
+// retptr 结果布局（对照 RezaParsian/DeepseekPowsolver 真实 wasm 实测）：
+// status(i32)@0 + answer(f64)@8； status=1 成功、0 失败
+//
 export async function instantiateDeepSeekWasm(bytes: Uint8Array): Promise<WasmInstance> {
-  const result = await WebAssembly.instantiate(bytes, {}) as unknown as WebAssembly.WebAssemblyInstantiatedSource;
+  const result = await WebAssembly.instantiate(bytes, { wbg: {} }) as unknown as WebAssembly.WebAssemblyInstantiatedSource;
   const { instance } = result;
   const exports = instance.exports as Record<string, unknown>;
   const memory = exports.memory as WebAssembly.Memory | undefined;
   if (!memory) throw new PowFailedError('wasm: memory export missing');
   const addToStack = exports.__wbindgen_add_to_stack_pointer as ((n: number) => number) | undefined;
-  const alloc = (exports.__wbindgen_malloc as ((l: number) => number) | undefined)
-    ?? Object.entries(exports).find(([k, v]) => k.startsWith('__wbindgen_export_') && typeof v === 'function')?.[1] as ((l: number) => number) | undefined;
+  const malloc = exports.__wbindgen_export_0 as ((size: number, align: number) => number) | undefined;
   const solve = exports.wasm_solve as ((r: number, c: number, cl: number, p: number, pl: number, d: number) => void) | undefined;
-  if (!addToStack || !alloc || !solve) throw new PowFailedError('wasm: required exports missing');
+  if (!addToStack || !malloc || !solve) throw new PowFailedError('wasm: required exports missing');
   return {
     addToStack: (n) => addToStack(n),
-    alloc: (l) => alloc(l),
+    malloc: (size, align) => malloc(size, align),
     solve: (r, c, cl, p, pl, d) => solve(r, c, cl, p, pl, d),
     readPtr: (ptr, len) => new Uint8Array(memory.buffer, ptr, len),
+    memoryView: () => new Uint8Array(memory.buffer),
   };
 }
 
@@ -69,34 +64,32 @@ export class PowSolver {
     try {
       const wasm = this.wasmCache ??= this.deps.instantiate(await this.deps.fetchBytes(this.deps.wasmUrl));
       const inst = await wasm;
-      const readI32 = (ptr: number) => {
-        const v = inst.readPtr(ptr, 4);
-        return new DataView(v.buffer, v.byteOffset, v.byteLength).getInt32(0, true);
-      };
-      const readI64 = (ptr: number) => {
-        const v = inst.readPtr(ptr, 8);
-        return new DataView(v.buffer, v.byteOffset, v.byteLength).getBigInt64(0, true);
+      // 对照 RezaParsian/DeepseekPowsolver（真实 wasm 实测）：
+      // 1) malloc 是 __wbindgen_export_0(size, align)，2 参数（align=1）
+      // 2) answer 是 f64（栈偏移 +8），status=1 成功、0 失败
+      // 3) malloc 可能 realloc 内存 → 每次操作后重新获取 buffer 视图
+      const passString = (str: string) => {
+        const b = new TextEncoder().encode(str);
+        // malloc 可能触发内存增长，必须 malloc 后再取 memoryView 写入
+        const ptr = inst.malloc(b.length, 1) >>> 0;
+        inst.memoryView().set(b, ptr);
+        return { ptr, len: b.length };
       };
       const prefix = `${challenge.salt}_${challenge.expire_at}_`;
-      const enc = new TextEncoder();
-      const cBytes = enc.encode(challenge.challenge);
-      const pBytes = enc.encode(prefix);
-      const retptr = inst.addToStack(-16);
-      const cPtr = inst.alloc(cBytes.length);
-      const pPtr = inst.alloc(pBytes.length);
-      const write = (ptr: number, bytes: Uint8Array) => {
-        const view = inst.readPtr(ptr, bytes.length);
-        new Uint8Array(view.buffer, view.byteOffset, bytes.length).set(bytes);
-      };
-      write(cPtr, cBytes);
-      write(pPtr, pBytes);
-      inst.solve(retptr, cPtr, cBytes.length, pPtr, pBytes.length, challenge.difficulty);
-      const status = readI32(retptr + POW_STATUS_OFF);
-      if (status !== 0) throw new PowFailedError(`wasm solve status=${status}`);
-      const answer = readI64(retptr + POW_ANSWER_OFF);
-      const signature = new TextDecoder().decode(inst.readPtr(retptr + POW_SIGN_OFF, POW_SIGN_LEN)).replace(/\0+$/, '');
-      const json = JSON.stringify({ algorithm: challenge.algorithm, challenge: challenge.challenge, salt: challenge.salt, answer: Number(answer), signature, target_path: challenge.target_path });
-      return btoa(json);
+      const stackPtr = inst.addToStack(-16);
+      try {
+        const c = passString(challenge.challenge);
+        const p = passString(prefix);
+        inst.solve(stackPtr, c.ptr, c.len, p.ptr, p.len, challenge.difficulty);
+        const dv = new DataView(inst.memoryView().buffer);
+        const status = dv.getInt32(stackPtr + 0, true);
+        if (status !== 1) throw new PowFailedError(`wasm solve status=${status}`);
+        const answer = dv.getFloat64(stackPtr + 8, true);
+        const json = JSON.stringify({ algorithm: challenge.algorithm, challenge: challenge.challenge, salt: challenge.salt, answer, signature: challenge.signature ?? '', target_path: challenge.target_path });
+        return btoa(json);
+      } finally {
+        inst.addToStack(16);
+      }
     } catch (e) {
       if (e instanceof PowFailedError) throw e;
       throw new PowFailedError(`pow solve failed: ${(e as Error).message}`);
