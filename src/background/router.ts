@@ -93,7 +93,8 @@ export class Router {
         try { await provider.deleteSession(ctx, { providerId: pid, webSessionId: decision.existing.webSessionId, parentMessageId: decision.existing.parentMessageId }); } catch { /* best effort per spec */ }
       }
       const s = await provider.createSession(ctx);
-      convId = decision.existing?.conversationId ?? this.d.mapper.nextAutoConversationId();
+      // 优先级：existing 保留同名 cid > 用户传的 cid（named 首次请求） > auto 顺序号
+      convId = decision.existing?.conversationId ?? conversationId ?? this.d.mapper.nextAutoConversationId();
       thread = this.d.mapper.register(pid, convId, s.webSessionId, messages);
       session = { providerId: pid, webSessionId: s.webSessionId, parentMessageId: null };
       prompt = renderTranscript(messages).ok

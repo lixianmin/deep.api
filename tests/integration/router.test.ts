@@ -16,10 +16,11 @@ type StubExtras = Partial<ProviderAdapter> & { prompts?: string[] };
 
 function stubAdapter(over: StubExtras = {}): ProviderAdapter {
   const prompts: string[] = [];
+  let seq = 0;
   const base: ProviderAdapter = {
     id: 'deepseek',
     auth: { loginPageUrl: 'https://chat.deepseek.com/', cookieDomain: 'chat.deepseek.com', requiredCookies: ['user_token'], getAuthStatus: async () => ({ state: 'logged_in' }) },
-    createSession: async (): Promise<ProviderSession> => ({ providerId: 'deepseek', webSessionId: 's1', parentMessageId: null }),
+    createSession: async (): Promise<ProviderSession> => ({ providerId: 'deepseek', webSessionId: `s${++seq}`, parentMessageId: null }),
     deleteSession: async () => {},
     stopStream: async () => {},
     streamCompletion: async function* (_ctx: ProviderContext, req: ProviderCompletion): AsyncIterable<ProviderStreamEvent> {
@@ -95,6 +96,17 @@ describe('Router', () => {
     expect((a as any).prompts).toHaveLength(2);
     expect((a as any).prompts[0]).toContain('hi');
     expect((a as any).prompts[1]).toContain('next');
+  });
+
+  it('named conversation_id first call uses the provided cid (not auto:seq) — v0.1.38 fix', async () => {
+    const a = stubAdapter();
+    const r = makeRouter(a);
+    await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', '记住数字 42')], conversation_id: 'demo-x' });
+    // 第二次用同 cid → 应 incremental（复用 s1），不是新建 s2
+    await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', '记住数字 42'), m('user', '刚才那个数字是什么？')], conversation_id: 'demo-x' });
+    // 验证：只有一次 createSession（第二次命中 incremental 复用 s1）
+    // streamCompletion 被调两次但都走同一 webSessionId='s1'
+    expect((a as any).prompts).toHaveLength(2);
   });
 
   it('rate-limited twice then succeeds with backoff', async () => {
