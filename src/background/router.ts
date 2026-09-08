@@ -5,7 +5,7 @@ import { SessionMapper, type ThreadEntry } from './session-mapper';
 import { Queue, QueueTimeoutError } from './queue';
 import { renderTranscript, renderTail, limitCharsFor } from './transcript-renderer';
 import { eventToChunks, finalChunk, toAggregate, type StreamAggregate, type StreamContext } from './chunk-encoder';
-import { buildToolPrompt, parseToolCalls, type ToolContext } from './tool-pipeline';
+import { buildToolPrompt, parseToolCalls, hasToolTags, type ToolContext } from './tool-pipeline';
 import type { RingLog } from './log';
 
 export interface RouterDeps {
@@ -158,6 +158,9 @@ export class Router {
       const parsed = parseToolCalls(agg.content);
       if (parsed) {
         toolCalls = parsed.calls; agg.content = parsed.remainder; agg.finishReason = 'tool_calls';
+      } else if (!hasToolTags(agg.content)) {
+        // 模型未输出工具标签（tool_choice:auto 时不调用也是合法的）→ 正常 stop，不 repair
+        agg.finishReason = agg.finishReason ?? 'stop';
       } else {
         // 模型兜底：同一会话追加修复指令重问 1 次（spec §4.4 第 3 层）；该轮不入镜像，
         // 下一轮客户端消息将因镜像前缀不匹配而重建——安全降级（spec §4.3）
@@ -211,6 +214,9 @@ export class Router {
             agg.toolCalls = parsed.calls; agg.content = parsed.remainder; agg.finishReason = 'tool_calls';
             const toolChunk: ChatCompletionChunk = { ...cctx, object: 'chat.completion.chunk', choices: [{ index: 0, delta: { tool_calls: parsed.calls }, finish_reason: 'tool_calls' }] };
             yield toolChunk;
+          } else if (!hasToolTags(agg.content)) {
+            // 模型未输出工具标签：合法（tool_choice:auto 可不调用），正常 stop
+            agg.finishReason = agg.finishReason ?? 'stop';
           }
         }
         yield finalChunk(cctx, agg.finishReason ?? 'stop', agg.usage);

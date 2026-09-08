@@ -25,6 +25,11 @@ export function buildToolPrompt(tools: ToolDef[], toolChoice: ToolChoice): ToolC
   return { promptSuffix: `\n\n${formatBlock}\n\n${defsBlock}\n\n${instructionBlock}\n` };
 }
 
+/** 内容中是否存在工具调用标签（用于区分"模型未调用工具"与"调用了但 JSON 解析失败"）。 */
+export function hasToolTags(content: string): boolean {
+  return findBlocks(content).length > 0;
+}
+
 /** Parse tool-call blocks. Returns null if no tag found or irrecoverable. */
 export function parseToolCalls(content: string): { calls: ToolCall[]; remainder: string } | null {
   if (!content) return null;
