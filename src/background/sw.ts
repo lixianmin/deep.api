@@ -32,7 +32,7 @@ async function setAuthStatus(providerId: string, status: { state: string; messag
 let cachedToken: string | null = null;
 async function loadCachedToken(): Promise<string | null> {
   if (cachedToken !== null) return cachedToken;
-  const got = (await STORAGE.get('authToken')) as { authToken?: string } | undefined;
+  const got = (await STORAGE.get({ authToken: '' })) as unknown as { authToken?: string } | undefined;
   cachedToken = got?.authToken ?? null;
   return cachedToken;
 }

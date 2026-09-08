@@ -5,12 +5,21 @@ declare global { interface Window { deepApi: unknown; deepApiConfig?: Record<str
 
 type Pending = { resolve(v: unknown): void; reject(e: unknown): void; onChunk(c: ChatCompletionChunk): void; onDone(): void; cancelled: boolean };
 
-const AUTH_KEY = 'userToken';   // DeepSeek web 登录态存放在 localStorage 的这个 key；spike 实测（与 ds2api 等同源项目一致）
+const AUTH_KEY = 'userToken';
+
+/** 从 chat.deepseek.com localStorage 解析当前 userToken，格式 {"value":"<JWT>","__version":"0"}。 */
+function readAuthToken(): string | null {
+  try {
+    const raw = window.localStorage.getItem(AUTH_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { value?: unknown };
+    return typeof parsed.value === 'string' && parsed.value.length > 0 ? parsed.value : null;
+  } catch { return null; }
+}
 
 export function bridgeMainFactory(target: Window): void {
   let seq = 0;
   const pending = new Map<number, Pending>();
-
   type Method = 'chat.completions.create' | 'chat.completions.cancel' | 'models.list' | 'auth.sync' | 'auth.requested';
   const send = (method: Method, params: unknown): number => {
     const id = ++seq;
@@ -22,7 +31,7 @@ export function bridgeMainFactory(target: Window): void {
     if (ev.source !== null && ev.source !== target) return;
     const env = (ev.data as { __deepApi?: any } | undefined)?.__deepApi;
     if (!env || typeof env.id !== 'number') return;
-    if (env.kind === undefined) return;   // 请求包由 relay 转发
+    if (env.kind === undefined) return;
     const p = pending.get(env.id);
     if (!p) return;
     if (env.kind === 'chunk') { if (!p.cancelled) p.onChunk(env.chunk as ChatCompletionChunk); return; }
@@ -41,13 +50,14 @@ export function bridgeMainFactory(target: Window): void {
     p.resolve(env.value);
   });
 
-  function streamHandle(id: number): AsyncIterable<ChatCompletionChunk> & { cancel(): Promise<void> } {
+  function streamHandle(id: number) {
     const q: ChatCompletionChunk[] = [];
     let settled = false;
-    let wake: () => void = () => {};
-    const notify = () => { const w = wake; wake = () => {}; w(); };
+    let wake: () => void = () => undefined;
+    const notify = (): void => { const w = wake; wake = (): void => undefined; w(); };
     const p: Pending = {
-      resolve: () => {}, reject: () => {},
+      resolve: () => undefined,
+      reject: () => undefined,
       onChunk: (c) => { q.push(c); notify(); },
       onDone: () => { settled = true; notify(); },
       cancelled: false,
@@ -66,59 +76,40 @@ export function bridgeMainFactory(target: Window): void {
     };
   }
 
-  // 本机桥接，无 API Key；window.deepApiConfig 仅用于高级覆盖（暂未启用）。
   const api = {
     chat: { completions: {
       create: (params: { model: string; messages: Array<{ role: string; content: string; [k: string]: unknown }>; stream?: boolean; tools?: unknown[]; tool_choice?: unknown; conversation_id?: string }): Promise<ChatCompletion> | (AsyncIterable<ChatCompletionChunk> & { cancel(): Promise<void> }) => {
         const id = send('chat.completions.create', params);
         if (params.stream === true) return streamHandle(id);
         return new Promise<ChatCompletion>((resolve, reject) => {
-          pending.set(id, { resolve: resolve as (v: unknown) => void, reject, onChunk: () => {}, onDone: () => {}, cancelled: false });
+          pending.set(id, { resolve: resolve as (v: unknown) => void, reject, onChunk: () => undefined, onDone: () => undefined, cancelled: false });
         });
       },
     } },
     models: { list: (): Promise<{ object: 'list'; data: ModelInfo[] }> => {
       const id = send('models.list', {});
-      return new Promise((resolve, reject) => { pending.set(id, { resolve: resolve as (v: unknown) => void, reject, onChunk: () => {}, onDone: () => {}, cancelled: false }); });
+      return new Promise((resolve, reject) => { pending.set(id, { resolve: resolve as (v: unknown) => void, reject, onChunk: () => undefined, onDone: () => undefined, cancelled: false }); });
     } },
   };
   Object.defineProperty(target, 'deepApi', { value: api, configurable: true, writable: true, enumerable: true });
-}
 
-/** 从 localStorage 解析当前 userToken（DeepSeek web 的登录态存储格式：{"value":"<JWT>","__version":"0"}）。 */
-function readAuthToken(): string | null {
-  try {
-    const raw = window.localStorage.getItem(AUTH_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as { value?: unknown };
-    return typeof parsed.value === 'string' && parsed.value.length > 0 ? parsed.value : null;
-  } catch { return null; }
-}
-
-/** 初始化：读 token 一次推给 SW；监听 storage 变化实时推送；定期心跳保活。 */
-function startAuthSync() {
-  // 1) 首次推送
-  send('auth.sync', { token: readAuthToken() });
-
-  // 2) 同源页面 storage 变化时推送（包括其他标签页修改、退出登录等）
-  window.addEventListener('storage', (ev) => {
-    if (ev.key === AUTH_KEY || ev.key === null) send('auth.sync', { token: readAuthToken() });
+  // Auth 同步：start + storage 事件 + 监听 setItem/removeItem 兜底 + 5s 心跳
+  function pushAuth() { send('auth.sync', { token: readAuthToken() }); }
+  pushAuth();
+  target.addEventListener('storage', (ev: StorageEvent) => {
+    if (ev.key === AUTH_KEY || ev.key === null) pushAuth();
   });
-  // 3) 当前页面内 localStorage.setItem 不触发 storage 事件（仅跨窗口触发）—— 用自定义钩子包一层兜底
   const origSet = Storage.prototype.setItem;
-  Storage.prototype.setItem = function (key: string, value: string) {
+  Storage.prototype.setItem = function (key: string, value: string): void {
     origSet.call(this, key, value);
-    if (key === AUTH_KEY) send('auth.sync', { token: readAuthToken() });
+    if (key === AUTH_KEY) pushAuth();
   };
   const origRemove = Storage.prototype.removeItem;
-  Storage.prototype.removeItem = function (key: string) {
+  Storage.prototype.removeItem = function (key: string): void {
     origRemove.call(this, key);
-    if (key === AUTH_KEY) send('auth.sync', { token: readAuthToken() });
+    if (key === AUTH_KEY) pushAuth();
   };
-  // 4) 定时心跳（防御 storage 事件/钩子漏掉的极端场景，例如登录流程中 token 写入的时机）
-  setInterval(() => send('auth.sync', { token: readAuthToken() }), 5000);
+  setInterval(pushAuth, 5000);
 }
 
-// 内容脚本入口：自动在当前 window 上挂载 deepApi 并启动 auth 同步
 bridgeMainFactory(window as Window);
-startAuthSync();
