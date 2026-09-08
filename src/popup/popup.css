@@ -1,0 +1,19 @@
+body { font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; padding: 8px 10px; width: 360px; background: #fff; color: #222; }
+header { font-size: 14px; padding-bottom: 6px; border-bottom: 1px solid #eee; margin-bottom: 8px; }
+header b { margin-right: 8px; }
+.card { background: #fafafa; border: 1px solid #eee; border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; }
+.card h3 { margin: 0 0 6px; font-size: 12px; color: #666; font-weight: 600; }
+button { background: #fff; border: 1px solid #ccc; border-radius: 4px; padding: 4px 10px; cursor: pointer; font-size: 12px; }
+button:hover { background: #f0f0f0; }
+.row { display: flex; gap: 6px; margin-top: 6px; }
+code { display: block; padding: 4px 6px; background: #f0f0f0; border-radius: 3px; font-family: ui-monospace, monospace; font-size: 11px; word-break: break-all; }
+textarea { width: 100%; font: 11px ui-monospace, monospace; padding: 6px; border: 1px solid #ddd; border-radius: 4px; resize: vertical; box-sizing: border-box; }
+label { display: block; margin: 4px 0; font-size: 12px; }
+input[type=number] { width: 60px; padding: 2px 4px; margin-left: 4px; }
+.ok { color: #15803d; font-weight: 600; }
+.warn { color: #b45309; font-weight: 600; }
+.bad { color: #b91c1c; font-weight: 600; }
+ul { padding-left: 18px; margin: 0; max-height: 140px; overflow: auto; font-size: 11px; }
+li { margin: 2px 0; }
+li .err { color: #b91c1c; }
+li .ok { color: #15803d; }
