@@ -50,6 +50,13 @@ function authHeaders(token: string): Record<string, string> {
     'Content-Type': 'application/json',
   };
 }
+/**
+ * 探测用极简 header：DeepSeek 服务端对带 X-Client-* / cookie 的探测请求会 401，
+ * 只发 Bearer + Content-Type 才能正常返回 200。
+ */
+function probeHeaders(token: string): Record<string, string> {
+  return { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+}
 
 let cached: { router: Router; log: RingLog } | null = null;
 const panelPorts = new Set<chrome.runtime.Port>();   // 当前打开的 popup 面板 port
@@ -128,10 +135,10 @@ async function probeAuthStatus(): Promise<{ state: string; message?: string }> {
   if (!token) return { state: 'logged_out', message: '请在 chat.deepseek.com 登录账号' };
   try {
     const r = await fetch(`${DEEPSEEK_API_BASE}/chat_session/create`, {
-      method: 'POST', headers: authHeaders(token), credentials: 'include', body: JSON.stringify({}),
+      method: 'POST', headers: probeHeaders(token), body: JSON.stringify({}),
     });
     if (r.status === 200 || r.status === 201) {
-      try { const j: any = await r.json(); const id = j?.data?.chat_session?.id ?? j?.data?.chat_session_id; if (id) await fetch(`${DEEPSEEK_API_BASE}/chat_session/delete`, { method: 'POST', headers: authHeaders(token), credentials: 'include', body: JSON.stringify({ chat_session_id: id }) }); } catch { /* best-effort */ }
+      try { const j: any = await r.json(); const id = j?.data?.chat_session?.id ?? j?.data?.chat_session_id; if (id) await fetch(`${DEEPSEEK_API_BASE}/chat_session/delete`, { method: 'POST', headers: probeHeaders(token), body: JSON.stringify({ chat_session_id: id }) }); } catch { /* best-effort */ }
       return { state: 'logged_in' };
     }
     if (r.status === 401 || r.status === 403) return { state: 'expired', message: `登录失效（HTTP ${r.status}）` };
