@@ -57,12 +57,14 @@ function snippetText(): string {
   // 默认取第一个模型；用户可在自己的网站代码里覆盖
   const firstModel = (state.providers?.deepseek?.models ?? [{ id: 'deepseek-v4-flash' }])[0]!.id;
   return `// deep.api 接入：本机桥接，无需 API Key
-const res = await window.deepApi.chat.completions.create({
-  model: '${firstModel}',
-  messages: [{ role: 'user', content: '你好' }],
-  stream: true,
-});
-for await (const chunk of res) console.log('CHUNK:', chunk.choices?.[0]?.delta?.content ?? '');
+// 多轮对话测试：每轮把完整历史（含上一轮回复）传给 messages，上下文自动续接
+let history = [{ role: 'user', content: '你好，我叫小明' }];
+let r1 = await window.deepApi.chat.completions.create({ model: '${firstModel}', messages: history });
+console.log('第一轮:', r1.choices[0].message.content);
+
+history = [...history, { role: 'assistant', content: r1.choices[0].message.content }, { role: 'user', content: '我叫什么名字？' }];
+let r2 = await window.deepApi.chat.completions.create({ model: '${firstModel}', messages: history });
+console.log('第二轮:', r2.choices[0].message.content);
 `;
 }
 
