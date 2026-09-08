@@ -190,10 +190,14 @@ chrome.runtime.onConnect.addListener((port) => {
         const params = env.params as { token: unknown };
         const newTok = typeof params?.token === 'string' && params.token.length > 0 ? params.token : null;
         const prev = await loadCachedToken();
+        // 防御：null token 不立即清缓存（可能来自非 deepseek 页面误推或 token 轮换瞬态），保留最后一次有效 token
+        if (newTok === null && prev !== null) {
+          console.log('[deep.api sw] auth.sync null ignored (keeping cached token)');
+          return;
+        }
         if (newTok !== prev) {
           await setCachedToken(newTok);
           console.log('[deep.api] token updated:', newTok ? newTok.slice(0, 12) + '...' : '(none)');
-          // token 变化时立即探测一次 + 广播 popup
           await refreshAuthAndLog();
         }
         return;

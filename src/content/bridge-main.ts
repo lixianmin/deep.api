@@ -24,26 +24,34 @@ function readAuthToken(): string | null {
     return typeof parsed.value === 'string' && parsed.value.length > 0 ? parsed.value : null;
   } catch (e) { console.warn('[deep.api bridge-main] readAuthToken parse error', e); return null; }
 }
+// 只在 chat.deepseek.com 上读取/推送 token：其他页面（如 example.com）的 localStorage 无 userToken，
+// 推 null 会反复清空 SW 的 token 缓存导致 popup 登录态闪烁。
+function shouldSyncAuth(): boolean {
+  return location.hostname === 'chat.deepseek.com' || location.hostname.endsWith('.deepseek.com');
+}
 function pushAuth() {
+  if (!shouldSyncAuth()) return;   // 非 deepseek 页面：只挂 API，不参与 token 同步
   const t = readAuthToken();
   console.log('[deep.api bridge-main] pushAuth token', t ? 'len=' + t.length : 'null');
   postRequest('auth.sync', { token: t });
 }
-pushAuth();
-window.addEventListener('storage', (ev: StorageEvent) => {
-  if (ev.key === AUTH_KEY || ev.key === null) pushAuth();
-});
-const _origSet = Storage.prototype.setItem;
-Storage.prototype.setItem = function (key: string, value: string): void {
-  _origSet.call(this, key, value);
-  if (key === AUTH_KEY) pushAuth();
-};
-const _origRemove = Storage.prototype.removeItem;
-Storage.prototype.removeItem = function (key: string): void {
-  _origRemove.call(this, key);
-  if (key === AUTH_KEY) pushAuth();
-};
-setInterval(pushAuth, 5000);
+if (shouldSyncAuth()) {
+  pushAuth();
+  window.addEventListener('storage', (ev: StorageEvent) => {
+    if (ev.key === AUTH_KEY || ev.key === null) pushAuth();
+  });
+  const _origSet = Storage.prototype.setItem;
+  Storage.prototype.setItem = function (key: string, value: string): void {
+    _origSet.call(this, key, value);
+    if (key === AUTH_KEY) pushAuth();
+  };
+  const _origRemove = Storage.prototype.removeItem;
+  Storage.prototype.removeItem = function (key: string): void {
+    _origRemove.call(this, key);
+    if (key === AUTH_KEY) pushAuth();
+  };
+  setInterval(pushAuth, 5000);
+}
 
 // ---- 响应包路由：page 上的 window message 来自 ISOLATED world 的 bridge-relay ----
 const pending = new Map<number, Pending>();
