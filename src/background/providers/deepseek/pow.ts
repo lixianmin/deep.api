@@ -18,6 +18,16 @@ export class PowFailedError extends Error {
   constructor(m: string) { super(m); this.name = 'PowFailedError'; }
 }
 
+// retptr 结果布局（单点定义，便于 Task 2 spike 用真实 wasm 校准）：
+// wasm-bindgen 返回结构约定：status(i32)@0 + answer(i64, 8 字节对齐)@8 + signature(64B)@16
+// 注：尚未经真实 wasm 实测；Task 2 spike 若显示偏移不同，只改这里并同步 fake 测试。
+const POW_STATUS_OFF = 0;
+const POW_STATUS_LEN = 4;
+const POW_ANSWER_OFF = 8;
+const POW_ANSWER_LEN = 8;
+const POW_SIGN_OFF = 16;
+const POW_SIGN_LEN = 64;
+
 export async function instantiateDeepSeekWasm(bytes: Uint8Array): Promise<WasmInstance> {
   const result = await WebAssembly.instantiate(bytes, {}) as unknown as WebAssembly.WebAssemblyInstantiatedSource;
   const { instance } = result;
@@ -79,11 +89,10 @@ export class PowSolver {
       write(cPtr, cBytes);
       write(pPtr, pBytes);
       inst.solve(retptr, cPtr, cBytes.length, pPtr, pBytes.length, challenge.difficulty);
-      // retptr 结果布局（spike 实测校准）：status(i32, 4B) + answer(i64, 8B) + signature(64B)
-      const status = readI32(retptr);
+      const status = readI32(retptr + POW_STATUS_OFF);
       if (status !== 0) throw new PowFailedError(`wasm solve status=${status}`);
-      const answer = readI64(retptr + 4);
-      const signature = new TextDecoder().decode(inst.readPtr(retptr + 12, 64)).replace(/\0+$/, '');
+      const answer = readI64(retptr + POW_ANSWER_OFF);
+      const signature = new TextDecoder().decode(inst.readPtr(retptr + POW_SIGN_OFF, POW_SIGN_LEN)).replace(/\0+$/, '');
       const json = JSON.stringify({ algorithm: challenge.algorithm, challenge: challenge.challenge, salt: challenge.salt, answer: Number(answer), signature, target_path: challenge.target_path });
       return btoa(json);
     } catch (e) {

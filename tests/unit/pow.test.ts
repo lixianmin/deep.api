@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { PowSolver, PowFailedError, type WasmInstance } from '../../src/background/providers/deepseek/pow';
 
-// 窄接口 fake：模拟 wasm 写入 retptr 布局 status(4B)+answer(8B)+signature(64B)，与 pow.ts 读取一致
+// 窄接口 fake：模拟 wasm 按 wasm-bindgen 返回约定写入 retptr 布局：
+// status(i32)@0 + answer(i64, 8 字节对齐)@8 + signature(64B)@16，与 pow.ts 常量一致
 function fakeWasm(answer: number, signature: string): WasmInstance {
   const mem = new Uint8Array(4096);
   const dv = new DataView(mem.buffer);
@@ -11,9 +12,9 @@ function fakeWasm(answer: number, signature: string): WasmInstance {
     addToStack: (n: number) => { stackPtr += n; return stackPtr; },
     alloc: (len: number) => { const p = cursor; cursor += len; return p; },
     solve: (retptr: number) => {
-      dv.setInt32(retptr, 0, true); // status ok
-      dv.setBigInt64(retptr + 4, BigInt(answer), true); // answer
-      new TextEncoder().encodeInto(signature, mem.subarray(retptr + 12, retptr + 12 + 64));
+      dv.setInt32(retptr, 0, true);            // status @0
+      dv.setBigInt64(retptr + 8, BigInt(answer), true);  // answer @8
+      new TextEncoder().encodeInto(signature, mem.subarray(retptr + 16, retptr + 16 + 64)); // signature @16
     },
     readPtr: (ptr: number, len: number) => mem.subarray(ptr, ptr + len),
   };
