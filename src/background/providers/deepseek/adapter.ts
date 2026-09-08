@@ -1,6 +1,6 @@
 import type { ProviderAdapter, ProviderCompletion, ProviderContext, ProviderSession } from '../adapter';
-import { API_BASE, completionPayload, baseHeaders, classify, MODELS, resolveModel } from './client';
-import { getAuthStatus, DEEPSEEK_LOGIN_PAGE, DEEPSEEK_COOKIE_DOMAIN, DEEPSEEK_COOKIES } from './auth';
+import { completionPayload, baseHeaders, classify, MODELS, resolveModel } from './client';
+import { getAuthStatus, DEEPSEEK_LOGIN_PAGE, DEEPSEEK_COOKIE_NAMES } from './auth';
 import { completionEvents } from './sse-patch';
 
 export interface AdapterDeps {
@@ -47,8 +47,8 @@ export function createDeepSeekAdapter(deps: AdapterDeps): ProviderAdapter {
     id: 'deepseek',
     auth: {
       loginPageUrl: DEEPSEEK_LOGIN_PAGE,
-      cookieDomain: DEEPSEEK_COOKIE_DOMAIN,
-      requiredCookies: DEEPSEEK_COOKIES,
+      cookieDomain: 'chat.deepseek.com',     // 仅展示；sw.ts 中取 cookie 用 .chat.deepseek.com
+      requiredCookies: [...DEEPSEEK_COOKIE_NAMES],
       getAuthStatus: (ctx) =>
         getAuthStatus(ctx, async (c) => {
           const s = await createSessionRaw(c);

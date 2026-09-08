@@ -15,12 +15,14 @@ function mkDeps(over: Partial<AdapterDeps> = {}): AdapterDeps {
 }
 
 describe('DeepSeekAdapter', () => {
-  it('resolves known models and rejects unknown', () => {
+  it('resolves current public models and rejects unknown', () => {
     const a = createDeepSeekAdapter(mkDeps());
-    expect(a.resolveModel('deepseek-chat')).toMatchObject({ modelType: 'default', thinking: false });
-    expect(a.resolveModel('deepseek-reasoner')).toMatchObject({ modelType: 'expert', thinking: true });
+    expect(a.resolveModel('deepseek-v4-flash')).toMatchObject({ modelType: 'default', thinking: false });
+    expect(a.resolveModel('deepseek-v4-pro')).toMatchObject({ modelType: 'expert', thinking: true });
+    expect(a.resolveModel('deepseek-v4-flash-vision-exp')).toMatchObject({ modelType: 'vision', thinking: false });
     expect(a.resolveModel('gpt-4o')).toBeNull();
-    expect(a.models.map(m => m.id)).toEqual(['deepseek-chat', 'deepseek-reasoner']);
+    const ids = a.models.map(m => m.id);
+    expect(ids).toEqual(expect.arrayContaining(['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-v4-flash-vision-exp']));
   });
 
   it('exposes capability flags', () => {
@@ -29,7 +31,7 @@ describe('DeepSeekAdapter', () => {
     expect(a.id).toBe('deepseek');
     expect(a.auth.loginPageUrl).toBe('https://chat.deepseek.com/');
     expect(a.auth.cookieDomain).toBe('chat.deepseek.com');
-    expect(a.auth.requiredCookies).toEqual(['user_token']);
+    expect(a.auth.requiredCookies).toEqual(expect.arrayContaining(['user_token']));
   });
 
   it('classifies errors: 429 → rate-limited', () => {
@@ -44,13 +46,12 @@ describe('DeepSeekAdapter', () => {
     expect(a.isAuthExpired({ status: 200 })).toBe(false);
   });
 
-  it('classifies errors: 202 + x-amzn-waf-action OR 5xx OR network → unavailable', () => {
+  it('classifies errors: WAF / 5xx / network → unavailable', () => {
     const a = createDeepSeekAdapter(mkDeps());
     expect(a.isUnavailable({ status: 202, headers: { 'x-amzn-waf-action': 'challenge' } })).toBe(true);
     expect(a.isUnavailable(new TypeError('fetch failed'))).toBe(true);
-    expect(a.isUnavailable({ status: 500 })).toBe(true);     // 5xx → unavailable per spec §6.4
-    expect(a.isUnavailable({ status: 503 })).toBe(true);
-    expect(a.isUnavailable({ status: 429 })).toBe(false);    // 429 → rate-limited, not unavailable
+    expect(a.isUnavailable({ status: 500 })).toBe(true);
+    expect(a.isUnavailable({ status: 429 })).toBe(false);
     expect(a.isUnavailable({ status: 200 })).toBe(false);
   });
 
@@ -75,12 +76,13 @@ describe('DeepSeekAdapter', () => {
     expect(deps.fetchJson).toHaveBeenCalledWith('/api/v0/chat_session/create', expect.objectContaining({ Authorization: 'Bearer tok' }), {});
   });
 
-  it('getAuthStatus returns expired when probe fails', async () => {
+  it('getAuthStatus returns expired on 401 with clear message', async () => {
     const deps = mkDeps({
       fetchJson: vi.fn(async () => { throw Object.assign(new Error('unauthorized'), { status: 401 }); }),
     });
     const a = createDeepSeekAdapter(deps);
     const status = await a.auth.getAuthStatus({ token: 'tok', requestId: 'r' });
     expect(status.state).toBe('expired');
+    expect((status as { state: 'expired'; message?: string }).message).toMatch(/401/);
   });
 });

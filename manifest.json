@@ -3,12 +3,12 @@
   "name": "deep.api — DeepSeek web as OpenAI API",
   "version": "0.1.0",
   "description": "把 DeepSeek 网页版转成 OpenAI 形态接口供其他网站调用（无伴生进程）",
-  "permissions": ["cookies", "storage", "tabs"],
+  "permissions": ["cookies", "storage", "tabs", "alarms"],
   "host_permissions": ["https://chat.deepseek.com/*", "https://fe-static.deepseek.com/*"],
-  "background": { "service_worker": "dist/sw.js", "type": "module" },
-  "action": { "default_popup": "dist/popup.html", "default_title": "deep.api" },
+  "background": { "service_worker": "sw.js", "type": "module" },
+  "action": { "default_popup": "popup.html", "default_title": "deep.api" },
   "content_scripts": [
-    { "matches": ["<all_urls>"], "js": ["dist/bridge-relay.js"], "run_at": "document_start", "world": "ISOLATED" },
-    { "matches": ["<all_urls>"], "js": ["dist/bridge-main.js"], "run_at": "document_start", "world": "MAIN" }
+    { "matches": ["<all_urls>"], "js": ["bridge-relay.js"], "run_at": "document_start", "world": "ISOLATED" },
+    { "matches": ["<all_urls>"], "js": ["bridge-main.js"], "run_at": "document_start", "world": "MAIN" }
   ]
 }

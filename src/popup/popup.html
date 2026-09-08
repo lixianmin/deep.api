@@ -8,31 +8,29 @@
   <header><b>deep.api</b><span id="provider-name">DeepSeek</span></header>
 
   <section class="card">
-    <h3>登录状态</h3>
-    <div id="auth-state" class="bad">未登录</div>
-    <button id="btn-login">打开登录页</button>
-  </section>
-
-  <section class="card">
-    <h3>API Key</h3>
-    <code id="api-key">…</code>
     <div class="row">
-      <button id="btn-copy-key">复制</button>
-      <button id="btn-reset-key">重置</button>
+      <h3 style="flex:1;margin:0;font-size:12px;color:#666;font-weight:600">登录状态</h3>
+      <button id="btn-refresh-auth" title="重新探测">↻</button>
     </div>
+    <div id="auth-state" class="bad">未登录</div>
+    <button id="btn-login" style="margin-top:6px">打开登录页</button>
   </section>
 
   <section class="card">
     <h3>接入 snippet</h3>
-    <textarea id="snippet" rows="8" readonly></textarea>
+    <textarea id="snippet" rows="6" readonly></textarea>
     <button id="btn-copy-snippet">复制 snippet</button>
+  </section>
+
+  <section class="card">
+    <h3>模型</h3>
+    <ul id="model-list"></ul>
   </section>
 
   <section class="card">
     <h3>配置</h3>
     <label>线程池 <input id="pool-size" type="number" min="1" max="5" value="2"></label>
     <label>TTL 分钟 <input id="ttl-min" type="number" min="1" value="30"></label>
-    <div>模型：<span id="model-list"></span></div>
   </section>
 
   <section class="card">

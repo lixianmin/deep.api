@@ -49,8 +49,8 @@ describe('bridge roundtrip', () => {
     const p = api.models.list();
     await flush();
     const id = (port.sent[0] as any).__deepApi.id;
-    port.emit({ __deepApi: { id, kind: 'error', error: { error: { message: 'bad key', type: 'api_error', code: 'invalid_api_key' } } } } satisfies BridgeResponseMsg);
-    await expect(p).rejects.toMatchObject({ status: 401 });
+    port.emit({ __deepApi: { id, kind: 'error', error: { error: { message: 'rate limited', type: 'api_error', code: 'rate_limited' } } } } satisfies BridgeResponseMsg);
+    await expect(p).rejects.toMatchObject({ status: 429 });
   });
 
   it('ignores foreign window messages', async () => {

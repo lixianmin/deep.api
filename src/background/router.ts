@@ -15,7 +15,6 @@ export interface RouterDeps {
   storage: { get(k: string): Promise<unknown | undefined>; set(k: string, v: unknown): Promise<void> };
   log: RingLog;
   now(): number;
-  ensureKey(): Promise<string>;
 }
 
 function err(code: ApiErrorCode, message: string, status: number): BridgeError {
@@ -39,28 +38,20 @@ function isContentEvent(e: ProviderStreamEvent): boolean {
 export class Router {
   constructor(private d: RouterDeps) {}
 
-  private async apiKey(params: Record<string, unknown>): Promise<string> {
-    const cfg = (await this.d.storage.get('apiKey')) as string | undefined;
-    const given = (params.apiKey as string | undefined) ?? cfg;
-    if (!given) throw err('missing_api_key', 'apiKey required (set window.deepApiConfig={apiKey} or pass apiKey)', 401);
-    if (!cfg || given !== cfg) throw err('invalid_api_key', 'invalid api key', 401);
-    return cfg;
-  }
 
   async models(): Promise<{ object: 'list'; data: ModelInfo[] }> {
     return { object: 'list', data: Object.values(this.d.registry).flatMap(p => p.models) };
   }
 
-  async create(rawParams: unknown): Promise<ChatCompletion | AsyncIterable<ChatCompletionChunk>> {
+  async create(token: string, rawParams: unknown): Promise<ChatCompletion | AsyncIterable<ChatCompletionChunk>> {
     const p = rawParams as Record<string, any>;
     const started = this.d.now();
-    const key = await this.apiKey(p);
     const modelId = p.model as string;
     const provider = this.resolve(modelId);
     const resolved = provider.resolveModel(modelId)!;
     const messages = p.messages as Message[] | undefined;
     if (!Array.isArray(messages) || messages.length === 0) throw err('invalid_request_error', 'messages array required', 400);
-    const ctx = { token: key, requestId: `req-${started}-${Math.random().toString(36).slice(2, 8)}` };
+    const ctx = { token, requestId: `req-${started}-${Math.random().toString(36).slice(2, 8)}` };
     const toolCtx = buildToolPrompt((p.tools as ToolDef[] | undefined) ?? [], (p.tool_choice as ToolChoice | undefined) ?? 'auto');
     const handle = await this.runCompletion(provider, resolved, messages, toolCtx, p.conversation_id as string | undefined, ctx);
     const done = (ok: boolean, ms: number, error?: string) => this.d.log.push({ at: this.d.now(), provider: provider.id, model: modelId, ok, ms, error });

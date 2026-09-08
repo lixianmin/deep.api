@@ -11,35 +11,36 @@ import { createRegistry } from './providers/registry';
 
 const STORAGE = chrome.storage.local;
 const DEEPSEEK_API_BASE = 'https://chat.deepseek.com/api/v0';
+const DEEPSEEK_COOKIE_DOMAIN = '.chat.deepseek.com';   // chrome.cookies 需要带 . 前缀
 const WASM_URL = 'https://fe-static.deepseek.com/chat/static/sha3_wasm_bg.7b9ca65ddd.wasm';
+const AUTH_POLL_ALARM = 'deep.api.auth.poll';
+const AUTH_POLL_MINUTES = 1;
 
-async function ensureApiKey(): Promise<string> {
-  const got = (await STORAGE.get('apiKey')) as { apiKey?: string };
-  if (got.apiKey) return got.apiKey;
-  const key = 'sk-dapi-' + Array.from(crypto.getRandomValues(new Uint8Array(16)))
-    .map(b => b.toString(16).padStart(2, '0')).join('');
-  await STORAGE.set({ apiKey: key });
-  return key;
+interface ProviderConfig { poolSize: number; ttlMinutes: number; lastAuthStatus?: { state: string; message?: string } }
+
+async function getProviderConfig(providerId: string): Promise<ProviderConfig> {
+  const got = (await STORAGE.get(`providers.${providerId}`)) as unknown as ProviderConfig | undefined;
+  return { poolSize: got?.poolSize ?? 2, ttlMinutes: got?.ttlMinutes ?? 30, lastAuthStatus: got?.lastAuthStatus };
 }
 
-async function getProviderConfig(providerId: string): Promise<{ poolSize: number; ttlMinutes: number }> {
-  const got = (await STORAGE.get(`providers.${providerId}`)) as unknown as { poolSize?: number; ttlMinutes?: number } | undefined;
-  return { poolSize: got?.poolSize ?? 2, ttlMinutes: got?.ttlMinutes ?? 30 };
-}
-
-async function setProviderConfig(providerId: string, patch: Partial<{ poolSize: number; ttlMinutes: number }>): Promise<void> {
+async function setProviderConfig(providerId: string, patch: Partial<ProviderConfig>): Promise<void> {
   const cur = await getProviderConfig(providerId);
   await STORAGE.set({ [`providers.${providerId}`]: { ...cur, ...patch } });
 }
 
-async function getLastAuth(providerId: string): Promise<{ state: string; message?: string } | undefined> {
-  const got = (await STORAGE.get(`providers.${providerId}.lastAuthStatus`)) as unknown as { lastAuthStatus?: { state: string; message?: string } } | undefined;
-  return got?.lastAuthStatus;
+async function setAuthStatus(providerId: string, status: { state: string; message?: string }): Promise<void> {
+  await setProviderConfig(providerId, { lastAuthStatus: status });
 }
 
-async function getCookieToken(): Promise<string | null> {
-  const got = await chrome.cookies.get({ url: 'https://chat.deepseek.com/', name: 'user_token' });
-  return got?.value ?? null;
+/** 取第一个能找到的 DeepSeek 登录 cookie。多个候选名（spike #2 校准）。 */
+async function getDeepSeekToken(): Promise<string | null> {
+  for (const name of ['user_token', 'ds_session', 'sessionid']) {
+    try {
+      const c = await chrome.cookies.get({ url: 'https://chat.deepseek.com/', name });
+      if (c?.value) return c.value;
+    } catch { /* fallthrough */ }
+  }
+  return null;
 }
 
 function authHeaders(token: string): Record<string, string> {
@@ -72,15 +73,12 @@ async function build(): Promise<{ router: Router; log: RingLog }> {
     return wasmInst;
   }
   const deps: AdapterDeps = {
-    getToken: getCookieToken,
+    getToken: getDeepSeekToken,
     fetchJson: async (path, headers, body) => {
-      const init: RequestInit = {
-        method: 'POST',
-        headers,
-        credentials: 'include',
+      const r = await fetch(DEEPSEEK_API_BASE + path, {
+        method: 'POST', headers, credentials: 'include',
         body: body === undefined || body === null ? undefined : JSON.stringify(body),
-      };
-      const r = await fetch(DEEPSEEK_API_BASE + path, init);
+      });
       const text = await r.text();
       let parsed: unknown;
       try { parsed = text ? JSON.parse(text) : null; } catch { throw Object.assign(new Error(`bad json: ${text.slice(0, 200)}`), { status: r.status }); }
@@ -94,7 +92,7 @@ async function build(): Promise<{ router: Router; log: RingLog }> {
     },
     pow: new PowSolver({
       fetchJson: async (path, _h, body) => {
-        const token = await getCookieToken() ?? '';
+        const token = await getDeepSeekToken() ?? '';
         const r = await fetch(DEEPSEEK_API_BASE + path, { method: 'POST', headers: authHeaders(token), credentials: 'include', body: JSON.stringify(body) });
         return r.json();
       },
@@ -113,26 +111,56 @@ async function build(): Promise<{ router: Router; log: RingLog }> {
     registry: createRegistry(adapter),
     mapper,
     queue: new Queue({ timeoutMs: 60_000 }),
-    storage: {
-      get: async (k) => (await STORAGE.get(k as unknown as string))?.[k as unknown as string],
-      set: async (k, v) => { await STORAGE.set({ [k]: v }); },
-    },
+    storage: { get: async (k) => (await STORAGE.get(k as unknown as string))?.[k as unknown as string], set: async (k, v) => { await STORAGE.set({ [k]: v }); } },
     log,
     now: () => Date.now(),
-    ensureKey: ensureApiKey,
   });
   cached = { router, log };
   return cached;
 }
 
-// 启动
-ensureApiKey().catch(() => undefined);
-
-// cookie 变更 -> 标记登录态
-chrome.cookies.onChanged.addListener(async (info) => {
-  if (info.cookie.domain.includes('chat.deepseek.com') && info.cookie.name === 'user_token' && info.removed) {
-    await STORAGE.set({ 'providers.deepseek.lastAuthStatus': { state: 'expired', message: 'cookie removed' } });
+/** 主动探测登录状态：取 token + create_session + delete_session，成功则 logged_in。 */
+async function probeAuthStatus(): Promise<{ state: string; message?: string }> {
+  const token = await getDeepSeekToken();
+  if (!token) return { state: 'logged_out' };
+  try {
+    const r = await fetch(`${DEEPSEEK_API_BASE}/chat_session/create`, {
+      method: 'POST',
+      headers: authHeaders(token),
+      credentials: 'include',
+      body: JSON.stringify({}),
+    });
+    if (r.status === 200 || r.status === 201) {
+      try { const j: any = await r.json(); const id = j?.data?.chat_session?.id ?? j?.data?.chat_session_id; if (id) await fetch(`${DEEPSEEK_API_BASE}/chat_session/delete`, { method: 'POST', headers: authHeaders(token), credentials: 'include', body: JSON.stringify({ chat_session_id: id }) }); } catch { /* best-effort */ }
+      return { state: 'logged_in' };
+    }
+    if (r.status === 401 || r.status === 403) return { state: 'expired', message: `登录失效（HTTP ${r.status}）` };
+    return { state: 'expired', message: `探测失败：HTTP ${r.status}` };
+  } catch (e) {
+    return { state: 'expired', message: `探测异常：${(e as Error).message}` };
   }
+}
+
+// 启动：注册 cookie 监听 + 周期探测
+chrome.cookies.onChanged.addListener(async (info) => {
+  if (!info.cookie.domain.includes('chat.deepseek.com')) return;
+  if (!['user_token', 'ds_session', 'sessionid'].includes(info.cookie.name)) return;
+  if (info.removed) await setAuthStatus('deepseek', { state: 'expired', message: 'cookie 已失效，请重新登录 chat.deepseek.com' });
+  else await setAuthStatus('deepseek', await probeAuthStatus());
+});
+
+chrome.runtime.onInstalled.addListener(() => { void refreshAuthAndLog(); });
+chrome.runtime.onStartup.addListener(() => { void refreshAuthAndLog(); });
+
+async function refreshAuthAndLog(): Promise<void> {
+  const status = await probeAuthStatus();
+  await setAuthStatus('deepseek', status);
+  console.log('[deep.api] auth probe:', status);
+}
+
+chrome.alarms.create(AUTH_POLL_ALARM, { periodInMinutes: AUTH_POLL_MINUTES });
+chrome.alarms.onAlarm.addListener(async (a) => {
+  if (a.name === AUTH_POLL_ALARM) await refreshAuthAndLog();
 });
 
 chrome.runtime.onConnect.addListener((port) => {
@@ -142,9 +170,15 @@ chrome.runtime.onConnect.addListener((port) => {
       const env = (msg as { __deepApi: { id: number; method: string; params: unknown } }).__deepApi;
       const { router } = await build();
       try {
+        const token = await getDeepSeekToken();
+        if (!token) {
+          const { error, status } = { error: { error: { message: '未登录 chat.deepseek.com，请先在浏览器中登录', type: 'api_error', code: 'provider_unavailable' } }, status: 503 };
+          port.postMessage({ __deepApi: { id: env.id, kind: 'error', error } } as unknown as BridgeResponseMsg);
+          return;
+        }
         if (env.method === 'chat.completions.create') {
           const params = env.params as { stream?: boolean };
-          const resp = await router.create(env.params as unknown);
+          const resp = await router.create(token, env.params as unknown);
           if (params.stream) {
             const iter = resp as AsyncIterable<ChatCompletionChunk>;
             for await (const chunk of iter) {
@@ -162,9 +196,10 @@ chrome.runtime.onConnect.addListener((port) => {
           port.postMessage({ __deepApi: { id: env.id, kind: 'result', value: models } } as unknown as BridgeResponseMsg);
         }
       } catch (e) {
-        const errPayload = (e as { error?: { error?: { message: string; type: string; code: string } }; status?: number }).error && (e as any).status !== undefined
-          ? { error: (e as any).error, status: (e as any).status }
-          : { error: { error: { message: (e as Error).message, type: 'api_error', code: 'internal_error' } }, status: 500 };
+        const anyE = e as { error?: { error?: { message: string; type: string; code: string } }; status?: number };
+        const errPayload = anyE.error && anyE.status !== undefined
+          ? { error: anyE.error }
+          : { error: { error: { message: (e as Error).message, type: 'api_error', code: 'internal_error' } } };
         port.postMessage({ __deepApi: { id: env.id, kind: 'error', error: errPayload.error } } as unknown as BridgeResponseMsg);
       }
     });
@@ -172,22 +207,23 @@ chrome.runtime.onConnect.addListener((port) => {
     port.onMessage.addListener(async (msg: any) => {
       const { router, log } = await build();
       if (msg?.kind === 'panel.getState') {
-        const apiKey = (await STORAGE.get('apiKey')) as unknown as string;
         const provCfg = await getProviderConfig('deepseek');
-        const lastAuth = (await getLastAuth('deepseek')) ?? { state: 'logged_out' };
         const logList = (await STORAGE.get('log')) as unknown as { log?: any[] };
-        port.postMessage({ kind: 'state', payload: {
-          apiKey,
-          providers: { deepseek: { ...provCfg, lastAuthStatus: lastAuth } },
-          log: (logList?.log as any[]) ?? log.list(),
-        } });
+        port.postMessage({
+          kind: 'state',
+          payload: {
+            providers: {
+              deepseek: { ...provCfg, models: router.models ? (await router.models()).data : [] },
+            },
+            log: (logList?.log as any[]) ?? log.list(),
+          },
+        });
       } else if (msg?.kind === 'panel.openLogin') {
         await chrome.tabs.create({ url: 'https://chat.deepseek.com/' });
-      } else if (msg?.kind === 'panel.regenerateKey') {
-        const key = 'sk-dapi-' + Array.from(crypto.getRandomValues(new Uint8Array(16)))
-          .map(b => b.toString(16).padStart(2, '0')).join('');
-        await STORAGE.set({ apiKey: key });
-        port.postMessage({ kind: 'state', payload: { apiKey: key } });
+      } else if (msg?.kind === 'panel.refreshAuth') {
+        await refreshAuthAndLog();
+        const provCfg = await getProviderConfig('deepseek');
+        port.postMessage({ kind: 'state', payload: { providers: { deepseek: provCfg }, log: log.list() } });
       } else if (msg?.kind === 'panel.setPool') {
         await setProviderConfig('deepseek', { poolSize: msg.payload.poolSize });
       } else if (msg?.kind === 'panel.setTtl') {
@@ -201,4 +237,4 @@ chrome.runtime.onConnect.addListener((port) => {
   }
 });
 
-export {};   // MV3 service worker module marker
+export {};

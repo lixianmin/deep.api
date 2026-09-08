@@ -4,8 +4,8 @@ export type ProviderId = 'deepseek' | (string & {});
 export interface ProviderContext { token: string; requestId: string }
 export type AuthStatus = { state: 'logged_in' } | { state: 'logged_out' } | { state: 'expired'; message: string };
 export interface ProviderSession { providerId: ProviderId; webSessionId: string; parentMessageId: number | string | null }
-export interface ProviderCompletion { session: ProviderSession; prompt: string; model: { modelType: 'default' | 'expert'; thinking: boolean }; requestId: string }
-export interface ResolvedModel { modelId: string; modelType: 'default' | 'expert'; thinking: boolean; limitChars: number }
+export interface ProviderCompletion { session: ProviderSession; prompt: string; model: { modelType: 'default' | 'expert' | 'vision'; thinking: boolean }; requestId: string }
+export interface ResolvedModel { modelId: string; modelType: 'default' | 'expert' | 'vision'; thinking: boolean; limitChars: number }
 export interface ProviderAdapter {
   readonly id: ProviderId;
   auth: {

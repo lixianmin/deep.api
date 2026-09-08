@@ -1,19 +1,28 @@
 import type { ModelInfo, ProviderSession, ResolvedModel } from '../adapter';
 
-export const API_BASE = 'https://chat.deepseek.com/api/v0';
-export const WASM_URL = 'https://fe-static.deepseek.com/chat/static/sha3_wasm_bg.7b9ca65ddd.wasm';
+// 当前线上公开模型（来源: https://api-docs.deepseek.com/quick_start/pricing，spike 任务 #1 校准）
 export const MODELS: ModelInfo[] = [
-  { id: 'deepseek-chat', provider: 'deepseek', description: 'DeepSeek V3（网页端，thinking 关）' },
-  { id: 'deepseek-reasoner', provider: 'deepseek', description: 'DeepSeek R1（网页端，思考过程开放）' },
+  { id: 'deepseek-v4-flash', provider: 'deepseek', description: 'V4-Flash — 快速/便宜，默认推荐' },
+  { id: 'deepseek-v4-pro', provider: 'deepseek', description: 'V4-Pro — 推理能力更强，含 thinking' },
+  { id: 'deepseek-v4-flash-vision-exp', provider: 'deepseek', description: 'V4-Flash-Vision — 视觉模型（图转 token 计费）' },
 ];
 
+// 内部 web API 模型类型（chat.deepseek.com/api/v0 用 default/expert/vision）
+// 公开模型 ID → 内部模型类型 + 字符上限 + 是否开启 thinking
+// 字符上限按 ds-free-api 默认（待 spike 实测调整）
+const LIMITS = {
+  'deepseek-v4-flash': { modelType: 'default' as const, thinking: false, limitChars: 2_621_440 },
+  'deepseek-v4-pro': { modelType: 'expert' as const, thinking: true, limitChars: 163_840 },
+  'deepseek-v4-flash-vision-exp': { modelType: 'vision' as const, thinking: false, limitChars: 2_621_440 },
+};
+
 export function resolveModel(modelId: string): ResolvedModel | null {
-  if (modelId === 'deepseek-chat') return { modelId, modelType: 'default', thinking: false, limitChars: 2_621_440 };
-  if (modelId === 'deepseek-reasoner') return { modelId, modelType: 'expert', thinking: true, limitChars: 163_840 };
-  return null;
+  const cfg = LIMITS[modelId as keyof typeof LIMITS];
+  if (!cfg) return null;
+  return { modelId, ...cfg };
 }
 
-export function completionPayload(session: ProviderSession, prompt: string, model: { modelType: 'default' | 'expert'; thinking: boolean }) {
+export function completionPayload(session: ProviderSession, prompt: string, model: { modelType: 'default' | 'expert' | 'vision'; thinking: boolean }) {
   return {
     chat_session_id: session.webSessionId,
     parent_message_id: session.parentMessageId ?? null,
