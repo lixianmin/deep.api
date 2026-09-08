@@ -62,9 +62,8 @@ const res = await window.deepApi.chat.completions.create({
   messages: [{ role: 'user', content: '你好' }],
   stream: true,
 });
-for await (const chunk of res) {
-  if (chunk.choices[0].delta.content) process.stdout.write(chunk.choices[0].delta.content);
-}`;
+for await (const chunk of res) console.log('CHUNK:', chunk.choices?.[0]?.delta?.content ?? '');
+`;
 }
 
 document.getElementById('btn-login')!.addEventListener('click', () => send('panel.openLogin'));
