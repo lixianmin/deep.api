@@ -233,7 +233,7 @@ export interface ModelInfo { id: string; provider: string; description: string }
 ```ts
 import type { ApiErrorBody, ChatCompletion, ChatCompletionChunk } from './api-types';
 
-export type BridgeMethod = 'chat.completions.create' | 'models.list';
+export type BridgeMethod = 'chat.completions.create' | 'chat.completions.cancel' | 'models.list';
 export interface BridgeParams { model: string; messages: Message[]; stream?: boolean; tools?: ToolDef[]; tool_choice?: ToolChoice; apiKey?: string; conversation_id?: string }
 export type BridgeRequestMsg = { __deepApi: { id: number; method: BridgeMethod; params: unknown } };
 export type BridgeResponseMsg =
