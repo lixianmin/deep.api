@@ -190,7 +190,9 @@ async function runToolScenario(modelId, choice) {
     msgs.push({ role: 'assistant', tool_calls: [tc] });
     msgs.push({ role: 'tool', tool_call_id: tc.id, content: '晴 26°C 微风' });
     msgs.push({ role: 'user', content: '那明天呢？' });  // 多轮工具调用：工具结果 + 追问
-    const r2 = await window.deepApi.chat.completions.create({ model: modelId, messages: msgs, tools, tool_choice: choice, ...opts });
+    // 第二轮改 'auto'：required 是“必须调工具”强指令，会让模型在收到工具结果后仍然再调工具（而不是自然回答）。
+    // 'auto' 让模型基于上下文自主决定（自然回答 / 再调都自然）。
+    const r2 = await window.deepApi.chat.completions.create({ model: modelId, messages: msgs, tools, tool_choice: 'auto', ...opts });
     log('[第二轮 finish_reason=' + r2.choices[0].finish_reason + '] ' + (r2.choices[0].message.content || JSON.stringify(r2.choices[0].message)));
   } else {
     log('[第二轮] （跳过——第一轮未调用工具）');
