@@ -41,6 +41,12 @@ export class ResponseTree {
       out.push({ kind: frag.type === 'think' ? 'think_delta' : 'content_delta', content: value });
       return out;
     }
+    if ((op.path === 'response/content' || op.path === 'response/fragments/-1/content') && typeof value === 'string') {
+      // 实测 SSE：内容走 {"p":"response/content","o":"APPEND","v":"..."} + 连续增量 {"v":"..."}（继承 p/o）
+      this.fragments.push({ type: 'response', content: value });
+      out.push({ kind: 'content_delta', content: value });
+      return out;
+    }
     if (op.path === 'response/accumulated_token_usage' && typeof value === 'number') {
       this.usage = value;
       out.push({ kind: 'usage', inputTokens: 0, outputTokens: value });  // input 不可得，Router 层按 spec 决定是否透出
@@ -94,6 +100,8 @@ function makeProcessor(onReady: (ids: { requestMessageId: number; responseMessag
 } {
   const tree = new ResponseTree();
   let sentReady = false;
+  let lastPath: string | null = null;   // 简写增量 {"v":...} 的继承上下文
+  let lastOp = 'SET';
   const processBlock = (block: string): ProviderStreamEvent[] => {
     const out: ProviderStreamEvent[] = [];
     // 调试：打印原始 SSE block（仅本地排查；正式版可去掉）
@@ -105,10 +113,31 @@ function makeProcessor(onReady: (ids: { requestMessageId: number; responseMessag
         if (ids) { sentReady = true; onReady(ids); out.push({ kind: 'message_id', id: ids.responseMessageId }); continue; }
       }
       if (typeof data === 'object' && data !== null) {
-        for (const [path, v] of Object.entries(data as Record<string, unknown>)) {
-          if (typeof v === 'object' && v !== null) {
-            const op = v as { op?: string; path?: string; value?: unknown };
-            out.push(...tree.apply({ op: op.op ?? 'replace', path: op.path ?? path, value: op.value }));
+        // 实测 SSE 格式：{"p":"response/content","o":"APPEND","v":"你好"} 完整操作；
+        // 连续增量 {"v":"！"} 省略 p/o（继承上式）；{"v":{"response":{...}}} 是快照（跳过）。
+        // 兼容旧格式：顶层遍历 {op,path,value} 对象。
+        const d = data as Record<string, unknown>;
+        if (typeof d.p === 'string') {
+          // 形态1：完整操作（p=path, o=op 可选, v=value）
+          const path = d.p;
+          const op = typeof d.o === 'string' ? d.o : 'SET';
+          lastPath = path; lastOp = op;
+          out.push(...tree.apply({ op, path, value: d.v }));
+        } else if ('v' in d && typeof d.v !== 'object' && lastPath !== null) {
+          // 形态2：简写增量（继承上个操作的 path/op）
+          out.push(...tree.apply({ op: lastOp, path: lastPath, value: d.v }));
+        } else {
+          // 形态3：旧格式 {op?,path?,value?} 或 {v:{快照}} 等：仅当子对象是 {op,path,value} 时解析
+          for (const [key, v] of Object.entries(d)) {
+            if (typeof v === 'object' && v !== null) {
+              const op = v as { op?: string; path?: string; value?: unknown };
+              if (typeof op.path === 'string') {
+                const path = op.path;
+                const o = op.op ?? 'replace';
+                lastPath = path; lastOp = o;
+                out.push(...tree.apply({ op: o, path, value: op.value }));
+              }
+            }
           }
         }
       }

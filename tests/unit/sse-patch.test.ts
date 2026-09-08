@@ -68,3 +68,40 @@ describe('completionEvents', () => {
     expect(evs.some(e => e.kind === 'content_delta' && e.content === '尾帧')).toBe(true);
   });
 });
+
+// ===== 真实 SSE 格式（2026-09 实测 chat.deepseek.com）=====
+// 完整操作 {"p":"response/content","o":"APPEND","v":"你好"} + 连续增量 {"v":"！"}(继承 p/o) + usage + status
+const realSse = [
+  'event: ready\ndata: {"request_message_id":1,"response_message_id":2,"model_type":"default"}\n\n',
+  'data: {"v":{"response":{"message_id":2,"parent_id":1,"status":"WIP","content":""}}}\n\n',
+  'data: {"p":"response/content","o":"APPEND","v":"你好"}\n\n',
+  'data: {"v":"！"}\n\n',
+  'data: {"v":"😊"}\n\n',
+  'data: {"p":"response/accumulated_token_usage","o":"SET","v":66}\n\n',
+  'data: {"p":"response/status","v":"FINISHED"}\n\n',
+  'event: finish\ndata: {}\n\n',
+].join('');
+
+describe('completionEvents (真实 SSE 格式 p/o/v)', () => {
+  async function collect(): Promise<ProviderStreamEvent[]> {
+    const chunks: Uint8Array[] = [];
+    for (const block of realSse.split('\n\n')) {
+      chunks.push(new TextEncoder().encode(block + '\n\n'));
+    }
+    const iter = (async function* () { for (const c of chunks) yield c; })();
+    const out: ProviderStreamEvent[] = [];
+    for await (const ev of completionEvents(iter, 1000, () => {})) out.push(ev);
+    return out;
+  }
+  it('parses content deltas, inherits shorthand increments, emits usage', async () => {
+    const evs = await collect();
+    const content = evs.filter(e => e.kind === 'content_delta').map(e => e.content).join('');
+    expect(content).toBe('你好！😊');
+    // message_id 从 ready 事件提取
+    const msgIds = evs.filter(e => e.kind === 'message_id').map(e => (e as any).id);
+    expect(msgIds).toContain(2);
+    // usage 事件
+    const usage = evs.filter(e => e.kind === 'usage').map(e => (e as any).outputTokens);
+    expect(usage).toContain(66);
+  });
+});
