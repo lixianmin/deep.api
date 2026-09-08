@@ -58,7 +58,9 @@ export class PowSolver {
 
   async getChallenge(ctx: ProviderContext, targetPath: string): Promise<Challenge> {
     const r = await this.deps.fetchJson('/chat/create_pow_challenge', { Authorization: `Bearer ${ctx.token}` }, { target_path: targetPath });
-    const data = (r as { data?: { challenge?: Challenge } }).data?.challenge;
+    // 实测响应：{code:0, data:{biz_code:0, biz_data:{challenge:{...}}}}，challenge 在 data.biz_data.challenge
+    const d = r as { data?: { biz_data?: { challenge?: Challenge } | null; challenge?: Challenge } };
+    const data = d?.data?.biz_data?.challenge ?? d?.data?.challenge;
     if (!data) throw new PowFailedError('challenge payload missing');
     return data;
   }

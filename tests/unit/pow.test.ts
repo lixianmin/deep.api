@@ -42,7 +42,7 @@ describe('PowSolver', () => {
 
   it('getChallenge extracts nested challenge payload', async () => {
     const solver = new PowSolver({
-      fetchJson: async () => ({ data: { challenge: { algorithm: 'DeepSeekHashV1', challenge: 'xyz', difficulty: 5, target_path: '/api/v0/chat/completion', salt: 's2', expire_at: 1700000001 } } }),
+      fetchJson: async () => ({ data: { biz_data: { challenge: { algorithm: 'DeepSeekHashV1', challenge: 'xyz', difficulty: 5, target_path: '/api/v0/chat/completion', salt: 's2', expire_at: 1700000001 } } } }),
       fetchBytes: async () => new Uint8Array(),
       instantiate: async () => fakeWasm(1, ''),
       wasmUrl: WASM_URL,
