@@ -181,7 +181,10 @@ export class Router {
         }
       }
     }
-    this.d.mapper.commit(provider.id, handle.convId, messages, handle.session.webSessionId, handle.run.parentMessageId ?? handle.session.parentMessageId);
+    // mirror 必须含 assistant 回复：下一轮 client 传 [..., user 新问题] 时，
+    // tail 首条是 user → 命中 incremental → 复用同一 DeepSeek 会话与 parent_message_id 链（上下文不丢）。
+    const mirrorMessages: Message[] = [...messages, { role: 'assistant', content: agg.content, ...(toolCalls.length ? { tool_calls: toolCalls } : {}) }];
+    this.d.mapper.commit(provider.id, handle.convId, mirrorMessages, handle.session.webSessionId, handle.run.parentMessageId ?? handle.session.parentMessageId);
     agg.toolCalls = toolCalls;
     agg.finishReason = agg.finishReason ?? 'stop';
   }
@@ -211,7 +214,9 @@ export class Router {
           }
         }
         yield finalChunk(cctx, agg.finishReason ?? 'stop', agg.usage);
-        self.d.mapper.commit(provider.id, handle.convId, messages, handle.session.webSessionId, handle.run.parentMessageId ?? handle.session.parentMessageId);
+        // mirror 含 assistant 回复（同 finalize 的修复）：保证下一轮增量命中
+        const mirrorMessages: Message[] = [...messages, { role: 'assistant', content: agg.content, ...(agg.toolCalls.length ? { tool_calls: agg.toolCalls } : {}) }];
+        self.d.mapper.commit(provider.id, handle.convId, mirrorMessages, handle.session.webSessionId, handle.run.parentMessageId ?? handle.session.parentMessageId);
         done(true, self.d.now() - started);
       } catch (e) {
         done(false, self.d.now() - started, (e as Error).message);

@@ -105,3 +105,16 @@ describe('SessionMapper', () => {
     expect(mapper.decide('deepseek', []).action).toBe('error');
   });
 });
+  it('increments when mirror includes assistant reply and client sends full history (multi-turn regression)', () => {
+    const { mapper } = mk();
+    // 第一轮：注册 + commit（mirror = [user, assistant]）
+    const t = mapper.register('deepseek', 'auto:1', 's1', [m('user', 'hi'), m('assistant', 'hello!')]);
+    mapper.commit('deepseek', t.conversationId, [m('user', 'hi'), m('assistant', 'hello!')], 's1', 10);
+    // 第二轮：客户端传全量历史 [user, assistant, user 新问题]
+    const d = mapper.decide('deepseek', [m('user', 'hi'), m('assistant', 'hello!'), m('user', 'what name?')]);
+    expect(d.action).toBe('incremental');
+    if (d.action === 'incremental') {
+      expect(d.thread.webSessionId).toBe('s1');                 // 复用同一 DeepSeek 会话
+      expect(d.tail).toEqual([m('user', 'what name?')]);        // tail 只含新问题
+    }
+  });
