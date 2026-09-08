@@ -123,8 +123,14 @@ function mirrorIsPrefix(mirror: Message[], messages: Message[]): boolean {
   return true;
 }
 function sameMsg(a: Message, b: Message): boolean {
-  return a.role === b.role && a.content === b.content
+  return a.role === b.role && normContent(a.content) === normContent(b.content)
     && (a.tool_call_id ?? null) === (b.tool_call_id ?? null)
     && (a.name ?? null) === (b.name ?? null)
     && JSON.stringify(a.tool_calls ?? null) === JSON.stringify(b.tool_calls ?? null);
+}
+/** null 与 '' 视为等价：OpenAI 客户端多轮场景下，assistant 带 tool_calls 时 content 通常为 null，
+ *  而 deep.api router finalize 存的是 ''（agg.content）。两种表示语义相同。 */
+function normContent(c: string | null | undefined): string | null {
+  if (c === '' || c === undefined) return null;
+  return c;
 }

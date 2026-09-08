@@ -9,7 +9,7 @@ function mergeAdjacent(msgs: Message[]): Message[] {
   for (const msg of msgs) {
     const last = out[out.length - 1];
     if (last && last.role === msg.role && msg.role !== 'tool' && !last.tool_calls && !msg.tool_calls) {
-      last.content = `${last.content}\n\n${msg.content}`;
+      last.content = `${last.content ?? ''}\n\n${msg.content ?? ''}`;
     } else {
       out.push({ ...msg });
     }
@@ -20,7 +20,7 @@ function mergeAdjacent(msgs: Message[]): Message[] {
 // DeepSeek 网页版 completion 接口的 prompt = 当前轮提问的纯文本；历史上下文由 parent_message_id 链维护。
 // 不再使用 <｜user｜> 等模板标记（网页端会原样显示）。
 function renderOne(msg: Message): string {
-  return msg.content;
+  return msg.content ?? '';
 }
 
 export function renderTranscript(

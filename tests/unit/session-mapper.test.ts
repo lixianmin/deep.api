@@ -118,3 +118,30 @@ describe('SessionMapper', () => {
       expect(d.tail).toEqual([m('user', 'what name?')]);        // tail 只含新问题
     }
   });
+
+  it('sameMsg normalizes null vs empty string for assistant content (tool_calls scenario) — v0.1.43 fix', () => {
+    // mirror 存的是 router finalize 的 ''（tool_calls 模式下 agg.content 为空字符串）
+    // demo 客户端发的是 OpenAI 风格 null（tool_calls 模式标准）
+    // 两者应被视为相同，否则 tool-loop 第二轮会误判 rebuild → 开新 session
+    const { mapper } = mk();
+    mapper.register('deepseek', 'auto:1', 's1', [
+      m('user', '北京天气如何？'),
+      { role: 'assistant', content: '', tool_calls: [{ id: 'w1', type: 'function', function: { name: 'get_weather', arguments: '{"city":"北京"}' } }] },
+    ]);
+    mapper.commit('deepseek', 'auto:1', [
+      m('user', '北京天气如何？'),
+      { role: 'assistant', content: '', tool_calls: [{ id: 'w1', type: 'function', function: { name: 'get_weather', arguments: '{"city":"北京"}' } }] },
+    ], 's1', 5);
+    // 第二轮：demo 客户端传 content=null（OpenAI 风格）
+    const d = mapper.decide('deepseek', [
+      m('user', '北京天气如何？'),
+      { role: 'assistant', content: null, tool_calls: [{ id: 'w1', type: 'function', function: { name: 'get_weather', arguments: '{"city":"北京"}' } }] },
+      { role: 'tool', tool_call_id: 'w1', content: '晴 26°C 微风' },
+      m('user', '那明天呢？'),
+    ]);
+    expect(d.action).toBe('incremental');
+    if (d.action === 'incremental') {
+      expect(d.thread.webSessionId).toBe('s1');
+      expect(d.tail.length).toBe(2);  // tool + user
+    }
+  });
