@@ -92,6 +92,13 @@ async function build(): Promise<{ router: Router; log: RingLog }> {
       const text = await r.text();
       let parsed: unknown;
       try { parsed = text ? JSON.parse(text) : null; } catch { throw Object.assign(new Error(`bad json: ${text.slice(0, 200)}`), { status: r.status }); }
+      // DeepSeek 业务错误：HTTP 200 但顶层 code != 0（如 token 过期 code=401）——必须识别，
+      // 否则 create_session 会报误导性的 "id missing" 而非"登录失效"。
+      const biz = parsed as { code?: unknown } | null;
+      if (biz && typeof biz.code === 'number' && biz.code !== 0) {
+        const bizStatus = biz.code === 401 ? 401 : biz.code === 429 ? 429 : 400;
+        throw Object.assign(new Error(`deepseek biz error code=${biz.code}: ${text.slice(0, 200)}`), { status: bizStatus, headers: Object.fromEntries(r.headers.entries()), body: parsed });
+      }
       if (!r.ok) throw Object.assign(new Error(`http ${r.status}`), { status: r.status, headers: Object.fromEntries(r.headers.entries()), body: parsed });
       return parsed;
     },
@@ -140,7 +147,12 @@ async function probeAuthStatus(): Promise<{ state: string; message?: string }> {
       method: 'POST', headers: probeHeaders(token), body: JSON.stringify({}),
     });
     if (r.status === 200 || r.status === 201) {
-      try { const j: any = await r.json(); const id = j?.data?.biz_data?.id ?? j?.data?.chat_session?.id ?? j?.data?.chat_session_id; if (id) await fetch(`${DEEPSEEK_API_BASE}/chat_session/delete`, { method: 'POST', headers: probeHeaders(token), body: JSON.stringify({ chat_session_id: id }) }); } catch { /* best-effort */ }
+      const j: any = await r.json();
+      // 业务码检查：HTTP 200 但 code != 0 = 登录失效/业务错误
+      if (j && typeof j.code === 'number' && j.code !== 0) {
+        return { state: 'expired', message: `登录失效（业务 code=${j.code}，请重新登录 chat.deepseek.com）` };
+      }
+      try { const id = j?.data?.biz_data?.id ?? j?.data?.chat_session?.id ?? j?.data?.chat_session_id; if (id) await fetch(`${DEEPSEEK_API_BASE}/chat_session/delete`, { method: 'POST', headers: probeHeaders(token), body: JSON.stringify({ chat_session_id: id }) }); } catch { /* best-effort */ }
       return { state: 'logged_in' };
     }
     if (r.status === 401 || r.status === 403) return { state: 'expired', message: `登录失效（HTTP ${r.status}）` };
