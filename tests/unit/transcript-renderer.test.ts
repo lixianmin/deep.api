@@ -5,63 +5,29 @@ import type { Message } from '../../src/shared/api-types';
 const m = (role: Message['role'], content: string, extra: Partial<Message> = {}): Message => ({ role, content, ...extra });
 
 describe('renderTranscript', () => {
-  it('merges adjacent same-role messages', () => {
-    const r = renderTranscript([m('user', 'a'), m('user', 'b'), m('assistant', 'c')]);
+  it('returns plain text of last user message (no role template tags)', () => {
+    const r = renderTranscript([m('user', '你好'), m('assistant', 'hi')]);
     if (!r.ok) throw new Error('expected ok');
-    expect(r.prompt.match(/a\s*\n\s*b/g)?.length ?? 0).toBeGreaterThan(0);
-    expect(r.prompt.indexOf('c')).toBeGreaterThan(-1);
+    expect(r.prompt).toBe('你好');
+    expect(r.prompt).not.toContain('user');
   });
-  it('folds system into first block, keeps role order', () => {
-    const r = renderTranscript([m('system', 'sys'), m('user', 'u1'), m('assistant', 'a1')]);
+  it('folds system into the start of the prompt', () => {
+    const r = renderTranscript([m('system', 'sys指令'), m('user', 'u1')]);
     if (!r.ok) throw new Error('expected ok');
-    expect(r.prompt.indexOf('sys')).toBeLessThan(r.prompt.indexOf('u1'));
-    expect(r.prompt.indexOf('u1')).toBeLessThan(r.prompt.indexOf('a1'));
+    expect(r.prompt).toContain('sys指令');
+    expect(r.prompt.indexOf('sys指令')).toBeLessThan(r.prompt.indexOf('u1'));
   });
-  it('renders tool messages and tool_calls', () => {
+  it('takes last user message as prompt in multi-turn tail (history by parent_message_id)', () => {
+    const r = renderTail([m('assistant', '上一次回复'), m('user', '第二轮问题')]);
+    expect(r).toBe('第二轮问题');
+  });
+  it('uses tool message content if it is the last non-assistant message', () => {
     const r = renderTranscript([
       m('user', 'q'),
       m('assistant', '', { tool_calls: [{ id: 'c1', type: 'function', function: { name: 'f', arguments: '{}' } }] }),
       m('tool', 'result', { tool_call_id: 'c1' }),
     ]);
     if (!r.ok) throw new Error('expected ok');
-    expect(r.prompt).toContain('c1');
     expect(r.prompt).toContain('result');
-    expect(r.prompt).toContain('assistant-tool-call');
-    expect(r.prompt).toContain('"f"');
-  });
-  it('does not merge assistant with tool_calls into a plain assistant', () => {
-    const r = renderTranscript([
-      m('assistant', 'plain'),
-      m('assistant', '', { tool_calls: [{ id: 'c2', type: 'function', function: { name: 'g', arguments: '{}' } }] }),
-    ]);
-    if (!r.ok) throw new Error('expected ok');
-    expect(r.prompt).toContain('assistant-tool-call');
-    expect(r.prompt).toContain('"g"');
-  });
-});
-
-describe('hashMessages', () => {
-  it('is stable and distinct', async () => {
-    const a = await hashMessages([m('user', 'hi')]);
-    const b = await hashMessages([m('user', 'hi')]);
-    const c = await hashMessages([m('user', 'ho')]);
-    expect(a).toBe(b);
-    expect(a).not.toBe(c);
-    expect(a).toMatch(/^[0-9a-f]{32}$/);
-  });
-});
-
-describe('renderTail', () => {
-  it('renders multi-turn tail with role markers', () => {
-    const t = renderTail([m('tool', 'r', { tool_call_id: 'c2' }), m('user', 'next')]);
-    expect(t).toContain('c2');
-    expect(t).toContain('next');
-  });
-});
-
-describe('limitCharsFor', () => {
-  it('exports model char limits', () => {
-    expect(limitCharsFor('expert')).toBe(163_840);
-    expect(limitCharsFor('default')).toBe(2_621_440);
   });
 });

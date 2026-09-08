@@ -17,31 +17,27 @@ function mergeAdjacent(msgs: Message[]): Message[] {
   return out;
 }
 
+// DeepSeek 网页版 completion 接口的 prompt = 当前轮提问的纯文本；历史上下文由 parent_message_id 链维护。
+// 不再使用 <｜user｜> 等模板标记（网页端会原样显示）。
 function renderOne(msg: Message): string {
-  switch (msg.role) {
-    case 'system':
-      return `<｜System｜>\n${msg.content}`;
-    case 'user':
-      return `<｜user｜>\n${msg.content}`;
-    case 'assistant':
-      if (msg.tool_calls?.length) {
-        const calls = msg.tool_calls
-          .map((c) => `assistant-tool-call: ${JSON.stringify({ name: c.function.name, arguments: c.function.arguments })}`)
-          .join('\n');
-        return `<｜assistant｜>\n${calls}`;
-      }
-      return `<｜assistant｜>\n${msg.content}`;
-    case 'tool':
-      return `tool(${msg.tool_call_id ?? ''}): ${msg.content}`;
-  }
+  return msg.content;
 }
 
 export function renderTranscript(
   messages: Message[],
 ): { ok: true; prompt: string } | { ok: false; reason: 'too-long'; limitChars: number; actualChars: number } {
   const merged = mergeAdjacent(messages);
-  const prompt = merged.map(renderOne).join('\n\n');
-  return { ok: true, prompt };
+  // system 折叠：拼到首条 user 消息前（用户决策：保留 system 效果的最小注入）
+  const systems = merged.filter((msg) => msg.role === 'system').map((msg) => msg.content);
+  // 取最后一条 user/tool 消息的纯文本作为本轮提问（历史依赖 parent_message_id 链）
+  let last: Message | null = null;
+  for (let i = merged.length - 1; i >= 0; i--) {
+    const msg = merged[i];
+    if (msg && (msg.role === 'user' || msg.role === 'tool')) { last = msg; break; }
+  }
+  const content = last ? renderOne(last) : '';
+  const sys = systems.length ? '【系统指令】\n' + systems.join('\n\n') + '\n\n' : '';
+  return { ok: true, prompt: sys + content };
 }
 
 export function renderTail(tail: Message[]): string {
