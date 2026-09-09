@@ -51,6 +51,17 @@ export class Router {
     const resolved = provider.resolveModel(modelId)!;
     const messages = p.messages as Message[] | undefined;
     if (!Array.isArray(messages) || messages.length === 0) throw err('invalid_request_error', 'messages array required', 400);
+    // 2026-09-09（fix/vision-rejection）：spec §6.3 vision v1 不接入。网页 web API 的 completion
+    // body `prompt` 是单字符串，不接受 OpenAI 风格 `messages[].content` 数组（含 image_url block）。
+    // 旧实现把 array content 静默吞为 `[object Object]` 透传 → DeepSeek 视觉侧返空 → 客户端
+    // 看不到 SSE 事件也看不到错误（spice 实测：网页里看不到新 session）。
+    // 入口处显式拒绝非字符串 content；视觉模型未来需要走独立上传端点 + ref_file_ids（v2 spike）。
+    for (let i = 0; i < messages.length; i++) {
+      const c = messages[i]!.content;
+      if (c !== null && typeof c !== 'string') {
+        throw err('invalid_request_error', `messages[${i}].content 必须是字符串（vision / image_url 暂不支持，v1 仅接受纯文本；视觉模型请使用图片上传 API——v2 计划）`, 400);
+      }
+    }
     const ctx = { token, requestId: `req-${started}-${Math.random().toString(36).slice(2, 8)}` };
     const toolCtx = buildToolPrompt((p.tools as ToolDef[] | undefined) ?? [], (p.tool_choice as ToolChoice | undefined) ?? 'auto');
     // 调用方可覆盖 thinking/search/reasoning_effort；undefined 字段被下游忽略

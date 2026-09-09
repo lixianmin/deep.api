@@ -152,6 +152,72 @@ describe('Router', () => {
   });
 });
 
+// 2026-09-09（fix/vision-rejection）：网页 web API 的 completion body `prompt` 是单字符串，
+// 不接受 OpenAI 风格 `messages[].content` 数组（含 `image_url` block）。视觉模型 `ref_file_ids`
+// 永远是 `[]`（client.ts 硬编码），渲染器会把 array content 静默吞为 `[object Object]` →
+// DeepSeek 视觉侧返空 → 客户端没有任何 SSE 事件也看不到错误（spice 实测：网页里看不到新 session）。
+// 入口处显式拒绝非字符串 content，返回 400 让客户端立刻知道视觉未启用（spec §6.3：vision v1 不接入）。
+describe('Router vision content 拒绝（fix/vision-rejection）', () => {
+  it('fail-to-pass: 视觉模型 + array content（image_url）→ 400 invalid_request_error，不调 streamCompletion', async () => {
+    let called = 0;
+    const a = stubAdapter({
+      streamCompletion: async function* () { called++; yield { kind: 'content_delta', content: 'should-not-happen', finish_reason: 'stop' }; },
+    });
+    const r = makeRouter(a);
+    const imageMsg: any = {
+      role: 'user',
+      content: [
+        { type: 'text', text: '看图' },
+        { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,/9j/4AAQ' } },
+      ],
+    };
+    await expect(r.create(TOKEN, {
+      model: 'deepseek-v4-flash-vision-exp',
+      messages: [imageMsg],
+    })).rejects.toMatchObject({
+      status: 400,
+      error: { error: { code: 'invalid_request_error' } },
+    });
+    // 关键：拒绝必须在创建会话/发起请求之前——否则 DeepSeek 网页端会出现空 session
+    expect(called).toBe(0);
+  });
+
+  it('fail-to-pass: 错误信息点名 vision 模型 + v2 计划', async () => {
+    const r = makeRouter(stubAdapter());
+    const imageMsg: any = {
+      role: 'user',
+      content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,xxx' } }],
+    };
+    try {
+      await r.create(TOKEN, { model: 'deepseek-v4-flash-vision-exp', messages: [imageMsg] });
+      throw new Error('should have thrown');
+    } catch (e: any) {
+      const msg = e?.error?.error?.message ?? '';
+      expect(msg).toMatch(/vision|visual|图像|视觉/i);
+    }
+  });
+
+  it('非视觉模型 + array content 同样拒绝（renderer 永远不接受 array content）', async () => {
+    const r = makeRouter(stubAdapter());
+    const imageMsg: any = {
+      role: 'user',
+      content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,xxx' } }],
+    };
+    await expect(r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [imageMsg] })).rejects.toMatchObject({
+      status: 400,
+      error: { error: { code: 'invalid_request_error' } },
+    });
+  });
+
+  it('字符串 content 仍正常工作（回归保护）', async () => {
+    const a = stubAdapter();
+    const r = makeRouter(a);
+    const res: any = await r.create(TOKEN, { model: 'deepseek-v4-flash-vision-exp', messages: [m('user', '你是视觉模型吗')] });
+    // vision 模型 + 纯文本应该照常工作（DeepSeek 视觉模型支持纯文本输入；只是不支持 in-line image）
+    expect(res.choices[0].message.content).toBe('ok');
+  });
+});
+
 // 2026-09-09（feat/diagnostic-logging）：popup 日志区需要的诊断现场。
 // spice 报“每发一条消息重建一条”需看 threadFound / deletedOld / action 判断“多次调中有无轮番 rebuild 删 old”。
 describe('Router 诊断日志（v0.1.50）', () => {
