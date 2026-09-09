@@ -115,20 +115,23 @@ describe('mountLog', () => {
     } finally { unmount(); }
   });
 
-  it('每行渲染 8 列（at / provider / model / ok / ms / action / cid / replySample）', async () => {
+  it('每行渲染 at / provider / model / ok / ms / action / cid + reply/💭reason 双行内容块', async () => {
     const pane = document.createElement('div');
     const unmount = mountLog(pane);
     try {
       portListeners.msg!({ kind: 'state', payload: { log: logs } });
       await new Promise(r => setTimeout(r, 10));
       const row = pane.querySelector('[data-row]')!;
-      expect(row.querySelectorAll('span').length).toBe(8);
-      // 验证 8 列内容字段都渲染了
+      // 2026-09-09（diag/reasoning-sample）：原 8 列单行变 3 行块——顶行元数据 + reply:行 + 💭reason:行
+      // Pro 场景一眼看见「reason 有内容、reply 为空」
       const text = row.textContent ?? '';
-      expect(text).toContain('p');      // provider
-      expect(text).toContain('m');      // model
+      expect(text).toContain('reply:');
+      expect(text).toContain('💭reason:');
       expect(text).toContain('ok');     // ok|err
       expect(text).toContain('10ms');   // ms
+      // 元数据项都在
+      expect(text).toMatch(/p/);        // provider 含 p
+      expect(text).toMatch(/m/);        // model 含 m
     } finally { unmount(); }
   });
 });

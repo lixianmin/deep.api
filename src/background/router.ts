@@ -103,11 +103,12 @@ export class Router {
       deletedOld: preDecide.action === 'rebuild' && preDecide.existing !== null,
       webSessionId: handle.session.webSessionId,
     };
-    const done = (ok: boolean, ms: number, error?: string, extra?: { finishReason?: string; parentMessageId?: string | number | null; replySample?: string }) =>
+    const done = (ok: boolean, ms: number, error?: string, extra?: { finishReason?: string; parentMessageId?: string | number | null; replySample?: string; reasoningSample?: string }) =>
       this.d.log.push({
         at: this.d.now(), provider: provider.id, model: modelId, ok, ms, error, ...diag,
         finishReason: extra?.finishReason, parentMessageId: extra?.parentMessageId,
         replySample: extra?.replySample,
+        reasoningSample: extra?.reasoningSample,
         firstDiffIdx,
         messagesFull: JSON.stringify(messages),
         mirrorFull: threadFound
@@ -124,7 +125,7 @@ export class Router {
       done(false, this.d.now() - started, (e as Error).message);
       throw this.mapErr(e);
     }
-    done(true, this.d.now() - started, undefined, { finishReason: agg.finishReason ?? 'stop', parentMessageId: handle.run.parentMessageId, replySample: agg.content.slice(0, 200) });
+    done(true, this.d.now() - started, undefined, { finishReason: agg.finishReason ?? 'stop', parentMessageId: handle.run.parentMessageId, replySample: agg.content.slice(0, 200), reasoningSample: agg.reasoning.slice(0, 200) });
     return toAggregate({ id: `chatcmpl-${ctx.requestId}`, model: modelId, created: Math.floor(started / 1000) }, agg);
   }
 
@@ -257,7 +258,7 @@ export class Router {
     agg.finishReason = agg.finishReason ?? 'stop';
   }
 
-  private encodeStream(provider: ProviderAdapter, handle: { stream: AsyncIterable<ProviderStreamEvent>; session: ProviderSession; convId: string; thread: ThreadEntry; run: RunState }, ctx: ProviderContext, model: string, started: number, messages: Message[], toolCtx: ToolContext, done: (ok: boolean, ms: number, error?: string, extra?: { finishReason?: string; parentMessageId?: string | number | null; replySample?: string }) => void): AsyncIterable<ChatCompletionChunk> & { cancel(): Promise<void> } {
+  private encodeStream(provider: ProviderAdapter, handle: { stream: AsyncIterable<ProviderStreamEvent>; session: ProviderSession; convId: string; thread: ThreadEntry; run: RunState }, ctx: ProviderContext, model: string, started: number, messages: Message[], toolCtx: ToolContext, done: (ok: boolean, ms: number, error?: string, extra?: { finishReason?: string; parentMessageId?: string | number | null; replySample?: string; reasoningSample?: string }) => void): AsyncIterable<ChatCompletionChunk> & { cancel(): Promise<void> } {
     const cctx: StreamContext = { id: `chatcmpl-${ctx.requestId}`, model, created: Math.floor(started / 1000) };
     const agg: StreamAggregate = { content: '', reasoning: '', toolCalls: [], finishReason: null };
     const self = this;
@@ -297,7 +298,7 @@ export class Router {
         const mirrorMessages: Message[] = [...messages, { role: 'assistant', content: sentRawContent, ...(agg.toolCalls.length ? { tool_calls: agg.toolCalls } : {}) }];
         // 2026-09-09（fix/model-switch-rebuild）：commit 时同步 modelType。
         self.d.mapper.commit(provider.id, handle.convId, mirrorMessages, handle.session.webSessionId, handle.run.parentMessageId ?? handle.session.parentMessageId, handle.run.model.modelType);
-        done(true, self.d.now() - started, undefined, { finishReason: agg.finishReason ?? 'stop', parentMessageId: handle.run.parentMessageId, replySample: agg.content.slice(0, 200) });
+        done(true, self.d.now() - started, undefined, { finishReason: agg.finishReason ?? 'stop', parentMessageId: handle.run.parentMessageId, replySample: agg.content.slice(0, 200), reasoningSample: agg.reasoning.slice(0, 200) });
       } catch (e) {
         done(false, self.d.now() - started, (e as Error).message);
         throw mapErrStatic(e, self.d.registry);

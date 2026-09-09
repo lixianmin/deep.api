@@ -12,7 +12,7 @@ export function mountLog(pane: HTMLElement): () => void {
       <label><input type="checkbox" data-filter-ok value="ok">ok</label>
       <label><input type="checkbox" data-filter-err value="err">err</label>
       <span style="margin-left:12px;">search:</span>
-      <input type="text" data-search placeholder="error / replySample / cid">
+      <input type="text" data-search placeholder="error / reply / reason / cid">
       <button data-refresh>刷新</button>
     </div>
     <div data-list style="max-height:60vh;overflow:auto;border:1px solid #ddd;"></div>
@@ -39,7 +39,7 @@ export function mountLog(pane: HTMLElement): () => void {
       if (okChecked && !l.ok) return false;
       if (errChecked && l.ok) return false;
       if (q) {
-        const hay = ((l.error ?? '') + ' ' + (l.replySample ?? '') + ' ' + (l.cid ?? '')).toLowerCase();
+        const hay = ((l.error ?? '') + ' ' + (l.replySample ?? '') + ' ' + (l.reasoningSample ?? '') + ' ' + (l.cid ?? '')).toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
@@ -50,16 +50,29 @@ export function mountLog(pane: HTMLElement): () => void {
     const rows = filter();
     listEl.innerHTML = rows.map((l, i) => {
       const t = new Date(l.at).toLocaleTimeString();
+      const reason = (l.reasoningSample ?? '').slice(0, 100);
+      const reply = (l.replySample ?? l.error ?? '').slice(0, 100);
+      // Pro 风格「只返 reasoning 不返 content」现场一眼看见：reason 行有内容、reply 行空
+      const reasonStyle = reason ? 'color:#a60;background:#fff8e8;' : 'color:#ccc;';
       return `<div data-row style="padding:4px;border-bottom:1px solid #eee;font-family:ui-monospace,monospace;font-size:11px;">
-        <span style="color:#888;">${t}</span>
-        <span style="margin-left:8px;">${l.provider}</span>
-        <span style="margin-left:8px;">${l.model}</span>
-        <span style="margin-left:8px;color:${l.ok ? '#0a0' : '#a00'};">${l.ok ? 'ok' : 'err'}</span>
-        <span style="margin-left:8px;">${l.ms}ms</span>
-        <span style="margin-left:8px;">${l.action ?? ''}</span>
-        <span style="margin-left:8px;color:#666;">${l.cid ?? ''}</span>
-        <span style="margin-left:8px;">${(l.replySample ?? l.error ?? '').slice(0, 100)}</span>
-        <button data-copy="${i}" style="float:right;">复制完整 JSON</button>
+        <div>
+          <span style="color:#888;">${t}</span>
+          <span style="margin-left:8px;">${l.provider}</span>
+          <span style="margin-left:8px;">${l.model}</span>
+          <span style="margin-left:8px;color:${l.ok ? '#0a0' : '#a00'};">${l.ok ? 'ok' : 'err'}</span>
+          <span style="margin-left:8px;">${l.ms}ms</span>
+          <span style="margin-left:8px;">${l.action ?? ''}</span>
+          <span style="margin-left:8px;color:#666;">${l.cid ?? ''}</span>
+          <button data-copy="${i}" style="float:right;">复制完整 JSON</button>
+        </div>
+        <div style="margin-left:8px;margin-top:2px;">
+          <span style="color:#888;">reply:</span>
+          <span style="margin-left:4px;">${reply || '(空)'}</span>
+        </div>
+        <div style="margin-left:8px;margin-top:2px;${reasonStyle}">
+          <span style="color:#888;">💭reason:</span>
+          <span style="margin-left:4px;">${reason || '(空)'}</span>
+        </div>
       </div>`;
     }).join('');
     listEl.querySelectorAll<HTMLButtonElement>('[data-copy]').forEach(btn => {

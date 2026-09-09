@@ -152,6 +152,44 @@ describe('Router', () => {
     expect((a as any).prompts[1]).toBe('q2');
   });
 
+  // 2026-09-09（diag/reasoning-sample）：spice 用户报 Pro 模式返回空 content 但 finishReason=stop。
+  // 强烈怀疑 Pro（model_type=expert）在 DeepSeek 网页 web API 上只返回 thinking/reasoning，不返回
+  // content（与 Flash 默认 false 不同）。当前 log 只记 replySample（content），reasoning 被静默丢，
+  // 排查现场看不见。修：log 同时记 reasoningSample（agg.reasoning 前 200 字），看一眼就能锁定。
+  it('fail-to-pass: Pro 风格「只返回 thinking」响应 → log 记下 reasoningSample 与 replySample 同时可见', async () => {
+    const a = stubAdapter({
+      streamCompletion: async function* () {
+        yield { kind: 'message_id', id: 1 };
+        yield { kind: 'think_delta', content: '用户问「只是测试」，是简单请求。' };
+        yield { kind: 'think_delta', content: '我应该简洁回个 OK。' };
+        // 注意：没有 content_delta，模拟 Pro 只输出 thinking 不输出 content 的场景
+        yield { kind: 'content_delta', content: '', finish_reason: 'stop' };
+      },
+    });
+    const r = makeRouter(a);
+    await r.create(TOKEN, { model: 'deepseek-v4-pro', messages: [m('user', '只是测试一下')] });
+    const e = r['d'].log.list()[0]!;
+    expect(e.replySample).toBe('');
+    expect(e.reasoningSample).toContain('用户问');
+    expect(e.reasoningSample).toContain('OK');
+    expect(e.finishReason).toBe('stop');
+    expect(e.ok).toBe(true);
+  });
+
+  it('fail-to-pass: Flash 风格「只返回 content」响应 → reasoningSample 仍记下（即使为空）便于现场排查', async () => {
+    const a = stubAdapter({
+      streamCompletion: async function* () {
+        yield { kind: 'message_id', id: 1 };
+        yield { kind: 'content_delta', content: '你好', finish_reason: 'stop' };
+      },
+    });
+    const r = makeRouter(a);
+    await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'hi')] });
+    const e = r['d'].log.list()[0]!;
+    expect(e.replySample).toBe('你好');
+    expect(e.reasoningSample).toBe('');   // Flash 不发 thinking
+  });
+
   it('rate-limited twice then succeeds with backoff', async () => {
     vi.useFakeTimers();
     try {

@@ -27,6 +27,11 @@ export interface LogEntry {
   // 排查：finishReason=stop 时用户只能看到 UI 文本；replySample 直接给出 deep.api 收到的模型原文，
   // 一眼判断是「无标签 JSON」还是「标签在但解析失败」。
   replySample?: string;
+  // 2026-09-09（diag/reasoning-sample）：推理/思考原文（前 200 字）——spice 用户报 Pro 模型返空 content
+  // 但 finishReason=stop。严重怀疑 Pro（model_type=expert）在 DeepSeek 网页 web API 上只返 reasoning 不返
+  // content（与 Flash 默认不同），当前 log 只记 replySample，reasoning 被静默丢，排查现场看不见。
+  // 修：同时记 reasoningSample，与 replySample 并列；一眼看出 Pro 是否只返了 thinking。
+  reasoningSample?: string;
 }
 
 export class RingLog {
