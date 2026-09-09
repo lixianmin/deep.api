@@ -19,7 +19,7 @@ describe('demo.js shim (chrome-extension:// demo 场景)', () => {
     };
     // 加载 demo.js（会执行 shim 逻辑）
     vi.resetModules();
-    return import(/* @ts-ignore */ '../../examples/demo-page/demo.js' as any).catch(() => undefined);
+    return import(/* @ts-ignore */ '../../src/demo/demo-page/demo.js' as any).catch(() => undefined);
   });
 
   it('chrome-extension 场景：window.deepApi 注入并能调 models.list', async () => {

@@ -1,5 +1,5 @@
 /**
- * 共享 demo runner — 供 demo-page (examples/demo-page/index.html) 和 popup "Open Demo" 折叠面板使用。
+ * 共享 demo runner — 供 demo-page (src/demo/demo-page/index.html) 和 popup "Open Demo" 折叠面板使用。
  * 接收 mountPoint: HTMLElement（容器），渲染 demo 控件进去；
  * 内部所有 querySelector 都用 root 限定（不污染 document 全局），多次 mount 互不冲突。
  */
