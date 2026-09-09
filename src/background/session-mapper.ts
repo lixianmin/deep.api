@@ -92,6 +92,25 @@ export class SessionMapper {
     t.lastUsedAt = this.deps.now();
     t.idleSince = this.deps.now();
     this.persist();
+    this.scheduleSweep();
+  }
+
+  // 2026-09-09（fix/evict-expired）：commit 后 60s 跑一次 sweep，
+  // 清掉 TTL 过期 thread（TTL=30min 来自 ProviderConfig.ttlMinutes）。
+  // 单 timer 实例，避免频繁 commit 时反复 setTimeout。
+  private sweepTimer: ReturnType<typeof setTimeout> | null = null;
+  private scheduleSweep(): void {
+    if (this.sweepTimer) return;
+    this.sweepTimer = setTimeout(() => {
+      this.sweepTimer = null;
+      void this.sweepAll();
+    }, 60_000);
+  }
+  private async sweepAll(): Promise<void> {
+    // 仅 deepseek provider 名下 thread（当前唯一 provider；多 provider 时扩展）
+    const providers = new Set<string>();
+    for (const k of this.threads.keys()) providers.add(k.split(':')[0]!);
+    for (const pid of providers) await this.evictExpired(pid);
   }
 
   async fail(providerId: string, conversationId: string) {

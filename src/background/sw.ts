@@ -81,6 +81,11 @@ async function build(): Promise<{ router: Router; log: RingLog }> {
     const snap = (got as { 'threads.v1'?: { seq: number; threads: ThreadEntry[] } } | undefined)?.['threads.v1'];
     if (snap && Array.isArray(snap.threads)) mapper.restore(snap);
   } catch { /* 持久化数据损坏：放弃恢复，走 rebuild 安全路径 */ }
+  // 2026-09-09（fix/evict-expired）：TTL 默认 30min（来自 ProviderConfig.ttlMinutes）。
+  // restore 之后立即 sweep 一次——清掉 restore 进来的过期 thread，
+  // 避免 SW 长时间没重启后 storage 里堆陈旧数据（chrome.storage 容量有界）。
+  // 周期性 sweep（每 60s）由 commit 路径 setTimeout 触发，详见 evictExpired 调用点。
+  await mapper.evictExpired('deepseek');
   let wasmInst: Promise<WasmInstance> | null = null;
   async function getWasm(): Promise<WasmInstance> {
     if (!wasmInst) wasmInst = (async () => {

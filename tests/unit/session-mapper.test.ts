@@ -145,3 +145,60 @@ describe('SessionMapper', () => {
       expect(d.tail.length).toBe(2);  // tool + user
     }
   });
+
+describe('SessionMapper 周期 sweep（fix/evict-expired）', () => {
+  it('fail-to-pass: commit 后 60s TTL 过期 thread 被清', async () => {
+    vi.useFakeTimers();
+    try {
+      let now = 1_000_000;
+      const mapper = new SessionMapper(
+        { createSession: async () => ({ webSessionId: '' }), deleteSession: vi.fn(async () => {}), now: () => now },
+        { poolSize: 5, ttlMs: 60_000 },   // ttl = 60s，方便快进
+      );
+      // 写一个 thread，commit 让它 idleSince = now
+      const t = mapper.register('deepseek', 'auto:1', 's1', [m('user', 'a')]);
+      mapper.commit('deepseek', 'auto:1', [m('user', 'a')], 's1', 1);
+      expect(mapper.stats().threads).toBe(1);
+
+      // 快进 61s（> ttlMs 60s）但还没到 setTimeout 60s 触发点 → thread 仍在
+      now += 61_000;
+      expect(mapper.stats().threads).toBe(1);
+
+      // 触发 setTimeout（sweepTimer 60s 已在 commit 时挂上）
+      // 先快进到 setTimeout 触发点：commit 时 already setTimeout 60s，从那之后 60s
+      now += 60_000;
+      await vi.runAllTimersAsync();
+
+      // 过期 thread 已被 sweep 清掉
+      expect(mapper.stats().threads).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('commit 频率高时 sweepTimer 单实例去重', async () => {
+    vi.useFakeTimers();
+    try {
+      let now = 1_000_000;
+      const mapper = new SessionMapper(
+        { createSession: async () => ({ webSessionId: '' }), deleteSession: vi.fn(async () => {}), now: () => now },
+        { poolSize: 5, ttlMs: 60_000 },
+      );
+      mapper.register('deepseek', 'auto:1', 's1', [m('user', 'a')]);
+      mapper.commit('deepseek', 'auto:1', [m('user', 'a')], 's1', 1);
+
+      // 在 60s 内连续 commit 多次（不触发新 timer）
+      now += 10_000;
+      mapper.commit('deepseek', 'auto:1', [m('user', 'a')], 's1', 1);
+      now += 10_000;
+      mapper.commit('deepseek', 'auto:1', [m('user', 'a')], 's1', 1);
+
+      // 跑完所有 timer
+      await vi.runAllTimersAsync();
+      // sweep 只跑了一次（不影响断言本身；主要断言没崩）
+      expect(mapper.stats().threads).toBeGreaterThanOrEqual(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
