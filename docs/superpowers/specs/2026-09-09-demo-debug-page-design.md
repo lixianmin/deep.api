@@ -58,7 +58,7 @@ demo 页（同源 chrome-extension://.../demo/index.html）
 - `src/demo/debug-panel.ts` — tab 框架、URL hash 路由、5 个 tab 的 lazy 挂载入口。
 - `src/demo/tabs/chat.ts` — Chat tab 渲染 + 消息流 UI + 右键菜单。
 - `src/demo/tabs/routing.ts` — 路由 tab：thread 表格 + 拉刷新。
-- `src/demo/tabs/log.ts` — 日志 tab：虚拟滚动列表 + 过滤。
+- `src/demo/tabs/log.ts` — 日志 tab：滚动列表 + 过滤（普通 overflow，不实现真虚拟滚动）。
 - `src/demo/tabs/sse.ts` — SSE 帧 tab：按 request_id 分组。
 - `src/demo/tabs/scenarios.ts` — 场景 tab：6 按钮 + 「全部跑」+ 结果表格。
 - `src/demo/tabs/panel-api.ts` — 封装 `panel.listLogs` / `panel.listThreads` 调用（异步单例 port 共享，避免反复 connect）。
@@ -108,7 +108,7 @@ demo 页（同源 chrome-extension://.../demo/index.html）
 
 ### 3. 日志 tab
 
-- **列表**：时间倒序虚拟滚动（每条一行：`at` / `provider` / `model` / `ok` / `ms` / `action` / `error` / `replySample`）。
+- **列表**：时间倒序滚动列表（每条一行：`at` / `provider` / `model` / `ok` / `ms` / `action` / `error` / `replySample`）。最多 500 行（v0.1.66 调整 RingLog 容量后）；普通 CSS overflow 滚动即可，不实现真虚拟滚动（§3 YAGNI：500 行在现代浏览器里 ~50ms render + OK scroll，性能足够）。
 - **过滤**：
   - `action` 多选：rebuild / incremental / error / undefined。
   - `ok` 多选：true / false。
