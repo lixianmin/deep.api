@@ -222,7 +222,7 @@ interface ThreadRow {
 5. 日志 tab：kind 过滤生效；搜索子串命中。
 6. SSE 帧 tab：流式调用后展开分组看到多帧。
 7. 场景 tab：6 按钮各自正常；「全部跑」跑完表格 6 行全绿（或失败标红）。
-8. 路由决策（rebuild）：场景「修改历史重发」点两次 → 第二次路由面板看到 `lastDecision: 'rebuild'`、`mirrorLen: 3`。
+8. 路由决策（rebuild）：场景「修改历史重发」点两次 → 第二次路由面板看到 `lastDecision: 'rebuild'`、`mirrorLen: 2`（首轮 commit 2 条消息：user '2+2 等于几？' + assistant '4'；重发触发 rebuild 后旧 thread mirrorLen 保持 2，新 thread 不在此面板）。
 
 ## 风险与对策
 
