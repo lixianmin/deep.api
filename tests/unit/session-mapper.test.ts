@@ -282,3 +282,58 @@ describe('SessionMapper mirrorHash 快路径（fix/mirror-hash，2026-09-09）',
     expect(d.action).toBe('rebuild');
   });
 });
+
+// 2026-09-09（fix/model-switch-rebuild）：同 cid 中途换模型必须 rebuild。DeepSeek 网页 web API
+// 一个 chat thread 不能中途换 model_type；reuse 旧 session 会让 model_type 与 parent_message_id 链不一致。
+// mapper 层 cover：register/commit 写 modelType，decide 比对；老 thread 无 modelType（未设置）则不约束
+// （SW 重启后持久化场景兼容），首次 commit 会补上。
+describe('SessionMapper modelType tracking（fix/model-switch-rebuild）', () => {
+  it('同 cid + 同 modelType + messages 前缀匹配 → incremental', () => {
+    const { mapper } = mk();
+    mapper.register('deepseek', 'cid', 's1', [m('user', 'q1')], 'default');
+    mapper.commit('deepseek', 'cid', [m('user', 'q1')], 's1', 10, 'default');
+    const d = mapper.decide('deepseek', [m('user', 'q1'), m('user', 'q2')], 'cid', 'default');
+    expect(d.action).toBe('incremental');
+  });
+
+  it('同 cid + 换 modelType → rebuild with existing（old session 被删、modelType 以新值为准）', () => {
+    const { mapper } = mk();
+    mapper.register('deepseek', 'cid', 's1', [m('user', 'q1')], 'default');
+    mapper.commit('deepseek', 'cid', [m('user', 'q1')], 's1', 10, 'default');
+    const d = mapper.decide('deepseek', [m('user', 'q1'), m('user', 'q2')], 'cid', 'expert');
+    expect(d.action).toBe('rebuild');
+    if (d.action === 'rebuild') {
+      expect(d.existing?.webSessionId).toBe('s1');   // mapper 透出旧 thread 让 router deleteSession
+    }
+  });
+
+  it('老 thread 未设置 modelType + 请求带 modelType → 视为不约束（incremental），commit 后补上', () => {
+    const { mapper } = mk();
+    // 模拟 SW 重启后老持久化 thread：register 没传 modelType
+    mapper.register('deepseek', 'cid', 's1', [m('user', 'q1')]);
+    mapper.commit('deepseek', 'cid', [m('user', 'q1')], 's1', 10);   // 老调用者也没传 modelType
+    // 首轮后续请求带 modelType='default' → 应 incremental（不动老 thread）
+    const d = mapper.decide('deepseek', [m('user', 'q1'), m('user', 'q2')], 'cid', 'default');
+    expect(d.action).toBe('incremental');
+    // commit 补上 modelType 后，后续决定才进入追踪状态
+    mapper.commit('deepseek', 'cid', [m('user', 'q1'), m('user', 'q2')], 's1', 11, 'default');
+    const t = (mapper as any).threads.get('deepseek:cid');
+    expect(t.modelType).toBe('default');
+  });
+
+  it('auto 池：modelType 不一致的 thread 不被选用（仅同 modelType 候选项选最长 mirror）', () => {
+    const { mapper } = mk();
+    mapper.register('deepseek', 'auto:1', 's-flash', [m('user', 'flash-q')], 'default');
+    mapper.commit('deepseek', 'auto:1', [m('user', 'flash-q')], 's-flash', 1, 'default');
+    mapper.register('deepseek', 'auto:2', 's-pro', [m('user', 'pro-q')], 'expert');
+    mapper.commit('deepseek', 'auto:2', [m('user', 'pro-q')], 's-pro', 2, 'expert');
+    // 请求走 expert model，且 messages 能匹配 pro thread → 选 pro
+    const d1 = mapper.decide('deepseek', [m('user', 'pro-q'), m('user', 'pro-q2')], undefined, 'expert');
+    expect(d1.action).toBe('incremental');
+    if (d1.action === 'incremental') expect(d1.thread.webSessionId).toBe('s-pro');
+    // 请求走 default model，且 messages 能匹配 flash thread → 选 flash
+    const d2 = mapper.decide('deepseek', [m('user', 'flash-q'), m('user', 'flash-q2')], undefined, 'default');
+    expect(d2.action).toBe('incremental');
+    if (d2.action === 'incremental') expect(d2.thread.webSessionId).toBe('s-flash');
+  });
+});

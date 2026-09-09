@@ -73,7 +73,9 @@ export class Router {
     const conversationId = p.conversation_id as string | undefined;
     // 2026-09-09 诊断字段（v0.1.50 落地）：在 handle 构造前先比一次，看看是不是 thread 找不到 / mirror 不匹配。
     // 给 popup 日志区提供 decision.action / threadFound / deletedOld 等现场信息。
-    const preDecide = this.d.mapper.decide(provider.id, messages, conversationId);
+    // 2026-09-09（fix/model-switch-rebuild）：decide 同时传 modelType，让 mapper 能 detect
+    // 同 cid 中途切模型的情况并返回 rebuild（避免复用旧 model 的 webSessionId + parent_message_id 链）。
+    const preDecide = this.d.mapper.decide(provider.id, messages, conversationId, resolved.modelType);
     const threadFound = preDecide.action !== 'rebuild' || preDecide.existing !== null;
     const mirrorLen = preDecide.action === 'incremental' ? preDecide.thread.mirror.length
       : preDecide.action === 'rebuild' && preDecide.existing ? preDecide.existing.mirror.length
@@ -137,7 +139,7 @@ export class Router {
     overrides?: { thinking?: boolean | null; search?: boolean; reasoningEffort?: 'low' | 'medium' | 'high' | 'max' },
   ): Promise<{ stream: AsyncIterable<ProviderStreamEvent>; session: ProviderSession; convId: string; thread: ThreadEntry; run: RunState }> {
     const pid = provider.id;
-    const decision = this.d.mapper.decide(pid, messages, conversationId);
+    const decision = this.d.mapper.decide(pid, messages, conversationId, resolved.modelType);
     if (decision.action === 'error') throw err(decision.code, decision.message, 400);
     let session: ProviderSession; let convId: string; let thread: ThreadEntry; let prompt: string;
     if (decision.action === 'rebuild') {
@@ -147,7 +149,9 @@ export class Router {
       const s = await provider.createSession(ctx);
       // 优先级：existing 保留同名 cid > 用户传的 cid（named 首次请求） > auto 顺序号
       convId = decision.existing?.conversationId ?? conversationId ?? this.d.mapper.nextAutoConversationId();
-      thread = this.d.mapper.register(pid, convId, s.webSessionId, messages);
+      // 2026-09-09（fix/model-switch-rebuild）：rebuild 时 modelType 一定传（resolved.modelType），
+      // 让 mapper 跟踪该 cid 当前绑定的模型。下一轮同 cid 同模型→ incremental；下一轮同 cid 换模型→ rebuild。
+      thread = this.d.mapper.register(pid, convId, s.webSessionId, messages, resolved.modelType);
       session = { providerId: pid, webSessionId: s.webSessionId, parentMessageId: null };
       prompt = renderTranscript(messages).ok
         ? (renderTranscript(messages) as { ok: true; prompt: string }).prompt + toolCtx.promptSuffix
@@ -247,7 +251,8 @@ export class Router {
     // mirror 必须含 assistant 回复：下一轮 client 传 [..., user 新问题] 时，
     // tail 首条是 user → 命中 incremental → 复用同一 DeepSeek 会话与 parent_message_id 链（上下文不丢）。
     const mirrorMessages: Message[] = [...messages, { role: 'assistant', content: agg.content, ...(toolCalls.length ? { tool_calls: toolCalls } : {}) }];
-    this.d.mapper.commit(provider.id, handle.convId, mirrorMessages, handle.session.webSessionId, handle.run.parentMessageId ?? handle.session.parentMessageId);
+    // 2026-09-09（fix/model-switch-rebuild）：commit 时同步 modelType，让 mapper 跟踪 cid ↔ 模型。
+    this.d.mapper.commit(provider.id, handle.convId, mirrorMessages, handle.session.webSessionId, handle.run.parentMessageId ?? handle.session.parentMessageId, handle.run.model.modelType);
     agg.toolCalls = toolCalls;
     agg.finishReason = agg.finishReason ?? 'stop';
   }
@@ -290,7 +295,8 @@ export class Router {
         // → 下一轮 spice 回灌时同一条 asst content 两边不一致 → mirrorIsPrefix 失败 → rebuild 删旧 thread。
         // 修：mirror 用剥前原始文本（sentRawContent），与 SSE 发出的 content 保持一致。
         const mirrorMessages: Message[] = [...messages, { role: 'assistant', content: sentRawContent, ...(agg.toolCalls.length ? { tool_calls: agg.toolCalls } : {}) }];
-        self.d.mapper.commit(provider.id, handle.convId, mirrorMessages, handle.session.webSessionId, handle.run.parentMessageId ?? handle.session.parentMessageId);
+        // 2026-09-09（fix/model-switch-rebuild）：commit 时同步 modelType。
+        self.d.mapper.commit(provider.id, handle.convId, mirrorMessages, handle.session.webSessionId, handle.run.parentMessageId ?? handle.session.parentMessageId, handle.run.model.modelType);
         done(true, self.d.now() - started, undefined, { finishReason: agg.finishReason ?? 'stop', parentMessageId: handle.run.parentMessageId, replySample: agg.content.slice(0, 200) });
       } catch (e) {
         done(false, self.d.now() - started, (e as Error).message);

@@ -110,6 +110,48 @@ describe('Router', () => {
     expect((a as any).prompts).toHaveLength(2);
   });
 
+  // 2026-09-09（fix/model-switch-rebuild）：同一 conversation_id 中途切模型 → mapper 必须 detect
+  // 到 modelType 变化 → 走 rebuild 路径（deleteSession + createSession + 完整历史作为 prompt）。
+  // DeepSeek 网页 web API 本身不允许一个 chat thread 中途换模型（聊天前定模型）；reuse 旧 session
+  // 会让 model_type 与 parent_message_id 链不一致，行为未定义。
+  // 修：ThreadEntry 存 modelType，decide() 比对请求的 resolved.modelType vs 存储的 modelType，
+  // 不一致 → 返回 {action:'rebuild', existing: thread}，复用现有 cid 让客户端无感。
+  it('fail-to-pass: 同 cid 中途切模型（flash → pro）→ rebuild + 完整历史作为 prompt', async () => {
+    const a = stubAdapter();
+    const r = makeRouter(a);
+    // round 1: flash，commit，mirror = [user:q1, asst:ok]
+    await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'q1')], conversation_id: 'cid' });
+    // round 2: 同 messages 尾巴 + user:q2，但 model 切到 pro
+    await r.create(TOKEN, { model: 'deepseek-v4-pro', messages: [m('user', 'q1'), m('assistant', 'ok'), m('user', 'q2')], conversation_id: 'cid' });
+
+    const log = r['d'].log.list();
+    expect(log).toHaveLength(2);
+    const e2 = log[1]!;
+    // 关键断言：模型不一致 → 必须 rebuild（不是 incremental）
+    expect(e2.action).toBe('rebuild');
+    expect(e2.deletedOld).toBe(true);   // 旧 s1 被 delete
+    expect(e2.threadFound).toBe(true); // 但 mapper 里还是能找到 thread（existing 非空）
+
+    // 关键断言：round 2 发出的是完整历史（rebuild 路径用 renderTranscript 拼全部 user/tool），
+    // 不是增量 tail「q2」——否则切模型后上下文丢了。
+    const prompts = (a as any).prompts as string[];
+    expect(prompts[1]).toContain('q1');
+    expect(prompts[1]).toContain('q2');
+    expect(prompts[1]).not.toBe('q2');   // 必须不是增量
+  });
+
+  it('fail-to-pass: 同模型 round 2 仍然 incremental（不要 over-rebuild）', async () => {
+    const a = stubAdapter();
+    const r = makeRouter(a);
+    await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'q1')], conversation_id: 'cid' });
+    await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'q1'), m('assistant', 'ok'), m('user', 'q2')], conversation_id: 'cid' });
+    const e2 = r['d'].log.list()[1]!;
+    expect(e2.action).toBe('incremental');
+    expect(e2.deletedOld).toBe(false);
+    // round 2 是增量，prompt 只含尾部 user:q2
+    expect((a as any).prompts[1]).toBe('q2');
+  });
+
   it('rate-limited twice then succeeds with backoff', async () => {
     vi.useFakeTimers();
     try {

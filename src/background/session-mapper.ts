@@ -43,6 +43,12 @@ export interface ThreadEntry {
   idleSince: number;
   lastUsedAt: number;
   busy: boolean;
+  // 2026-09-09（fix/model-switch-rebuild）：同一 conversation_id 中途切模型必须走 rebuild。
+  // DeepSeek 网页 web API 一个 chat thread 不允许中途换 model_type（聊天前定模型）；
+  // reuse 旧 session 会让 model_type 与 parent_message_id 链不一致。register/commit 时
+  // 写入，decide 时比对，不一致 → rebuild 走 deleteSession+createSession+renderTranscript。
+  // 未设置（undefined）：旧持久化 thread 走「不约束」路径，避免 SW 重启后首轮误 rebuild。
+  modelType?: 'default' | 'expert' | 'vision';
 }
 
 export type Decision =
@@ -63,8 +69,11 @@ export class SessionMapper {
 
   private key(providerId: string, conversationId: string) { return `${providerId}:${conversationId}`; }
 
-  decide(providerId: string, messages: Message[], conversationId?: string): Decision {
+  decide(providerId: string, messages: Message[], conversationId?: string, modelType?: 'default' | 'expert' | 'vision'): Decision {
     if (messages.length === 0) return { action: 'error', code: 'invalid_request_error', message: 'messages is empty' };
+    // 2026-09-09（fix/model-switch-rebuild）：同一 cid 中途切模型 → rebuild。
+    // t.modelType 未设置（老持久化 thread）跳过本检查，承诺在 commit 时补上。
+    const modelMatches = (t: ThreadEntry): boolean => t.modelType === undefined || modelType === undefined || t.modelType === modelType;
     // 全量 messages（含末条）用于匹配：镜像 ⊆ messages 即命中；
     // 未在网页线程上的部分 = messages.slice(mirror.length)（含最新一条 user 消息）。
     // 2026-09-09（fix/mirror-hash）：commit 时已算 mirrorHash；decide 时 hash 快路径——
@@ -79,7 +88,7 @@ export class SessionMapper {
         ? messages.length >= t.mirror.length
           && hashExcludingSystem(messages.slice(0, t.mirror.length)) === hashExcludingSystem(t.mirror)
         : mirrorIsPrefix(t.mirror, messages);
-      if (prefixOk && namedTail.length > 0 && (namedTail[0]!.role === 'user' || namedTail[0]!.role === 'tool')) {
+      if (prefixOk && modelMatches(t) && namedTail.length > 0 && (namedTail[0]!.role === 'user' || namedTail[0]!.role === 'tool')) {
         if (t.mirrorHash == null) t.mirrorHash = hashMirror(t.mirror);
         return { action: 'incremental', thread: t, tail: namedTail };
       }
@@ -88,6 +97,7 @@ export class SessionMapper {
     let best: ThreadEntry | null = null;
     for (const t of this.threads.values()) {
       if (t.kind !== 'auto' || t.busy) continue;
+      if (!modelMatches(t)) continue;
       const prefixOk = t.mirrorHash != null
         ? messages.length >= t.mirror.length
           && hashExcludingSystem(messages.slice(0, t.mirror.length)) === hashExcludingSystem(t.mirror)
@@ -105,13 +115,14 @@ export class SessionMapper {
     return { action: 'rebuild', existing: null };
   }
 
-  register(providerId: string, conversationId: string, webSessionId: string, mirror: Message[]): ThreadEntry {
+  register(providerId: string, conversationId: string, webSessionId: string, mirror: Message[], modelType?: 'default' | 'expert' | 'vision'): ThreadEntry {
     const t: ThreadEntry = {
       providerId, conversationId, webSessionId, parentMessageId: null,
       mirror: mirror.map(x => ({ ...x })),
       mirrorHash: hashMirror(mirror),
       kind: conversationId.startsWith('auto:') ? 'auto' : 'named',
       idleSince: this.deps.now(), lastUsedAt: this.deps.now(), busy: false,
+      modelType,
     };
     if (this.threads.has(this.key(providerId, conversationId))) this.threads.delete(this.key(providerId, conversationId));
     this.threads.set(this.key(providerId, conversationId), t);
@@ -130,12 +141,13 @@ export class SessionMapper {
     if (t) t.busy = true;
   }
 
-  commit(providerId: string, conversationId: string, messages: Message[], webSessionId: string, parentMessageId: number | string | null) {
+  commit(providerId: string, conversationId: string, messages: Message[], webSessionId: string, parentMessageId: number | string | null, modelType?: 'default' | 'expert' | 'vision') {
     const t = this.threads.get(this.key(providerId, conversationId));
-    if (!t) { this.register(providerId, conversationId, webSessionId, messages); return; }
+    if (!t) { this.register(providerId, conversationId, webSessionId, messages, modelType); return; }
     t.mirror = messages.map(x => ({ ...x }));
     t.mirrorHash = hashMirror(t.mirror);
     t.parentMessageId = parentMessageId;
+    if (modelType !== undefined) t.modelType = modelType;   // commit 调用者总是带新 modelType，覆盖以保证该轮成功后状态一致
     t.busy = false;
     t.lastUsedAt = this.deps.now();
     t.idleSince = this.deps.now();
