@@ -179,9 +179,10 @@
 
 涉及代码变更的调整（如：修 bug、新功能），必须在主目录之外创建 git worktree 开发。编码期间禁止修改主目录任何文件，以支持 coding agent 与人类同时修改同一个项目。完成后：
 
-1. 在 worktree 内开发并测试通过。
-2. rebase 到远程最新 main；冲突时停下询问。
-3. 回到主目录 fast-forward 合并，重跑全部测试，push 到远程 main。
+1. 在 worktree 内开发，测试通过后进去下一步。
+2. 把 origin/main 的代码 rebase/merge 到本地，然后重跑测试，测试通过后进入下一步。
+2. 把 worktree 的代码 rebase/merge 到 origin/main，如果冲突则停下询问。
+3. 回到主目录 fast-forward 合并，重跑全部测试，测试通过后，push 到 origin/main。
 4. 测试全绿即视为确认，删除 worktree。
 
 文档类修改（docs/、注释、错别字）、纯机械代码改动（错别字、局部变量改名、加日志行，同 §11 例外，须跑通相关测试）及记忆维护（docs/01.memory.md、docs/02.todo.md）不走此流程。
