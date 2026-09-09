@@ -92,6 +92,9 @@ function render() {
     if (e.firstDiffIdx !== undefined) detailParts.push(`<span class="err" title="${(e.firstDiffDetail ?? '').replace(/"/g, '&quot;')}">diff@${e.firstDiffIdx}</span>`);
     return `<li><span class="${okCls}">${okMark}</span> ${new Date(e.at).toLocaleTimeString()} ${e.provider}/${e.model} ${e.ms}ms ${actionBadge} <span class="small">${detailParts.join(' ')}</span></li>`;
   }).join('');
+
+  // Tab 高度同步（v0.1.62）：三 panel 中最高者作 min-height，避免切换时整体跳动
+  syncTabHeight();
 }
 
 function snippetText(): string {
@@ -165,4 +168,29 @@ function setupTabs(): void {
       for (const p of panels) p.classList.toggle('active', p.dataset.tabPanel === target);
     });
   }
+}
+
+// Tab 高度同步（v0.1.62）：取三 panel 中最高 scrollHeight，设所有 panel min-height。
+// 隐藏 panel 测量时临时移出屏幕外（visibility:hidden + position:absolute + left:-9999px），保持视觉无闪烁。
+function syncTabHeight(): void {
+  const panels = document.querySelectorAll<HTMLElement>('.tab-panel');
+  let max = 0;
+  panels.forEach(p => {
+    const wasActive = p.classList.contains('active');
+    if (!wasActive) {
+      p.style.visibility = 'hidden';
+      p.style.display = 'block';
+      p.style.position = 'absolute';
+      p.style.left = '-9999px';
+    }
+    const h = p.scrollHeight;
+    if (h > max) max = h;
+    if (!wasActive) {
+      p.style.visibility = '';
+      p.style.display = '';
+      p.style.position = '';
+      p.style.left = '';
+    }
+  });
+  panels.forEach(p => { p.style.minHeight = max + 'px'; });
 }
