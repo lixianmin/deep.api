@@ -18,9 +18,9 @@ describe('DeepSeekAdapter', () => {
   it('resolves current public models and rejects unknown', () => {
     const a = createDeepSeekAdapter(mkDeps());
     expect(a.resolveModel('deepseek-v4-flash')).toMatchObject({ modelType: 'default', thinking: true });
-    // 2026-09-09（fix/pro-thinking-default）：Pro 默认 thinking=false 走直答路径，避免 web API
-    // 上「只思考不说话」B-3 场景（0 content 返 ready+遥测）。Flash / vision 保持 true。
-    expect(a.resolveModel('deepseek-v4-pro')).toMatchObject({ modelType: 'expert', thinking: false });
+    // 2026-09-09（fix/pro-thinking-true）：v0.1.72 误判回滚——Pro 默认 thinking=true（官方默认），
+    // 与 Flash / vision 一致。调用方仍可显式传 thinking:false 覆盖。
+    expect(a.resolveModel('deepseek-v4-pro')).toMatchObject({ modelType: 'expert', thinking: true });
     expect(a.resolveModel('deepseek-v4-flash-vision-exp')).toMatchObject({ modelType: 'vision', thinking: true });
     expect(a.resolveModel('gpt-4o')).toBeNull();
     const ids = a.models.map(m => m.id);

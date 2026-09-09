@@ -18,8 +18,12 @@ describe('DeepSeek model registry', () => {
   // 0 个 response/content 或 response/thinking_content，finishReason=stop。修：Pro 默认 thinking=false
   // 走直答路径，跟 Flash 一致在 web 上有效。记忆里“所有模型默认 thinking=true”（v0.1.35）只对 Flash
   // 测过，Pro 在 web 上验证后必须 override。
-  it('fail-to-pass: Pro 默认 thinking=false（避免 web API 上「只思考不说话」B-3）', () => {
-    expect(resolveModel('deepseek-v4-pro')).toMatchObject({ modelType: 'expert', thinking: false });
+  // 2026-09-09（fix/pro-thinking-true）：v0.1.72 曾把 Pro 默认 thinking=false——当时误判
+  // 「只思考不说话」是 thinking 开启导致。实际根因是 v0.1.75-78 修的三件套（客户端版本头/
+  // 嵌套快照/APPEND 数组），与 thinking 无关；thinking 模式已实测正常。回滚官方默认：
+  // 所有模型默认 thinking=true（与 DeepSeek 官方对齐，调用方仍可显式覆盖）。
+  it('fail-to-pass: Pro 默认 thinking=true（v0.1.72 误判回滚，官方默认）', () => {
+    expect(resolveModel('deepseek-v4-pro')).toMatchObject({ modelType: 'expert', thinking: true });
     expect(resolveModel('gpt-4o')).toBeNull();
   });
 });

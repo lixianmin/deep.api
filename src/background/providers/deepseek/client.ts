@@ -14,10 +14,11 @@ export const MODELS: ModelInfo[] = [
 // 调用方传 thinking:false 可显式关
 const LIMITS = {
   'deepseek-v4-flash': { modelType: 'default' as const, thinking: true, limitChars: 2_621_440 },
-  // 2026-09-09（fix/pro-thinking-default）：Pro 在 chat.deepseek.com/api/v0 上 thinking_enabled=true
-  // 会进入「只思考不说话」路径（B-3：sseBytes≈320 仅返 ready+遥测，0 content 0 thinking）。
-  // 修：默认 thinking=false 走直答路径。调用方显式传 thinking:true 可覆盖。
-  'deepseek-v4-pro': { modelType: 'expert' as const, thinking: false, limitChars: 163_840 },
+  // 2026-09-09（fix/pro-thinking-true）：v0.1.72 曾设 thinking:false——当时误判「只思考不说话」
+  // 是 thinking 开启导致。实际根因是 v0.1.75-78 修的三件套（客户端版本头缺失 / 嵌套快照未解析 /
+  // APPEND 数组未处理），与 thinking 无关；thinking 模式已实测正常（reasoningSample+replySample
+  // 都有）。回滚官方默认 thinking=true。调用方显式传 thinking:false 可关。
+  'deepseek-v4-pro': { modelType: 'expert' as const, thinking: true, limitChars: 163_840 },
   'deepseek-v4-flash-vision-exp': { modelType: 'vision' as const, thinking: true, limitChars: 2_621_440 },
 };
 

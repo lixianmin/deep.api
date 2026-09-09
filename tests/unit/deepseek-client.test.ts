@@ -62,19 +62,19 @@ describe('deepseek client', () => {
       expect(resolveModel('unknown')).toBeNull();
     });
 
-    it('resolves flash/vision thinking=true, pro thinking=false（web API 上 Pro 走直答避免 B-3）', () => {
+    it('resolves flash/pro/vision 默认 thinking=true（官方默认；v0.1.72 Pro 误判已回滚）', () => {
       const flash = resolveModel('deepseek-v4-flash')!;
       const pro = resolveModel('deepseek-v4-pro')!;
       const vision = resolveModel('deepseek-v4-flash-vision-exp')!;
       expect(flash.modelType).toBe('default');
       expect(pro.modelType).toBe('expert');
       expect(vision.modelType).toBe('vision');
-      // 2026-09-09（fix/pro-thinking-default）：v0.1.35 假设「所有模型 thinking=true」在 web API 上
-      // 只对 Flash 测过。Pro 在 chat.deepseek.com/api/v0 上 thinking_enabled=true 会进入
-      // 「只思考不说话」路径，0 content 返回——实证 sseBytes≈320/0 response_content。
-      // 修：Pro 默认 false；Flash / vision 保持 true（与官方默认对齐）。
+      // 2026-09-09（fix/pro-thinking-true）：v0.1.72 误判「thinking_enabled=true 会让 Pro 只思考
+      // 不说话」——实际根因是客户端版本头缺失 + 嵌套快照/APPEND 数组未解析（v0.1.75-78 已修），
+      // 与 thinking 无关。thinking 模式实测正常（reasoningSample+replySample 都有）。
+      // 回滚：所有模型默认 thinking=true（与官方默认对齐）。调用方仍可显式覆盖。
       expect(flash.thinking).toBe(true);
-      expect(pro.thinking).toBe(false);
+      expect(pro.thinking).toBe(true);
       expect(vision.thinking).toBe(true);
     });
 
