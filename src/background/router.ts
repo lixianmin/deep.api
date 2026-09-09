@@ -35,16 +35,6 @@ function isContentEvent(e: ProviderStreamEvent): boolean {
   return e.kind === 'content_delta' || e.kind === 'think_delta';   // 重试只发生在任何内容增量之前（spec §6.4）
 }
 
-// 2026-09-09（fix/mirror-content）：日志摘要——每条消息 role + 内容前 60 字 + tool_calls 名字/参数摘要。
-// 用户贴 popup 复制的日志，第一眼就能看出 mirror 与 messages 在哪一条上不一致。
-function msgSummary(m: Message): string {
-  const content = (m.content ?? '').replace(/\s+/g, ' ').slice(0, 60);
-  const tcs = m.tool_calls?.length
-    ? ` →tools[${m.tool_calls.map((t) => `${t.function.name}(${t.function.arguments.slice(0, 30)})`).join(', ')}]`
-    : '';
-  return `${m.role}: ${content}${tcs}`;
-}
-
 export class Router {
   constructor(private d: RouterDeps) {}
 
@@ -71,16 +61,15 @@ export class Router {
     };
     const conversationId = p.conversation_id as string | undefined;
     // 2026-09-09 诊断字段（v0.1.50 落地）：在 handle 构造前先比一次，看看是不是 thread 找不到 / mirror 不匹配。
-    // 给 popup 日志区提供 decision.action / threadFound / mirrorPrefixOk / deletedOld 等现场信息。
+    // 给 popup 日志区提供 decision.action / threadFound / deletedOld 等现场信息。
     const preDecide = this.d.mapper.decide(provider.id, messages, conversationId);
     const threadFound = preDecide.action !== 'rebuild' || preDecide.existing !== null;
-    const mirrorPrefixOk = preDecide.action === 'incremental';
     const mirrorLen = preDecide.action === 'incremental' ? preDecide.thread.mirror.length
       : preDecide.action === 'rebuild' && preDecide.existing ? preDecide.existing.mirror.length
       : undefined;
-    // 2026-09-09（fix/mirror-content）：mirror 匹配失败时定位第一个不同点——用户贴日志就能看出
-    // 是 asst.content 不一致（标签剥没剥）还是 tool_calls 不一致还是别的。
-    const mismatch = threadFound
+    // 2026-09-09（fix/mirror-content）：mirror 匹配失败时定位第一个不同点——popup 日志里
+    // 用 `diff@${idx}` 提示用户“修正后的 messages 和 mapper 里 mirror 从第几条开始不一样”。
+    const firstDiffIdx = threadFound
       ? (() => {
         const mirror: Message[] = preDecide.action === 'incremental' ? preDecide.thread.mirror
           : preDecide.action === 'rebuild' && preDecide.existing ? preDecide.existing.mirror : [];
@@ -88,16 +77,16 @@ export class Router {
           const a = mirror[i]!; const b = messages[i]!;
           if (a.role !== b.role || (a.content ?? '') !== (b.content ?? '')
             || JSON.stringify(a.tool_calls ?? null) !== JSON.stringify(b.tool_calls ?? null)) {
-            return { idx: i, detail: `i=${i} mirror=${msgSummary(a)} | messages=${msgSummary(b)}` };
+            return i;
           }
         }
-        return { idx: mirror.length, detail: `mirror(${mirror.length}) < messages(${messages.length}) 前缀比较到尽头无 diff` };
+        return mirror.length;
       })()
-      : null;
+      : undefined;
     const handle = await this.runCompletion(provider, resolved, messages, toolCtx, conversationId, ctx, overrides);
     const diag = {
       cid: handle.convId, msgsLen: messages.length, action: handle.thread.kind ? (preDecide.action === 'incremental' ? 'incremental' as const : 'rebuild' as const) : undefined,
-      threadFound, mirrorPrefixOk, mirrorLen,
+      threadFound, mirrorLen,
       deletedOld: preDecide.action === 'rebuild' && preDecide.existing !== null,
       webSessionId: handle.session.webSessionId,
     };
@@ -106,13 +95,8 @@ export class Router {
         at: this.d.now(), provider: provider.id, model: modelId, ok, ms, error, ...diag,
         finishReason: extra?.finishReason, parentMessageId: extra?.parentMessageId,
         replySample: extra?.replySample,
-        firstDiffIdx: mismatch?.idx, firstDiffDetail: mismatch?.detail,
-        messagesSample: messages.map(msgSummary).join('\n'),
+        firstDiffIdx,
         messagesFull: JSON.stringify(messages),
-        mirrorSample: threadFound
-          ? (preDecide.action === 'incremental' ? preDecide.thread.mirror
-            : preDecide.action === 'rebuild' && preDecide.existing ? preDecide.existing.mirror : []).map(msgSummary).join('\n')
-          : undefined,
         mirrorFull: threadFound
           ? JSON.stringify(preDecide.action === 'incremental' ? preDecide.thread.mirror
             : preDecide.action === 'rebuild' && preDecide.existing ? preDecide.existing.mirror : [])

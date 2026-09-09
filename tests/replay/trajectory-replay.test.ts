@@ -67,7 +67,6 @@ type Entry = {
   expectLog: {
     action: 'rebuild' | 'incremental';
     threadFound: boolean;
-    mirrorPrefixOk: boolean;
     deletedOld: boolean;
     finishReason: string;
     msgsLen: number;
@@ -102,7 +101,6 @@ describe('trajectory replay（fix/trajectory-fixture，2026-09-09）', () => {
     // 与 fixture expectLog 字段逐一断言
     expect(entry!.action).toBe(e.expectLog.action);
     expect(entry!.threadFound).toBe(e.expectLog.threadFound);
-    expect(entry!.mirrorPrefixOk).toBe(e.expectLog.mirrorPrefixOk);
     expect(entry!.deletedOld).toBe(e.expectLog.deletedOld);
     expect(entry!.finishReason).toBe(e.expectLog.finishReason);
     expect(entry!.msgsLen).toBe(e.expectLog.msgsLen);

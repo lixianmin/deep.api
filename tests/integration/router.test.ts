@@ -153,7 +153,7 @@ describe('Router', () => {
 });
 
 // 2026-09-09（feat/diagnostic-logging）：popup 日志区需要的诊断现场。
-// spice 报“每发一条消息重建一条”需看 threadFound / mirrorPrefixOk / deletedOld / action 判断“多次调中有无轮番 rebuild 删 old”。
+// spice 报“每发一条消息重建一条”需看 threadFound / deletedOld / action 判断“多次调中有无轮番 rebuild 删 old”。
 describe('Router 诊断日志（v0.1.50）', () => {
   it('首调无 cid → rebuild、threadFound=false、deletedOld=false、msgsLen 带 N', async () => {
     const a = stubAdapter();
@@ -171,7 +171,7 @@ describe('Router 诊断日志（v0.1.50）', () => {
     expect(last.cid).toMatch(/^auto:\d+$/);
   });
 
-  it('传同 cid 第二次调 → incremental、threadFound=true、mirrorPrefixOk=true、msgsLen 递增', async () => {
+  it('传同 cid 第二次调 → incremental、threadFound=true、msgsLen 递增', async () => {
     const a = stubAdapter();
     const r = makeRouter(a);
     await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'a'), m('user', 'b')], conversation_id: 'spice-cid' });
@@ -186,7 +186,6 @@ describe('Router 诊断日志（v0.1.50）', () => {
     expect(e0.cid).toBe('spice-cid');
     expect(e1.action).toBe('incremental');
     expect(e1.threadFound).toBe(true);
-    expect(e1.mirrorPrefixOk).toBe(true);
     expect(e1.deletedOld).toBe(false);
     expect(e1.mirrorLen).toBe(3);   // call 1 commit 后 mirror = [user:a, user:b, assistant:r1] = 3
     expect(e1.msgsLen).toBe(4);
@@ -201,7 +200,6 @@ describe('Router 诊断日志（v0.1.50）', () => {
     const e1 = list[1]!;
     expect(e1.action).toBe('rebuild');
     expect(e1.threadFound).toBe(true);
-    expect(e1.mirrorPrefixOk).toBe(false);
     expect(e1.deletedOld).toBe(true);
     expect(e1.mirrorLen).toBe(3);   // call 1 commit 后 mirror = 3 条
   });
@@ -263,7 +261,6 @@ describe('mirror assistant.content 与 SSE 一致（fix/mirror-content）', () =
     const list = r['d'].log.list();
     const e2 = list[2]!;   // turn 2 的决策
     expect(e2.action).toBe('incremental');
-    expect(e2.mirrorPrefixOk).toBe(true);
     expect(e2.deletedOld).toBe(false);
   });
 });

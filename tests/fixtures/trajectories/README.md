@@ -4,7 +4,7 @@
 
 ## 目的
 
-- **回归保护**：deep.api 链路（mirror / decide / persist / 持久化）改动时，能跑通历史实测轨迹，断言每条 entry 的 `action / threadFound / mirrorPrefixOk / deletedOld / finishReason / parentMessageId / webSessionId` 与真实日志一致
+- **回归保护**：deep.api 链路（mirror / decide / persist / 持久化）改动时，能跑通历史实测轨迹，断言每条 entry 的 `action / threadFound / deletedOld / finishReason / parentMessageId / webSessionId` 与真实日志一致
 - **真实场景**：stub adapter 只能给出「行为」，但真实 spice chat session 里 LLM 的实际响应结构（asst tool_calls 顺序、tool_call_id、arguments 嵌套引号等）会影响 commit 的 mirror 内容。fixture 锁定这些「场景指纹」
 - **新增测试方向**：每个新 bug 真实轨迹可加 fixture 防止回退
 
@@ -35,7 +35,6 @@
   "expectLog": {                    // 断言当条 create 后 LogEntry 的关键字段
     "action": "rebuild",             // 或 "incremental"
     "threadFound": false,
-    "mirrorPrefixOk": false,
     "deletedOld": false,
     "finishReason": "stop",
     "msgsLen": 2                     // 创建请求带的 messages 数（推断用）
@@ -66,8 +65,8 @@ const lines = readFileSync(join(__dirname, '../fixtures/trajectories/thread-pers
 1. popup 复制一段完整日志 JSON
 2. 提取该 cid 的每条 entry
 3. 把 `messagesFull` 拆成 `messages` 数组
-4. 用 messagesSample 末尾的 `<tool_calls>` 文本（如果有）作为 `stub.events` 里的 content_delta
-5. 给 `expectLog` 填当条日志的 action / threadFound / mirrorPrefixOk / deletedOld / finishReason / msgsLen
+4. 展开 `messagesFull` 最后一条 assistant 消息，从中取 `<tool_calls>` 文本（如果有）作为 `stub.events` 里的 content_delta
+5. 给 `expectLog` 填当条日志的 action / threadFound / deletedOld / finishReason / msgsLen
 6. 重跑测试验证
 
 ## 与 deep.api 其它测试的关系
