@@ -232,3 +232,53 @@ describe('SessionMapper persist debounce（fix/persist-debounce，2026-09-09）'
     }
   });
 });
+
+describe('SessionMapper mirrorHash 快路径（fix/mirror-hash，2026-09-09）', () => {
+  it('fail-to-pass: commit 后 hash 一致 + messages 追加新 user → incremental', () => {
+    const now = () => 1000;
+    const mapper = new SessionMapper(
+      { createSession: async () => ({ webSessionId: '' }), deleteSession: async () => {}, now },
+      { poolSize: 2, ttlMs: 60_000 },
+    );
+    mapper.register('deepseek', 'auto:1', 's1', [m('user', 'q1'), m('assistant', 'a1')]);
+    mapper.commit('deepseek', 'auto:1', [m('user', 'q1'), m('assistant', 'a1'),
+      m('tool', 'r1', { tool_call_id: 'c1' }),
+      m('user', 'q2')], 's1', 5);
+
+    const t = (mapper as any).threads.get('deepseek:auto:1') as any;
+    expect(typeof t.mirrorHash).toBe('string');
+    expect(t.mirrorHash.length).toBe(16);
+
+    // messages 比 mirror 多一条新 user 消息（hash 命中前缀 + tail=新 user）→ incremental
+    const d = mapper.decide('deepseek', [
+      m('user', 'q1'), m('assistant', 'a1'),
+      m('tool', 'r1', { tool_call_id: 'c1' }),
+      m('user', 'q2'),
+      m('user', 'q3'),
+    ], 'auto:1');
+    expect(d.action).toBe('incremental');
+    if (d.action === 'incremental') {
+      expect(d.tail).toEqual([m('user', 'q3')]);
+    }
+  });
+
+  it('fail-to-pass: messages 改一处导致 hash 不等 → rebuild', () => {
+    const now = () => 1000;
+    const mapper = new SessionMapper(
+      { createSession: async () => ({ webSessionId: '' }), deleteSession: async () => {}, now },
+      { poolSize: 2, ttlMs: 60_000 },
+    );
+    mapper.register('deepseek', 'auto:1', 's1', [m('user', 'q1'), m('assistant', 'a1')]);
+    mapper.commit('deepseek', 'auto:1', [m('user', 'q1'), m('assistant', 'a1'),
+      m('tool', 'r1', { tool_call_id: 'c1' }),
+      m('user', 'q2')], 's1', 5);
+
+    // 改 messages 末尾 user 文本 → hash 不同 → rebuild
+    const d = mapper.decide('deepseek', [
+      m('user', 'q1'), m('assistant', 'a1'),
+      m('tool', 'r1', { tool_call_id: 'c1' }),
+      m('user', 'q2-modified'),
+    ], 'auto:1');
+    expect(d.action).toBe('rebuild');
+  });
+});

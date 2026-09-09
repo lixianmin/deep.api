@@ -1,11 +1,44 @@
 import type { Message } from '../shared/api-types';
 
+// 2026-09-09（fix/mirror-hash）：commit 时算 mirror 内容 64-bit FNV-1a hash（同步轻量）。
+// Chrome MV3 SW 没有 Node crypto.createHash 也不支持 subtle.digest 同步调用，
+// 这里用 FNV-1a 64-bit 同步算法——十几行实现足够；目的是 O(n) 字段比对 → O(1) hash 比对。
+// hash 16 hex（64-bit）够去重；剩余碰撞概率由后续 mirrorIsPrefix 兜底（命中后仍走字段比对
+// 的写路径在「老持久化无 hash 时」已分支）。所以此 hash 只是「快速跳过」。
+// 顺序敏感：JSON.stringify 保序，同前缀字节级一致 → hash 命中 → incremental。
+// 归一 assistant content：spice 端发 OpenAI 风格 null，deep.api mirror 存的是 ''，
+// 不归一则 hash 不等（v0.1.43 sameMsg 已把 ''/null 视为相等，hash 路径需同样归一）。
+function fnv1a64(str: string): string {
+  // FNV-1a 64-bit
+  let hash = 0xcbf29ce484222325n;
+  for (let i = 0; i < str.length; i++) {
+    hash = (hash ^ BigInt(str.charCodeAt(i))) & 0xffffffffffffffffn;
+    hash = (hash * 0x100000001b3n) & 0xffffffffffffffffn;
+  }
+  return hash.toString(16).padStart(16, '0');
+}
+
+function hashMirror(mirror: Message[]): string {
+  const normalized = mirror.map((m) => m.content === '' ? { ...m, content: null as unknown as string } : m);
+  return fnv1a64(JSON.stringify(normalized));
+}
+
+// hashMirror 不区分 role：system prompt 是调用方注入的指令，不参与「同一会话续聊」判定。
+// 运维上线知识库后 mirror[0] 的 system 变化会让整 hash 不同（误判 rebuild）——
+// 因此 hash 比对时双方各自剥掉 system 后再算（与 mirrorIsPrefix 的 system 豁免语义对齐）。
+function hashExcludingSystem(messages: Message[]): string {
+  return hashMirror(messages.filter((m) => m.role !== 'system'));
+}
+
 export interface ThreadEntry {
   providerId: string;       // 2026-09-09：持久化恢复需要重建 `providerId:conversationId` 键
   conversationId: string;
   webSessionId: string;
   parentMessageId: number | string | null;
   mirror: Message[];       // 已确认推进的消息序列（与网页线程内容一致，spec §4.3）
+  mirrorHash?: string;     // 2026-09-09（fix/mirror-hash）：commit 时算 FNV-1a 64-bit 缓存。
+                           // decide 时 hash 快路径 O(1) 替代 mirrorIsPrefix 的逐字段比对；
+                           // 旧 commit/旧持久化数据无 hash，下一次 commit 时补算（向后兼容）。
   kind: 'auto' | 'named';
   idleSince: number;
   lastUsedAt: number;
@@ -34,11 +67,20 @@ export class SessionMapper {
     if (messages.length === 0) return { action: 'error', code: 'invalid_request_error', message: 'messages is empty' };
     // 全量 messages（含末条）用于匹配：镜像 ⊆ messages 即命中；
     // 未在网页线程上的部分 = messages.slice(mirror.length)（含最新一条 user 消息）。
+    // 2026-09-09（fix/mirror-hash）：commit 时已算 mirrorHash；decide 时 hash 快路径——
+    // 对每个候选 thread t，比较 hashMirror(messages.slice(0, t.mirror.length)) 与 t.mirrorHash；
+    // 命中即 prefix 字节级一致（JSON.stringify 保序），省 mirrorIsPrefix 的逐字段 O(n) 比对。
+    // 旧 thread 无 hash 时降级到字段比对，向后兼容老持久化数据。
     if (conversationId) {
       const t = this.threads.get(this.key(providerId, conversationId));
       if (!t) return { action: 'rebuild', existing: null };
       const namedTail = messages.slice(t.mirror.length);
-      if (mirrorIsPrefix(t.mirror, messages) && namedTail.length > 0 && (namedTail[0]!.role === 'user' || namedTail[0]!.role === 'tool')) {
+      const prefixOk = t.mirrorHash != null
+        ? messages.length >= t.mirror.length
+          && hashExcludingSystem(messages.slice(0, t.mirror.length)) === hashExcludingSystem(t.mirror)
+        : mirrorIsPrefix(t.mirror, messages);
+      if (prefixOk && namedTail.length > 0 && (namedTail[0]!.role === 'user' || namedTail[0]!.role === 'tool')) {
+        if (t.mirrorHash == null) t.mirrorHash = hashMirror(t.mirror);
         return { action: 'incremental', thread: t, tail: namedTail };
       }
       return { action: 'rebuild', existing: t };
@@ -46,7 +88,11 @@ export class SessionMapper {
     let best: ThreadEntry | null = null;
     for (const t of this.threads.values()) {
       if (t.kind !== 'auto' || t.busy) continue;
-      if (!mirrorIsPrefix(t.mirror, messages)) continue;
+      const prefixOk = t.mirrorHash != null
+        ? messages.length >= t.mirror.length
+          && hashExcludingSystem(messages.slice(0, t.mirror.length)) === hashExcludingSystem(t.mirror)
+        : mirrorIsPrefix(t.mirror, messages);
+      if (!prefixOk) continue;
       // 多候选：取镜像最长者；等长时取最近未用（LRU）——确定性（spec §4.3）
       if (best === null || t.mirror.length > best.mirror.length || (t.mirror.length === best.mirror.length && t.lastUsedAt < best.lastUsedAt)) best = t;
     }
@@ -63,6 +109,7 @@ export class SessionMapper {
     const t: ThreadEntry = {
       providerId, conversationId, webSessionId, parentMessageId: null,
       mirror: mirror.map(x => ({ ...x })),
+      mirrorHash: hashMirror(mirror),
       kind: conversationId.startsWith('auto:') ? 'auto' : 'named',
       idleSince: this.deps.now(), lastUsedAt: this.deps.now(), busy: false,
     };
@@ -87,6 +134,7 @@ export class SessionMapper {
     const t = this.threads.get(this.key(providerId, conversationId));
     if (!t) { this.register(providerId, conversationId, webSessionId, messages); return; }
     t.mirror = messages.map(x => ({ ...x }));
+    t.mirrorHash = hashMirror(t.mirror);
     t.parentMessageId = parentMessageId;
     t.busy = false;
     t.lastUsedAt = this.deps.now();
