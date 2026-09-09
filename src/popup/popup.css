@@ -47,5 +47,5 @@ li .ok { color: #15803d; }
 }
 .tab-btn:hover { color: #222; }
 .tab-btn.active { color: #222; border-bottom-color: #15803d; }
-.tab-panel { display: block; }
+.tab-panel { display: block; overflow: hidden; }
 .tab-panel:not(.active) { display: none; }
