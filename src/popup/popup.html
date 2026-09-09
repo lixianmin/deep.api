@@ -9,31 +9,12 @@
 
   <nav class="tab-bar" role="tablist">
     <button class="tab-btn active" data-tab="home" role="tab">主页</button>
-    <button class="tab-btn" data-tab="settings" role="tab">设置</button>
     <button class="tab-btn" data-tab="logs" role="tab">日志</button>
+    <button class="tab-btn" data-tab="settings" role="tab">设置</button>
   </nav>
 
-  <!-- 主页 Panel（默认 active）：snippet + 模型 + Open Demo 按钮 -->
+  <!-- 主页 Panel（默认 active）：登录 + 模型 + snippet + Demo -->
   <section class="tab-panel active" data-tab-panel="home">
-    <section class="card">
-      <h3>接入 snippet</h3>
-      <textarea id="snippet" rows="6" readonly></textarea>
-      <button id="btn-copy-snippet">复制 snippet</button>
-    </section>
-
-    <section class="card">
-      <h3>模型</h3>
-      <ul id="model-list"></ul>
-    </section>
-
-    <section class="card">
-      <h3>Demo</h3>
-      <button id="btn-open-demo">↗ Open Demo in new tab</button>
-    </section>
-  </section>
-
-  <!-- 设置 Panel：登录状态 + 线程池/TTL -->
-  <section class="tab-panel" data-tab-panel="settings">
     <section class="card">
       <div class="row">
         <h3 style="flex:1;margin:0;font-size:12px;color:#666;font-weight:600">登录状态</h3>
@@ -45,9 +26,19 @@
     </section>
 
     <section class="card">
-      <h3>配置</h3>
-      <label>线程池 <input id="pool-size" type="number" min="1" max="5" value="2"></label>
-      <label>TTL 分钟 <input id="ttl-min" type="number" min="1" value="30"></label>
+      <h3>模型</h3>
+      <ul id="model-list"></ul>
+    </section>
+
+    <section class="card">
+      <h3>接入 snippet</h3>
+      <textarea id="snippet" rows="6" readonly></textarea>
+      <button id="btn-copy-snippet">复制 snippet</button>
+    </section>
+
+    <section class="card">
+      <h3>Demo</h3>
+      <button id="btn-open-demo">↗ Open Demo in new tab</button>
     </section>
   </section>
 
@@ -60,6 +51,15 @@
       </div>
       <p class="small">每条 chat.completions.create 的路由决策现场：rebuild 旧 web session 被删、incremental 复用、threadFound / mirror 是否匹配。复制后贴给 AI / 自己看。</p>
       <ul id="log-list"></ul>
+    </section>
+  </section>
+
+  <!-- 设置 Panel：只剩配置（登录卡已搬到主页） -->
+  <section class="tab-panel" data-tab-panel="settings">
+    <section class="card">
+      <h3>配置</h3>
+      <label>线程池 <input id="pool-size" type="number" min="1" max="5" value="2"></label>
+      <label>TTL 分钟 <input id="ttl-min" type="number" min="1" value="30"></label>
     </section>
   </section>
 
