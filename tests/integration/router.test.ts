@@ -46,6 +46,7 @@ function stubAdapter(over: StubExtras = {}): ProviderAdapter {
 }
 
 const m = (role: Message['role'], content: string, extra: Partial<Message> = {}): Message => ({ role, content, ...extra });
+const msg = m;
 
 function makeRouter(adapter: ProviderAdapter) {
   const now = vi.fn(() => 1000);
@@ -264,5 +265,80 @@ describe('mirror assistant.content 与 SSE 一致（fix/mirror-content）', () =
     expect(e2.action).toBe('incremental');
     expect(e2.mirrorPrefixOk).toBe(true);
     expect(e2.deletedOld).toBe(false);
+  });
+});
+
+// 2026-09-09（fix/thread-persistence）：用户实测三连击（新回合新建会话 + 工具不触发 + 需要轨迹数据集）
+// 1) threadFound=false：user 隔 ~24 分钟续聊，MV3 service worker 被浏览器终止后内存 threads Map 全清
+//    → decide 找不到 thread → rebuild → 新建 DeepSeek Conversation（用户期望同一会话续聊）
+//    修：ThreadEntry 持久化（serialize/restore），SW 重启后 hydrate。
+// 2) system prompt 演进（知识库修复后 <project_context> 上线）会使 mirror[0]≠messages[0] → rebuild；
+//    system 是调用方注入指令，不该参与「上下文连续性」判定——比对时必须忽略 role=system。
+// 3) 问题 2（模型输出「文字+JSON」没触发工具）的日志观测：finishReason=stop 但无模型原文——
+//    加 replySample（聚合内容前 200 字）到 LogEntry，用户下次贴日志即可见模型到底输出了什么。
+describe('thread 持久化 + system 豁免比对（fix/thread-persistence）', () => {
+  const SYSTEM_A = 'you are old coding agent';
+  const SYSTEM_B = 'you are new coding agent with <project_context> knowledge';   // 模拟知识库上线后 system 变化
+
+  it('fail-to-pass: SW 重启（mapper 重建 + restore）后同 cid 续聊 → incremental + 复用 webSessionId', () => {
+    const now = vi.fn(() => 1000);
+    const deps = { createSession: async () => ({ webSessionId: 's1' }), deleteSession: async () => {}, now };
+    const cfg = { poolSize: 2, ttlMs: 60_000 };
+    const m1 = new SessionMapper(deps, cfg);
+    m1.register('deepseek', 'cid', 'ws-abc', [m('system', SYSTEM_A), m('user', 'q1')]);
+    m1.commit('deepseek', 'cid', [m('system', SYSTEM_A), m('user', 'q1'), m('assistant', 'a1')], 'ws-abc', 2);
+    // SW 被杀：模块重载 → 全新 mapper；从持久化恢复线程
+    const snap = (m1 as any).serialize();
+    const m2 = new SessionMapper(deps, cfg);
+    (m2 as any).restore(snap);
+    const d = m2.decide('deepseek', [m('system', SYSTEM_A), m('user', 'q1'), m('assistant', 'a1'), m('user', 'q2')], 'cid');
+    expect(d.action).toBe('incremental');
+    if (d.action === 'incremental') expect(d.thread.webSessionId).toBe('ws-abc');
+  });
+
+  it('fail-to-pass: system 内容变化不影响增量匹配（mirror 比对忽略 role=system）', async () => {
+    const r = makeRouter(stubAdapter());
+    const sys = (s: string) => [m('system', s), m('user', 'q1')];
+    const s1 = await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: sys(SYSTEM_A), stream: true, conversation_id: 'cid' });
+    for await (const _c of s1 as AsyncIterable<unknown>) { void _c; }
+    // 知识库上线：system 演进为 SYSTEM_B，业务消息一致；tail = [user q2]
+    const s2 = await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [
+      m('system', SYSTEM_B), m('user', 'q1'), m('assistant', 'ok'), m('user', 'q2'),
+    ], stream: true, conversation_id: 'cid' });
+    for await (const _c of s2 as AsyncIterable<unknown>) { void _c; }
+    const e = r['d'].log.list().at(-1)!;
+    expect(e.action).toBe('incremental');
+    expect(e.deletedOld).toBe(false);
+  });
+
+  it('fail-to-pass: replySample 记录模型输出原文（问题 2 排查现场）', async () => {
+    const r = makeRouter(stubAdapter({
+      streamCompletion: async function* () {
+        yield { kind: 'message_id', id: 1 };
+        yield { kind: 'content_delta', content: '我把 JSON 写在正文里：```json\n[{"id":"x"}]\n```', finish_reason: 'stop' };
+      },
+    }));
+    const s = await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'q1')], tools: [{ type: 'function', function: { name: 'Read', description: 'r', parameters: { type: 'object' } } }], stream: true });
+    for await (const _c of s as AsyncIterable<unknown>) { void _c; }
+    const e = r['d'].log.list().at(-1)! as any;
+    expect(e.replySample).toContain('我把 JSON 写在正文里');
+  });
+});
+
+// onPersist 数据层接线：register/commit 后回调必须触发（sw.ts 借此写 chrome.storage.local）
+describe('持久化钩子（fix/thread-persistence）', () => {
+  it('register/commit 各触发一次 onPersist，快照含完整 ThreadEntry', () => {
+    const now = vi.fn(() => 1000);
+    const mapper2 = new SessionMapper(
+      { createSession: async () => ({ webSessionId: 's1' }), deleteSession: async () => {}, now },
+      { poolSize: 2, ttlMs: 60_000 },
+    );
+    const snaps: { seq: number; threads: { conversationId: string; webSessionId: string; mirror: unknown[] }[] }[] = [];
+    mapper2.onPersist = (s) => snaps.push(s as never);
+    mapper2.register('deepseek', 'cid', 'ws-1', [msg('user', 'q1')]);
+    mapper2.commit('deepseek', 'cid', [msg('user', 'q1'), msg('assistant', 'a1')], 'ws-1', 2);
+    expect(snaps.length).toBe(2);
+    expect(snaps[1]!.threads[0]!.webSessionId).toBe('ws-1');
+    expect(snaps[1]!.threads[0]!.mirror.length).toBe(2);
   });
 });

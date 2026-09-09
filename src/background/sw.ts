@@ -1,6 +1,6 @@
 // src/background/sw.ts — MV3 service worker entry；chrome.* 仅在此文件
 import { Router } from './router';
-import { SessionMapper } from './session-mapper';
+import { SessionMapper, type ThreadEntry } from './session-mapper';
 import { Queue } from './queue';
 import { RingLog } from './log';
 import { createDeepSeekAdapter, type AdapterDeps } from './providers/deepseek/adapter';
@@ -71,6 +71,16 @@ async function build(): Promise<{ router: Router; log: RingLog }> {
     { createSession: async () => ({ webSessionId: '' }), deleteSession: async () => {}, now: () => Date.now() },
     { poolSize: cfg.poolSize, ttlMs: cfg.ttlMinutes * 60_000 },
   );
+  // 2026-09-09（fix/thread-persistence）：threads 走数据层（chrome.storage.local），不依赖进程内存。
+  // 重装扩展/刷新 spice 页面（MV3 SW 终止重启）后从数据层恢复 → 同 spice chat thread 仍对应
+  // DeepSeek 网页端**同一个** Chat thread（webSessionId + parentMessageId 链不丢）。
+  // 注意：用户明确要求状态以数据层为准，而不是进程状态。
+  mapper.onPersist = (snap) => { void STORAGE.set({ 'threads.v1': snap }); };
+  try {
+    const got = (await STORAGE.get('threads.v1')) as unknown;
+    const snap = (got as { 'threads.v1'?: { seq: number; threads: ThreadEntry[] } } | undefined)?.['threads.v1'];
+    if (snap && Array.isArray(snap.threads)) mapper.restore(snap);
+  } catch { /* 持久化数据损坏：放弃恢复，走 rebuild 安全路径 */ }
   let wasmInst: Promise<WasmInstance> | null = null;
   async function getWasm(): Promise<WasmInstance> {
     if (!wasmInst) wasmInst = (async () => {
