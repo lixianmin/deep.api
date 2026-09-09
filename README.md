@@ -33,4 +33,4 @@ bump → build → 加载新版本，三步顺序不能反。
 - `extension/` —— Chrome 加载目录（gitignored，构建产物）
 - `src/` —— TypeScript 源码
 - `tests/` —— vitest
-- `examples/demo-page/` —— popup 里"Open Demo in new window"弹窗用的 demo HTML+JS
+- `src/demo/demo-page/` —— popup 里"Open Demo in new tab"弹窗用的 demo HTML+JS（v0.1.61 起从 examples/demo-page/ 迁入）
