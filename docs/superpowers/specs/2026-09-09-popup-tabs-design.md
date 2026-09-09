@@ -4,7 +4,7 @@
 
 ## 1. 背景与目标
 
-当前 popup.html 平铺 6 个 section（登录状态、snippet、模型、配置、日志、Demo 按钮），内容变多后滚动距离长，配置/日志两类信息密度不高但挤在一起，用户找东西费劲。
+当前 popup.html 平铺 6 个 `.card`（登录状态、snippet、模型、配置、日志、Demo 按钮），内容变多后滚动距离长，配置/日志两类信息密度不高但挤在一起，用户找东西费劲。
 
 本次重构目标：
 
@@ -71,6 +71,7 @@
 ### 4.4 Tab 实现方式（JS 驱动）
 
 - HTML：`<nav class="tab-bar">` 包三个 `<button class="tab-btn" data-tab="home|settings|logs">`；三个 `<section class="tab-panel" data-tab-panel="home|settings|logs">`。
+- 默认激活：HTML 写死 — 第一个 `.tab-btn` 和第一个 `.tab-panel` 预置 `class="active"`（避免 JS 未执行时三 Panel 同时显示的闪烁；body 末尾 `<script>` 同步执行，理论上无闪烁，但预置更稳）。
 - CSS：`.tab-bar` 水平 flex；`.tab-btn.active` 加底色/下划线区分；`.tab-panel:not(.active)` `display: none`。
 - JS：`setupTabs()` 函数，监听所有 `.tab-btn` click，切换 active class。
 
@@ -87,12 +88,11 @@ function setupTabs() {
       panels.forEach(p => p.classList.toggle('active', p.dataset.tabPanel === target));
     });
   });
-  // 默认激活「主页」
-  btns[0]?.click();
+  // 不调用默认 click()：HTML 已预置 active，避免重复切换 classList 浪费 + 简化逻辑
 }
 ```
 
-调用时机：DOMContentLoaded 后调用一次（现有 popup.ts 没有显式 DOMContentLoaded 包裹，因为 `<script src="popup.js">` 在 body 末尾；同样位置调用即可）。
+调用时机：与现有 popup.ts 其它 DOM 操作同位置（body 末尾 `<script src="popup.js">` 同步执行，DOM 已就绪；现有代码也未包裹 DOMContentLoaded，同样位置调用即可）。
 
 ### 4.5 样式约定
 
@@ -158,15 +158,28 @@ await cp('src/demo/demo-page/demo.js', scriptPath);
 - `src/demo/demo-page/` —— popup 里"Open Demo in new tab"弹窗用的 demo HTML+JS（迁移自原 examples/demo-page/）
 ```
 
+### 5.5 测试改动
+
+`tests/unit/demo-shim.test.ts:23` 写死了 `import('../../examples/demo-page/demo.js')`，**必须改路径**：
+
+```diff
+- return import(/* @ts-ignore */ '../../examples/demo-page/demo.js' as any).catch(() => undefined);
++ return import(/* @ts-ignore */ '../../src/demo/demo-page/demo.js' as any).catch(() => undefined);
+```
+
+用例本身不动（demo.js 字节级未变）。其他测试不受影响（见 §6）。
+
 ## 6. 不改的东西（明确边界）
 
 - `src/popup/snippet.ts`：formatAuthState 不变。
-- `src/demo/demo-runner.ts`：本次不内嵌，文件不变；jsdom 单测不变。
+- `src/demo/demo-runner.ts`：本次不内嵌，**文件逻辑不变，仅第 2 行注释里 `examples/demo-page/index.html` 引用更新为新路径**。
 - `src/background/sw.ts`：panel.* handler 全保留。
 - `extension/manifest.json`：web_accessible_resources 路径不变。
 - `tests/unit/popup-helpers.test.ts`：只测 formatAuthState，不破坏。
 - `tests/unit/demo-runner.test.ts`：不依赖 popup 结构，不破坏。
+- `tests/unit/demo-shim.test.ts`：**改 import 路径**（见 §5.5），用例不变。
 - `tests/integration/router.test.ts`：panel.* 协议不变，不破坏。
+- 历史文档（`docs/superpowers/plans/2026-09-08-deep-api-extension.md`、`docs/superpowers/specs/2026-09-08-deep-api-extension-design.md`）保留对 `examples/demo-page/` 的历史引用不动（已落盘归档）。
 
 ## 7. 实施步骤（概要）
 
@@ -176,12 +189,14 @@ await cp('src/demo/demo-page/demo.js', scriptPath);
 2. 写 popup Tab 结构（html + css + ts）。
 3. 迁移 demo 源到 `src/demo/demo-page/`。
 4. 改 build.mjs。
-5. 跑 `npm test` 全绿。
-6. `npm run build` 确认 extension/ 产物正确。
-7. 删 examples/demo-page/。
-8. 更新 README + memory。
-9. `npm run bump`（v0.1.60 → v0.1.61）。
-10. 合并回 main。
+5. 改 `tests/unit/demo-shim.test.ts` 的 import 路径。
+6. 改 `src/demo/demo-runner.ts:2` 注释中的路径引用。
+7. 跑 `npm test` 全绿。
+8. `npm run build` 确认 extension/ 产物正确。
+9. 删 examples/demo-page/。
+10. 更新 README + memory。
+11. `npm run bump`（v0.1.60 → v0.1.61）。
+12. 合并回 main。
 
 ## 8. 风险与回滚
 
@@ -206,6 +221,8 @@ await cp('src/demo/demo-page/demo.js', scriptPath);
 - [ ] `src/demo/demo-page/index.html` 与 `src/demo/demo-page/demo.js` 内容与原 examples/demo-page/ 字节级一致。
 - [ ] `examples/demo-page/` 目录已删除。
 - [ ] build.mjs 改用 `src/demo/demo-page/` 作为 demo 拷贝源。
+- [ ] `tests/unit/demo-shim.test.ts` 的 import 路径从 `../../examples/demo-page/demo.js` 改为 `../../src/demo/demo-page/demo.js`，测试仍通过。
+- [ ] `src/demo/demo-runner.ts:2` 注释里的 `examples/demo-page/index.html` 引用更新为 `src/demo/demo-page/index.html`。
 - [ ] `npm test` 全绿。
 - [ ] `npm run build` 产物含 `extension/demo/index.html` + `extension/demo/demo.js`。
 - [ ] `extension/manifest.json` 未改。
