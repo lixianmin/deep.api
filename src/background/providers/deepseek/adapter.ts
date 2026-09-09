@@ -26,8 +26,10 @@ export function createDeepSeekAdapter(deps: AdapterDeps): ProviderAdapter {
     // version to use Expert.","finish_reason":"unsupported_client_by_model"}——服务端按
     // x-client-version 判客户端新旧，不带 = 旧客户端 = 拒用 Expert。
     // 2026-09-09 用户抓包（Chrome DevTools）真实验证：网页端带 x-client-version: 2.4.0、
-    // x-client-bundle-id: com.deepseek.chat、x-client-locale、x-client-timezone-offset；
+    // x-client-bundle-id: com.deepseek.chat、x-client-locale: en_US、x-client-timezone-offset: 28800；
     // **不带** x-app-version；x-hif-dliq/x-hif-leim 是 Cloudflare Zaraz 分析 token（API 不要求）。
+    // v0.1.77 曾用 zh_CN/locale——对 TIP「专家模式暂不支持搜索」中英文提示无直接证据（TIP 是
+    // UI 提示，deep.api 已跳过不进模型输出）；对齐抓包用 en_US 与网页行为一致。
     // User-Agent/Referer 在浏览器 fetch 是 forbidden header 不能设（服务端不校验。
     return {
       ...baseHeaders(ctx.token),
@@ -35,7 +37,7 @@ export function createDeepSeekAdapter(deps: AdapterDeps): ProviderAdapter {
       'x-client-version': '2.4.0',
       'x-client-bundle-id': 'com.deepseek.chat',
       'x-client-platform': 'web',
-      'x-client-locale': 'zh_CN',
+      'x-client-locale': 'en_US',
       'x-client-timezone-offset': '28800',
     };
   }

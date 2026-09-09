@@ -66,6 +66,29 @@ describe('ResponseTree', () => {
     const more = tree.apply({ op: 'APPEND', path: 'response/fragments/-1/content', value: '中' });
     expect(more).toEqual([{ kind: 'think_delta', content: '中' }]);
   });
+
+  // 2026-09-09（fix/append-fragments）：用户实测 thinking 模式（thinking_enabled:true）收到
+  // reasoningSample 但 replySample 空。sseRaw 现场：快照 fragments=[TIP, THINK]，响应中途
+  // 新增 RESPONSE fragment 走 {"p":"response/fragments","o":"APPEND","v":[{...}]}（数组），
+  // tree.apply 的 response/fragments 分支只认 op==='add' && 单对象 → APPEND 数组被忽略，
+  // 后续 content 增量全丢。llmweb2api parseContent 明确处理 APPEND+数组。
+  // 修：response/fragments 分支支持 APPEND + 数组（逐 fragment 解析，THINK→think、RESPONSE→content、其它跳过）。
+  it('appends batch fragments: APPEND+数组 → RESPONSE/THINK 增量（thinking 模式现场）', () => {
+    const tree = new ResponseTree();
+    // 快照：TIP（跳过）+ THINK（已解析）
+    tree.applySnapshot({ v: { response: { fragments: [
+      { id: 2, type: 'TIP', content: '专家模式暂不支持搜索，请使用快速模式', style: 'INFO' },
+      { id: 3, type: 'THINK', content: '我们需要', stage_id: 2 },
+    ] } } } as never);
+    // 中途新 fragment：APPEND 数组
+    const out = tree.apply({ op: 'APPEND', path: 'response/fragments', value: [
+      { id: 4, type: 'RESPONSE', content: '济南是山东省省会', references: [], stage_id: 3 },
+    ] });
+    expect(out).toEqual([{ kind: 'content_delta', content: '济南是山东省省会' }]);
+    // 新 fragment 之后的 -1/content 增量应接到 RESPONSE 上
+    const more = tree.apply({ op: 'APPEND', path: 'response/fragments/-1/content', value: '，不是首都' });
+    expect(more).toEqual([{ kind: 'content_delta', content: '，不是首都' }]);
+  });
 });
 describe('extractReadyIds', () => {
   it('extracts message ids', () => {

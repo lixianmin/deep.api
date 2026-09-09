@@ -38,6 +38,7 @@ export class ResponseTree {
       const t = (f as { type?: unknown }).type;
       const content = (f as { content?: unknown }).content;
       if (typeof content !== 'string' || content === '') continue;
+      if (t === 'TIP' || t === 'INFO') continue;  // 2026-09-09（fix/snapshot-fragments）：UI 提示不进入模型输出
       if (t === 'THINK' || t === 'THINKING') {
         this.fragments.push({ type: 'think', content: '' });
         out.push({ kind: 'think_delta', content });
@@ -52,12 +53,22 @@ export class ResponseTree {
   apply(op: { op: string; path: string; value?: unknown }): ProviderStreamEvent[] {
     const out: ProviderStreamEvent[] = [];
     const value = (op.value ?? null) as unknown;
-    if (op.path === 'response/fragments' && op.op === 'add' && value && typeof value === 'object') {
-      const v = value as { type?: string; content?: string };
-      const type = v.type === 'think' ? 'think' : 'response';
-      this.fragments.push({ type, content: typeof v.content === 'string' ? v.content : '' });
-      const created = this.fragments[this.fragments.length - 1]!;
-      if (created.content) out.push({ kind: type === 'think' ? 'think_delta' : 'content_delta', content: created.content });
+    // 2026-09-09（fix/append-fragments）：response/fragments 支持两种形态——
+    // op='add' 单对象（旧）与 op='APPEND' 数组（新，thinking 长回复中途新增 fragment 批次）。
+    // type 映射：'THINK'/'THINKING'/'think' → think；'RESPONSE'/'response'/其它 → response；
+    // 'TIP' 等 UI 提示跳过（不做内容也不推进上下文）。与 applySnapshot 的映射保持一致。
+    if (op.path === 'response/fragments' && (op.op === 'add' || op.op === 'APPEND') && value && typeof value === 'object') {
+      const frags = Array.isArray(value) ? value : [value];
+      for (const f of frags) {
+        const t = (f as { type?: unknown }).type;
+        const content = (f as { content?: unknown }).content;
+        if (typeof content !== 'string') continue;
+        if (t === 'TIP' || t === 'INFO') continue;  // UI 提示不进入模型输出
+        const isThink = t === 'THINK' || t === 'THINKING' || t === 'think';
+        this.fragments.push({ type: isThink ? 'think' : 'response', content: '' });
+        // 空 content 的 frag 只推进上下文（后续 /-1/content 增量接上），不 emit 空 delta
+        if (content !== '') out.push({ kind: isThink ? 'think_delta' : 'content_delta', content });
+      }
       return out;
     }
     if (op.path === 'response/fragments/-1/content' && typeof value === 'string') {

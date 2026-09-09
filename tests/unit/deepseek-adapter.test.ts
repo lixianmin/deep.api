@@ -61,6 +61,7 @@ describe('DeepSeekAdapter', () => {
     for await (const _ of a.streamCompletion(ctx, req)) { void _; }
     expect(sentHeaders?.['x-client-version']).toBe('2.4.0');
     expect(sentHeaders?.['x-client-bundle-id']).toBe('com.deepseek.chat');
+    expect(sentHeaders?.['x-client-locale']).toBe('en_US');
   });
 
   it('classifies errors: 429 → rate-limited', () => {
