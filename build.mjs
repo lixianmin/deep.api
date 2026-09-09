@@ -19,18 +19,16 @@ await cp('src/popup/popup.html', 'dist/popup.html');
 await cp('src/popup/popup.css', 'dist/popup.css');
 // 复制 demo 页到 dist/demo/，让 popup 能通过 chrome.runtime.getURL('demo/index.html') 在新窗口打开
 await cp('examples/demo-page/index.html', 'dist/demo/index.html');
+await cp('examples/demo-page/demo.js', 'dist/demo/demo.js');
 console.log('build + copy done');
 
-// 验证 demo 页 <script> 是合法 ES2022+ JS（防 v0.1.44 那类 TS 语法泄漏到 HTML 浏览器报 SyntaxError）
-const demoHtml = await readFile('examples/demo-page/index.html', 'utf8');
-const m = demoHtml.match(/<script>([\s\S]*?)<\/script>/);
-if (!m) throw new Error('demo page has no <script> block');
+// 验证 demo.js 是合法 ES2022+ JS（防 v0.1.44 那类 TS 语法泄漏到浏览器报 SyntaxError）
 const tmp = await mkdtemp(join(tmpdir(), 'demo-syntax-'));
 const scriptPath = join(tmp, 'demo.js');
-await writeFile(scriptPath, m[1], 'utf8');
+await cp('examples/demo-page/demo.js', scriptPath);
 try {
   execFileSync('node', ['--check', scriptPath], { stdio: 'inherit' });
-  console.log('demo page <script> node --check: OK');
+  console.log('demo.js node --check: OK');
 } finally {
   await rm(tmp, { recursive: true, force: true });
 }

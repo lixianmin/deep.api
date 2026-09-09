@@ -75,11 +75,12 @@ document.getElementById('btn-copy-snippet')!.addEventListener('click', () => nav
 document.getElementById('pool-size')!.addEventListener('change', (e) => send('panel.setPool', { poolSize: Number((e.target as HTMLInputElement).value) }));
 document.getElementById('ttl-min')!.addEventListener('change', (e) => send('panel.setTtl', { ttlMinutes: Number((e.target as HTMLInputElement).value) }));
 
-// "Open Demo in new window" 按钮：chrome-extension:// 协议代替 file://（Chrome 扩展开不了 file://）
+// "Open Demo in new tab" 按钮：chrome-extension:// 协议代替 file://（Chrome 扩展开不了 file://）
 // demo HTML 在 build.mjs 复制到 dist/demo/index.html；通过 web_accessible_resources 暴露
+// 用 chrome.tabs.create 弹新 tab（不是新 window），与浏览器其他 tab 一致
 document.getElementById('btn-open-demo')!.addEventListener('click', () => {
   const url = chrome.runtime.getURL('demo/index.html');
-  chrome.windows.create({ url, type: 'normal', width: 960, height: 800, focused: true });
+  chrome.tabs.create({ url });
 });
 
 send('panel.getState');
