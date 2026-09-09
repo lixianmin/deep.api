@@ -148,6 +148,8 @@ async function build(): Promise<{ router: Router; log: RingLog; mapper: SessionM
     storage: { get: async (k) => (await STORAGE.get(k as unknown as string))?.[k as unknown as string], set: async (k, v) => { await STORAGE.set({ [k]: v }); } },
     log,
     now: () => Date.now(),
+    // 2026-09-09（diag/version-stamp）：manifest version 写入每条 log，日志自证构建版本。
+    version: chrome.runtime.getManifest().version,
   });
   // 2026-09-09（feat/debug-dashboard）：注入 log 给 mapper，让 listThreads() 能按 cid 聚合最近一次决策现场。
   // 单实例仅一次；重复 build 命中 cached 短路。

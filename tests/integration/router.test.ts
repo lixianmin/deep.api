@@ -61,6 +61,9 @@ function makeRouter(adapter: ProviderAdapter) {
     storage: { get: async () => undefined, set: async () => undefined },
     log: new RingLog(20),
     now,
+    // 2026-09-09（diag/version-stamp）：log 条目自证构建版本。Debug 页「复制完整 JSON」
+    // 时直接看到 version，不用再问用户装的是哪个版本。
+    version: '0.0.0-test',
   });
   return router;
 }
@@ -68,6 +71,16 @@ function makeRouter(adapter: ProviderAdapter) {
 const TOKEN = 'tok-from-cookie';
 
 describe('Router', () => {
+  // 2026-09-09（diag/version-stamp）：给 log 条目打构建版本戳。用户「重装后日志没有新字段」
+  // 只能靠日志自证：version 字段直接显示运行的扩展构建版本（来自 manifest），
+  // 避免再猜 Chrome 到底加载了哪个 sw.js（v0.1.66/v0.1.67 教训：没 build 或旧代码在跑）。
+  it('diagnose: log 条目带 version 字段（自证构建版本）', async () => {
+    const r = makeRouter(stubAdapter());
+    await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'hi')] });
+    const e = r['d'].log.list().at(-1)!;
+    expect(e.version).toBe('0.0.0-test');
+  });
+
   it('aggregates non-stream and streams chunks', async () => {
     const a = stubAdapter(); const r = makeRouter(a);
     const res: any = await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'hi')] });

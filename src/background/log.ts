@@ -8,6 +8,8 @@ export interface LogEntry {
   ok: boolean;
   ms: number;
   error?: string;
+  // 2026-09-09（diag/version-stamp）：运行版本自证。用户「重装后还是旧行为」时一眼看出。
+  version?: string;
   // 诊断字段（可选，老条目不带也不破坏 popup 渲染）
   cid?: string;
   msgsLen?: number;

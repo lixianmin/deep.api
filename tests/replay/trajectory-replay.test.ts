@@ -51,6 +51,7 @@ function makeRouter(adapter: ProviderAdapter) {
     storage: { get: async () => undefined, set: async () => undefined },
     log: new RingLog(20),
     now,
+    version: '0.0.0-test',
   });
   return { router, mapper };
 }

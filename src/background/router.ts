@@ -15,6 +15,8 @@ export interface RouterDeps {
   storage: { get(k: string): Promise<unknown | undefined>; set(k: string, v: unknown): Promise<void> };
   log: RingLog;
   now(): number;
+  // 2026-09-09（diag/version-stamp）：扩展版本号（来自 manifest.json），写入每条 log 自证构建。
+  version: string;
 }
 
 function err(code: ApiErrorCode, message: string, status: number): BridgeError {
@@ -109,7 +111,7 @@ export class Router {
     };
     const done = (ok: boolean, ms: number, error?: string, extra?: { finishReason?: string; parentMessageId?: string | number | null; replySample?: string; reasoningSample?: string; sseBytes?: number; ssePaths?: string[]; sseRaw?: string }) =>
       this.d.log.push({
-        at: this.d.now(), provider: provider.id, model: modelId, ok, ms, error, ...diag,
+        at: this.d.now(), provider: provider.id, model: modelId, ok, ms, error, version: this.d.version, ...diag,
         finishReason: extra?.finishReason, parentMessageId: extra?.parentMessageId,
         replySample: extra?.replySample,
         reasoningSample: extra?.reasoningSample,
