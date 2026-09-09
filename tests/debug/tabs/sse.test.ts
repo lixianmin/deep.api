@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { mountSse } from '../../../src/demo/tabs/sse';
+import { mountSse } from '../../../src/debug/tabs/sse';
 
 const logs = [
   { at: 1000, provider: 'p', model: 'm', ok: true, ms: 10, webSessionId: 'ws1', replySample: 'hi' },

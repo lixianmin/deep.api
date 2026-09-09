@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { runAllScenarios } from '../../../src/demo/tabs/scenarios';
+import { runAllScenarios } from '../../../src/debug/tabs/scenarios';
 
 // 最小 SSE body：stream 场景读 res.body.getReader()。brief 自带的 mock 不带 body，
 // 与 brief 的 stream 场景实现不一致；为使 6 个场景在统一 mock 下都能跑通，

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { getPanelApi } from '../../../src/demo/tabs/panel-api';
+import { getPanelApi } from '../../../src/debug/tabs/panel-api';
 
 // 在 jsdom 环境下，chrome.runtime 默认不存在；需要 stub
 const portListeners: { msg?: (m: any) => void } = {};

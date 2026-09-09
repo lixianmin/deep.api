@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { mountLog } from '../../../src/demo/tabs/log';
+import { mountLog } from '../../../src/debug/tabs/log';
 
 const logs = [
   { at: 1000, provider: 'p', model: 'm', ok: true,  ms: 10, action: 'incremental' as const, cid: 'c1' },

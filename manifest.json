@@ -28,7 +28,7 @@
   "web_accessible_resources": [
     {
       "resources": [
-        "demo/index.html"
+        "debug/index.html"
       ],
       "matches": [
         "<all_urls>"

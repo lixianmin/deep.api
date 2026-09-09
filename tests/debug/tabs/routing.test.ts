@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { mountRouting } from '../../../src/demo/tabs/routing';
+import { mountRouting } from '../../../src/debug/tabs/routing';
 
 // mock data：只覆盖 ThreadRow 必要字段；lastDecision 省略让表格显示空 cell（覆盖 ?? '' 分支）
 const threads = [{

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { mountDebugPanel } from '../../src/demo/debug-panel';
+import { mountDebugPanel } from '../../src/debug/debug-panel';
 
 // Task 5 起 routing tab 调 getPanelApi() → chrome.runtime.connect。
 // 本文件只测 debug-panel 的 tab 框架，不验 panel-api 行为；给 chrome 一个 no-op stub 即可，

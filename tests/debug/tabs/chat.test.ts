@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { mountChat } from '../../../src/demo/tabs/chat';
+import { mountChat } from '../../../src/debug/tabs/chat';
 
 beforeEach(() => {
   // mock window.deepApi

@@ -5,7 +5,7 @@ export default defineConfig({
     environmentMatchGlobs: [
       ['tests/integration/bridge.test.ts', 'jsdom'],
       ['tests/unit/demo-runner.test.ts', 'jsdom'],
-      ['tests/demo/**/*.test.ts', 'jsdom'],
+      ['tests/debug/**/*.test.ts', 'jsdom'],
     ],
   },
 });

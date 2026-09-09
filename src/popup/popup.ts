@@ -127,11 +127,11 @@ document.getElementById('btn-copy-log')!.addEventListener('click', () => {
   });
 });
 
-// "Open Demo in new tab" 按钮：chrome-extension:// 协议代替 file://（Chrome 扩展开不了 file://）
-// demo HTML 在 build.mjs 复制到 extension/demo/index.html；通过 web_accessible_resources 暴露
+// "Open Debug in new tab" 按钮：chrome-extension:// 协议代替 file://（Chrome 扩展开不了 file://）
+// debug HTML 在 build.mjs 复制到 extension/debug/index.html；通过 web_accessible_resources 暴露
 // 用 chrome.tabs.create 弹新 tab（不是新 window），与浏览器其他 tab 一致
-document.getElementById('btn-open-demo')!.addEventListener('click', () => {
-  const url = chrome.runtime.getURL('demo/index.html');
+document.getElementById('btn-open-debug')!.addEventListener('click', () => {
+  const url = chrome.runtime.getURL('debug/index.html');
   chrome.tabs.create({ url });
 });
 

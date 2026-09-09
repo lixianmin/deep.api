@@ -14,7 +14,7 @@ await Promise.all([
   build({ ...shared, entryPoints: ['src/content/bridge-main.ts'], outfile: 'extension/bridge-main.js', format: 'iife' }),
   build({ ...shared, entryPoints: ['src/content/bridge-relay.ts'], outfile: 'extension/bridge-relay.js', format: 'iife' }),
   build({ ...shared, entryPoints: ['src/popup/popup.ts'], outfile: 'extension/popup.js', format: 'iife' }),
-  build({ ...shared, entryPoints: ['src/demo/demo-page/demo.js'], outfile: 'extension/demo/demo.js', format: 'iife', target: 'chrome120' }),
+  build({ ...shared, entryPoints: ['src/debug/demo-page/demo.js'], outfile: 'extension/debug/demo.js', format: 'iife', target: 'chrome120' }),
 ]);
 
 await cp('src/popup/popup.html', 'extension/popup.html');
@@ -23,13 +23,13 @@ await cp('src/popup/popup.css', 'extension/popup.css');
 // 仓库根 manifest.json 也保留，方便 diff/查看；bundle/version 走脚本同步两端。
 await cp('manifest.json', 'extension/manifest.json');
 // 复制 demo 页到 extension/demo/，让 popup 能通过 chrome.runtime.getURL('demo/index.html') 在新窗口打开
-await cp('src/demo/demo-page/index.html', 'extension/demo/index.html');
+await cp('src/debug/demo-page/index.html', 'extension/debug/index.html');
 console.log('build + copy done');
 
 // 验证 demo.js 是合法 ES2022+ JS（防 v0.1.44 那类 TS 语法泄漏到浏览器报 SyntaxError）
 const tmp = await mkdtemp(join(tmpdir(), 'demo-syntax-'));
 const scriptPath = join(tmp, 'demo.js');
-await cp('src/demo/demo-page/demo.js', scriptPath);
+await cp('src/debug/demo-page/demo.js', scriptPath);
 try {
   execFileSync('node', ['--check', scriptPath], { stdio: 'inherit' });
   console.log('demo.js node --check: OK');

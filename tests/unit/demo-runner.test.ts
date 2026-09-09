@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { mountDemo } from '../../src/demo/demo-runner';
+import { mountDemo } from '../../src/debug/demo-runner';
 
 const fakeModels = { data: [{ id: 'm1' }, { id: 'm2' }] };
 const fakeNonStream = { choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }] };
