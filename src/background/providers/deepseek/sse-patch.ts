@@ -61,7 +61,7 @@ export async function* completionEvents(
   onReady: (ids: { requestMessageId: number; responseMessageId: number }) => void,
 ): AsyncIterable<ProviderStreamEvent> {
   const dec = new TextDecoder();
-  const { processBlock } = makeProcessor(onReady);
+  const { processBlock, stats } = makeProcessor(onReady);
   const iter = body[Symbol.asyncIterator]();
   let buf = '';
   try {
@@ -79,6 +79,7 @@ export async function* completionEvents(
         if (timer !== undefined) clearTimeout(timer);
       }
       if (result.done) break;
+      stats.bytes += result.value.byteLength;
       buf += dec.decode(result.value, { stream: true });
       let idx: number;
       while ((idx = buf.indexOf('\n\n')) >= 0) {
@@ -89,6 +90,11 @@ export async function* completionEvents(
     // 流结束：flush 残余尾帧（无 \n\n 终止也解析，不静默丢失）
     buf += dec.decode();
     if (buf.trim() !== '') yield* processBlock(buf);
+    // 2026-09-09（diag/pro-sse-paths）：流末 emit stream_stats 事件，Router 接手后写入 log。
+    // 用于诊断 Pro（model_type=expert）在 DeepSeek 网页 web API 上是否只返 thinking fragments
+    // （场景 B-1：bytes > 0 但 paths 只含 'response/fragments'+type='think'）还是用了未识别 path（场景 B-2：
+    // paths 含 parser 不认识的 path）。bytes = 0 表示上游本就未返任何字节。
+    yield { kind: 'stream_stats', bytes: stats.bytes, paths: [...stats.paths] };
   } finally {
     // best-effort 关闭底层迭代器；不 await：源停在未决 await 上时 spec 规定 return() 须等其完成（会死锁），故 fire-and-forget
     void iter.return?.().catch(() => {});
@@ -97,18 +103,23 @@ export async function* completionEvents(
 
 function makeProcessor(onReady: (ids: { requestMessageId: number; responseMessageId: number }) => void): {
   processBlock(block: string): ProviderStreamEvent[];
+  stats: { bytes: number; paths: Set<string> };
 } {
   const tree = new ResponseTree();
   let sentReady = false;
   let lastPath: string | null = null;   // 简写增量 {"v":...} 的继承上下文
   let lastOp = 'SET';
+  // 2026-09-09（diag/pro-sse-paths）：path 集（含 ready/request_message_id/response_message_id
+  // 都记）。ready event 有顶层 request_message_id/response_message_id，不走 path 路径——加
+  // 哨兵 'ready' 让 stats.paths 准确反映「上游到底返了什么」。
+  const stats = { bytes: 0, paths: new Set<string>() };
   const processBlock = (block: string): ProviderStreamEvent[] => {
     const out: ProviderStreamEvent[] = [];
     for (const ev of parseSseText(block)) {
       let data: unknown; try { data = JSON.parse(ev.data); } catch { continue; }
       if (!sentReady) {
         const ids = extractReadyIds(data);
-        if (ids) { sentReady = true; onReady(ids); out.push({ kind: 'message_id', id: ids.responseMessageId }); continue; }
+        if (ids) { sentReady = true; onReady(ids); stats.paths.add('ready'); out.push({ kind: 'message_id', id: ids.responseMessageId }); continue; }
       }
       if (typeof data === 'object' && data !== null) {
         // 实测 SSE 格式：{"p":"response/content","o":"APPEND","v":"你好"} 完整操作；
@@ -120,12 +131,14 @@ function makeProcessor(onReady: (ids: { requestMessageId: number; responseMessag
           const path = d.p;
           const op = typeof d.o === 'string' ? d.o : 'SET';
           lastPath = path; lastOp = op;
+          stats.paths.add(path);
           out.push(...tree.apply({ op, path, value: d.v }));
         } else if ('v' in d && typeof d.v !== 'object' && lastPath !== null) {
-          // 形态2：简写增量（继承上个操作的 path/op）
+          // 形态2：简写增量（继承上个操作的 path/op）——不重复加 path（已在形态1加过）
           out.push(...tree.apply({ op: lastOp, path: lastPath, value: d.v }));
         } else {
           // 形态3：旧格式 {op?,path?,value?} 或 {v:{快照}} 等：仅当子对象是 {op,path,value} 时解析
+          let parsedAny = false;
           for (const [key, v] of Object.entries(d)) {
             if (typeof v === 'object' && v !== null) {
               const op = v as { op?: string; path?: string; value?: unknown };
@@ -133,14 +146,21 @@ function makeProcessor(onReady: (ids: { requestMessageId: number; responseMessag
                 const path = op.path;
                 const o = op.op ?? 'replace';
                 lastPath = path; lastOp = o;
+                stats.paths.add(path);
                 out.push(...tree.apply({ op: o, path, value: op.value }));
+                parsedAny = true;
               }
             }
+          }
+          if (!parsedAny) {
+            // 形态3 没匹配上：记录未知顶层 key 以便诊断 Pro 是否有新 path
+            const unknownKey = Object.keys(d)[0] ?? 'unknown';
+            stats.paths.add(`unknown:${unknownKey}`);
           }
         }
       }
     }
     return out;
   };
-  return { processBlock };
+  return { processBlock, stats };
 }

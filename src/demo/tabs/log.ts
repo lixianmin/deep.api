@@ -39,7 +39,7 @@ export function mountLog(pane: HTMLElement): () => void {
       if (okChecked && !l.ok) return false;
       if (errChecked && l.ok) return false;
       if (q) {
-        const hay = ((l.error ?? '') + ' ' + (l.replySample ?? '') + ' ' + (l.reasoningSample ?? '') + ' ' + (l.cid ?? '')).toLowerCase();
+        const hay = ((l.error ?? '') + ' ' + (l.replySample ?? '') + ' ' + (l.reasoningSample ?? '') + ' ' + (l.ssePaths?.join(' ') ?? '') + ' ' + (l.cid ?? '')).toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
@@ -52,8 +52,13 @@ export function mountLog(pane: HTMLElement): () => void {
       const t = new Date(l.at).toLocaleTimeString();
       const reason = (l.reasoningSample ?? '').slice(0, 100);
       const reply = (l.replySample ?? l.error ?? '').slice(0, 100);
+      // 2026-09-09（diag/pro-sse-paths）：bytes/paths 列——判 Pro 场景 B-1/B-2/B-3
+      const bytes = l.sseBytes ?? 0;
+      const paths = l.ssePaths ?? [];
       // Pro 风格「只返 reasoning 不返 content」现场一眼看见：reason 行有内容、reply 行空
       const reasonStyle = reason ? 'color:#a60;background:#fff8e8;' : 'color:#ccc;';
+      // Pro 场景颜色：bytes>0 但 paths 只有 fragments → 橙提示（疑 B-1）
+      const bytesStyle = bytes === 0 ? 'color:#a00;' : paths.some((p) => p === 'response/fragments' || p === 'response/fragments/-1/content') && !paths.includes('response/content') ? 'color:#a60;' : 'color:#888;';
       return `<div data-row style="padding:4px;border-bottom:1px solid #eee;font-family:ui-monospace,monospace;font-size:11px;">
         <div>
           <span style="color:#888;">${t}</span>
@@ -72,6 +77,12 @@ export function mountLog(pane: HTMLElement): () => void {
         <div style="margin-left:8px;margin-top:2px;${reasonStyle}">
           <span style="color:#888;">💭reason:</span>
           <span style="margin-left:4px;">${reason || '(空)'}</span>
+        </div>
+        <div style="margin-left:8px;margin-top:2px;${bytesStyle}">
+          <span style="color:#888;">sse:</span>
+          <span style="margin-left:4px;">${bytes}B</span>
+          <span style="margin-left:8px;color:#888;">paths:</span>
+          <span style="margin-left:4px;">${paths.length ? paths.join(', ') : '(none)'}</span>
         </div>
       </div>`;
     }).join('');

@@ -32,6 +32,13 @@ export interface LogEntry {
   // content（与 Flash 默认不同），当前 log 只记 replySample，reasoning 被静默丢，排查现场看不见。
   // 修：同时记 reasoningSample，与 replySample 并列；一眼看出 Pro 是否只返了 thinking。
   reasoningSample?: string;
+  // 2026-09-09（diag/pro-sse-paths）：SSE 原始调试。bytes 判上游是否真返了数据；paths 判 Pro 是只返
+  // fragments (含 think/response) 还是返了未识别 path。排查 Pro 空响应的唯一现场。
+  //   场景 B-1：bytes > 0 + paths 只含 fragments/type=think → Pro 只返了 thinking，思维后面没接 content
+  //   场景 B-2：bytes > 0 + paths 含 unknown:xxx → Pro 返了我没解析的字段
+  //   场景 B-3：bytes == 0 + paths == [] → 上游完全没返（与 onStreamError 不同路径）
+  sseBytes?: number;
+  ssePaths?: string[];
 }
 
 export class RingLog {

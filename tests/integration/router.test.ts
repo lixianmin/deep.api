@@ -190,6 +190,48 @@ describe('Router', () => {
     expect(e.reasoningSample).toBe('');   // Flash 不发 thinking
   });
 
+  // 2026-09-09（diag/pro-sse-paths）：spice 报 Pro 返空 content + reasoning，疑似 Pro 上游仅返
+  // thinking 片段不接 content。诊断：SSE parser 跟踪总字节与 path 集，log 记 sseBytes/ssePaths。
+  //   bytes=0 + paths=[] → 上游完全未返 (B-3)
+  //   bytes>0 + paths 只含 'ready'+'response/fragments'  →  Pro 只返了 fragments
+  //   bytes>0 + paths 含 'unknown:xxx'                   →  Pro 返了未识别 path
+  it('fail-to-pass: stream 末 emit stream_stats → log 记 sseBytes/ssePaths（Pro 场景 B-1/B-2 区分用）', async () => {
+    const a = stubAdapter({
+      streamCompletion: async function* () {
+        yield { kind: 'message_id', id: 1 };
+        yield { kind: 'content_delta', content: 'hi', finish_reason: 'stop' };
+        yield { kind: 'stream_stats', bytes: 2048, paths: ['ready', 'response/content'] };
+      },
+    });
+    const r = makeRouter(a);
+    await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'hi')] });
+    const e = r['d'].log.list()[0]!;
+    expect(e.sseBytes).toBe(2048);
+    expect(e.ssePaths).toEqual(['ready', 'response/content']);
+  });
+
+  it('fail-to-pass: Pro 风格「只返 thinking fragments」→ paths 只含 response/fragments (B-1 现场)', async () => {
+    // 模拟 Pro 返了 thinking 但不接 content：parser 会看到 ready + response/fragments path
+    // （parser 走的是 response/fragments path，因为 Pro 不走 response/content 老路径）
+    const a = stubAdapter({
+      streamCompletion: async function* () {
+        yield { kind: 'message_id', id: 1 };
+        yield { kind: 'think_delta', content: '用户问只是测试' };
+        // 没 content_delta
+        yield { kind: 'content_delta', content: '', finish_reason: 'stop' };
+        yield { kind: 'stream_stats', bytes: 4096, paths: ['ready', 'response/fragments'] };
+      },
+    });
+    const r = makeRouter(a);
+    await r.create(TOKEN, { model: 'deepseek-v4-pro', messages: [m('user', '只是测试')] });
+    const e = r['d'].log.list()[0]!;
+    expect(e.replySample).toBe('');
+    expect(e.reasoningSample).toBe('用户问只是测试');
+    expect(e.sseBytes).toBe(4096);
+    expect(e.ssePaths).toContain('ready');
+    expect(e.ssePaths).toContain('response/fragments');
+  });
+
   it('rate-limited twice then succeeds with backoff', async () => {
     vi.useFakeTimers();
     try {
