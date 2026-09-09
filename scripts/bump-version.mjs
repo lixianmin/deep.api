@@ -24,8 +24,14 @@ const next = `${maj}.${min}.${pat + 1}`;
 manifest.version = next;
 pkg.version = next;
 
+// manifest.json 两份：仓库根用于 diff/build.mjs 复制到 extension/、package.json；同步两边。
+const extManifestPath = join(here, '..', 'extension', 'manifest.json');
+const extManifest = JSON.parse(readFileSync(extManifestPath, 'utf8'));
+extManifest.version = next;
+
 writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
 writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
+writeFileSync(extManifestPath, JSON.stringify(extManifest, null, 2) + '\n');
 
 console.log(`version: ${manifest.version.replace(/^\d+\.\d+\./, (m) => m)} → ${next}`);
-console.log(`已更新: manifest.json, package.json`);
+console.log(`已更新: manifest.json, extension/manifest.json, package.json`);
