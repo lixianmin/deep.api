@@ -150,3 +150,58 @@ describe('Router', () => {
     await expect(r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'hi')] })).rejects.toMatchObject({ status: 503, error: { error: { code: 'provider_unavailable' } } });
   });
 });
+
+// 2026-09-09（feat/diagnostic-logging）：popup 日志区需要的诊断现场。
+// spice 报“每发一条消息重建一条”需看 threadFound / mirrorPrefixOk / deletedOld / action 判断“多次调中有无轮番 rebuild 删 old”。
+describe('Router 诊断日志（v0.1.50）', () => {
+  it('首调无 cid → rebuild、threadFound=false、deletedOld=false、msgsLen 带 N', async () => {
+    const a = stubAdapter();
+    const r = makeRouter(a);
+    await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'a'), m('user', 'b')] });
+    const list = r['d'].log.list();
+    const last = list[list.length - 1]!;
+    expect(last.action).toBe('rebuild');
+    expect(last.threadFound).toBe(false);
+    expect(last.deletedOld).toBe(false);
+    expect(last.msgsLen).toBe(2);
+    expect(last.mirrorLen).toBeUndefined();
+    expect(last.ok).toBe(true);
+    expect(last.finishReason).toBe('stop');
+    expect(last.cid).toMatch(/^auto:\d+$/);
+  });
+
+  it('传同 cid 第二次调 → incremental、threadFound=true、mirrorPrefixOk=true、msgsLen 递增', async () => {
+    const a = stubAdapter();
+    const r = makeRouter(a);
+    await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'a'), m('user', 'b')], conversation_id: 'spice-cid' });
+    await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'a'), m('user', 'b'), m('assistant', 'ok'), m('user', 'c')], conversation_id: 'spice-cid' });   // stub streamCompletion 返回 content='ok'，所以镜像里 assistant.content='ok'
+    const list = r['d'].log.list();
+    expect(list).toHaveLength(2);
+    const e0 = list[0]!;
+    const e1 = list[1]!;
+    expect(e0.action).toBe('rebuild');
+    expect(e0.threadFound).toBe(false);
+    expect(e0.deletedOld).toBe(false);
+    expect(e0.cid).toBe('spice-cid');
+    expect(e1.action).toBe('incremental');
+    expect(e1.threadFound).toBe(true);
+    expect(e1.mirrorPrefixOk).toBe(true);
+    expect(e1.deletedOld).toBe(false);
+    expect(e1.mirrorLen).toBe(3);   // call 1 commit 后 mirror = [user:a, user:b, assistant:r1] = 3
+    expect(e1.msgsLen).toBe(4);
+  });
+
+  it('同 cid 但 mirror 不匹配（修改了中间一条）→ rebuild 且 deletedOld=true', async () => {
+    const a = stubAdapter();
+    const r = makeRouter(a);
+    await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'a'), m('user', 'b')], conversation_id: 'spice-cid' });
+    await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'a-CHANGED'), m('user', 'b')], conversation_id: 'spice-cid' });   // stub 返回 'ok'，call 1 镜像含 assistant:'ok'，但这次没带 — mirror 不匹配
+    const list = r['d'].log.list();
+    const e1 = list[1]!;
+    expect(e1.action).toBe('rebuild');
+    expect(e1.threadFound).toBe(true);
+    expect(e1.mirrorPrefixOk).toBe(false);
+    expect(e1.deletedOld).toBe(true);
+    expect(e1.mirrorLen).toBe(3);   // call 1 commit 后 mirror = 3 条
+  });
+});

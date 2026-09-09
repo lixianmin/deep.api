@@ -59,8 +59,24 @@ export class Router {
       search: (p.search ?? undefined) as boolean | undefined,
       reasoningEffort: (p.reasoning_effort ?? undefined) as 'low' | 'medium' | 'high' | 'max' | undefined,
     };
-    const handle = await this.runCompletion(provider, resolved, messages, toolCtx, p.conversation_id as string | undefined, ctx, overrides);
-    const done = (ok: boolean, ms: number, error?: string) => this.d.log.push({ at: this.d.now(), provider: provider.id, model: modelId, ok, ms, error });
+    const conversationId = p.conversation_id as string | undefined;
+    // 2026-09-09 诊断字段（v0.1.50 落地）：在 handle 构造前先比一次，看看是不是 thread 找不到 / mirror 不匹配。
+    // 给 popup 日志区提供 decision.action / threadFound / mirrorPrefixOk / deletedOld 等现场信息。
+    const preDecide = this.d.mapper.decide(provider.id, messages, conversationId);
+    const threadFound = preDecide.action !== 'rebuild' || preDecide.existing !== null;
+    const mirrorPrefixOk = preDecide.action === 'incremental';
+    const mirrorLen = preDecide.action === 'incremental' ? preDecide.thread.mirror.length
+      : preDecide.action === 'rebuild' && preDecide.existing ? preDecide.existing.mirror.length
+      : undefined;
+    const handle = await this.runCompletion(provider, resolved, messages, toolCtx, conversationId, ctx, overrides);
+    const diag = {
+      cid: handle.convId, msgsLen: messages.length, action: handle.thread.kind ? (preDecide.action === 'incremental' ? 'incremental' as const : 'rebuild' as const) : undefined,
+      threadFound, mirrorPrefixOk, mirrorLen,
+      deletedOld: preDecide.action === 'rebuild' && preDecide.existing !== null,
+      webSessionId: handle.session.webSessionId,
+    };
+    const done = (ok: boolean, ms: number, error?: string, extra?: { finishReason?: string; parentMessageId?: string | number | null }) =>
+      this.d.log.push({ at: this.d.now(), provider: provider.id, model: modelId, ok, ms, error, ...diag, finishReason: extra?.finishReason, parentMessageId: extra?.parentMessageId });
     if (p.stream === true) return this.encodeStream(provider, handle, ctx, modelId, started, messages, toolCtx, done);
     const agg: StreamAggregate = { content: '', reasoning: '', toolCalls: [], finishReason: null };
     try {
@@ -70,7 +86,7 @@ export class Router {
       done(false, this.d.now() - started, (e as Error).message);
       throw this.mapErr(e);
     }
-    done(true, this.d.now() - started);
+    done(true, this.d.now() - started, undefined, { finishReason: agg.finishReason ?? 'stop', parentMessageId: handle.run.parentMessageId });
     return toAggregate({ id: `chatcmpl-${ctx.requestId}`, model: modelId, created: Math.floor(started / 1000) }, agg);
   }
 
@@ -231,7 +247,7 @@ export class Router {
         // mirror 含 assistant 回复（同 finalize 的修复）：保证下一轮增量命中
         const mirrorMessages: Message[] = [...messages, { role: 'assistant', content: agg.content, ...(agg.toolCalls.length ? { tool_calls: agg.toolCalls } : {}) }];
         self.d.mapper.commit(provider.id, handle.convId, mirrorMessages, handle.session.webSessionId, handle.run.parentMessageId ?? handle.session.parentMessageId);
-        done(true, self.d.now() - started);
+        done(true, self.d.now() - started, undefined, { finishReason: agg.finishReason ?? 'stop', parentMessageId: handle.run.parentMessageId });
       } catch (e) {
         done(false, self.d.now() - started, (e as Error).message);
         throw mapErrStatic(e, self.d.registry);

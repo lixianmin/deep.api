@@ -65,7 +65,7 @@ const panelPorts = new Set<chrome.runtime.Port>();   // 当前打开的 popup �
 
 async function build(): Promise<{ router: Router; log: RingLog }> {
   if (cached) return cached;
-  const log = new RingLog(20);
+  const log = new RingLog(200);   // 2026-09-09 调到 200：popup 日志区要把 decision.action / deletedOld 等现场贴给 AI，20 条不够回看
   const cfg = await getProviderConfig('deepseek');
   const mapper = new SessionMapper(
     { createSession: async () => ({ webSessionId: '' }), deleteSession: async () => {}, now: () => Date.now() },
