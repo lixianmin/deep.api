@@ -1,3 +1,93 @@
+// Shim: 如果 page 是 chrome-extension://.../demo/ 加载的，content script 不会注入 window.deepApi。
+// 这种场景下我们自己用 chrome.runtime.connect('deepapi') 直连 SW，模拟 window.deepApi。
+// 外部网页场景（chat.deepseek.com / example.com 等）由 bridge-main 注入 window.deepApi，走原来的桥。
+if (!window.deepApi && typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.connect) {
+  const pending = new Map();
+  const port = chrome.runtime.connect({ name: 'deepapi' });
+  let seq = 0;
+  const sseChunkFrame = (c) => 'data: ' + JSON.stringify(c) + '\n\n';
+  const sseErrorFrame = (err) => 'data: ' + JSON.stringify({ error: err.error || { message: 'unknown', code: 'internal_error' } }) + '\n\n';
+
+  port.onMessage.addListener((env) => {
+    if (!env || !env.__deepApi) return;
+    const e = env.__deepApi;
+    const p = pending.get(e.id);
+    if (!p) return;
+    if (e.kind === 'chunk') {
+      // 流式：推 SSE 帧到队列
+      if (p.isStream) {
+        p.queue.push(sseChunkFrame(e.chunk));
+        const w = p._wake; if (w) { p._wake = null; w(); }
+      } else {
+        // 非流式：SW 不应发 chunk（v0.1.45 修复后非流式只发 result）。忽略。
+      }
+    } else if (e.kind === 'result') {
+      pending.delete(e.id);
+      if (p.isStream) {
+        // 流式不会发 result；忽略。
+      } else {
+        p.settled = true;
+        const w = p._wake; if (w) { p._wake = null; w(); }
+        p._resolve && p._resolve(e.value);
+      }
+    } else if (e.kind === 'done') {
+      pending.delete(e.id);
+      p.settled = true;
+      const w = p._wake; if (w) { p._wake = null; w(); }
+      if (p.isStream) {
+        // 流式收尾：推 [DONE] SSE 帧
+        p.queue.push('data: [DONE]\n\n');
+        if (p._wake) { p._wake = null; p._wake(); }
+      }
+      // 非流式不发 done（已收 result）
+    } else if (e.kind === 'error') {
+      pending.delete(e.id);
+      p.settled = true;
+      const w = p._wake; if (w) { p._wake = null; w(); }
+      if (p.isStream) {
+        p.queue.push(sseErrorFrame(e.error));
+        p.queue.push('data: [DONE]\n\n');
+        if (p._wake) { p._wake = null; p._wake(); }
+      } else {
+        p._reject && p._reject(new Error((e.error && e.error.error && e.error.error.message) || 'bridge error'));
+      }
+    }
+  });
+
+  const send = (params) => {
+    const id = ++seq;
+    const isStream = !!params.stream;
+    const p = { isStream, queue: [], settled: false };
+    pending.set(id, p);
+    port.postMessage({ __deepApi: { id, method: 'chat.completions.create', params } });
+    if (isStream) {
+      // 流式：返回 AsyncIterable<string>，消费 SSE 帧
+      return (async function* () {
+        while (true) {
+          if (p.queue.length) { yield p.queue.shift(); continue; }
+          if (p.settled) return;
+          await new Promise((r) => { p._wake = r; });
+        }
+      })();
+    }
+    // 非流式：返回 Promise<ChatCompletion>
+    return new Promise((res, rej) => { p._resolve = res; p._reject = rej; });
+  };
+
+  const sendSimple = (method, params) => {
+    const id = ++seq;
+    const p = { isStream: false, queue: [], settled: false };
+    pending.set(id, p);
+    port.postMessage({ __deepApi: { id, method, params } });
+    return new Promise((res, rej) => { p._resolve = res; p._reject = rej; });
+  };
+
+  window.deepApi = {
+    models: { list: () => sendSimple('models.list', {}) },
+    chat: { completions: { create: send } },
+  };
+}
+
 const out = document.getElementById('out');
 const log = (s) => { out.textContent += s + '\n'; };
 const reset = () => { out.textContent = ''; };
