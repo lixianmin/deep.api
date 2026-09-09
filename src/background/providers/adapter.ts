@@ -45,8 +45,8 @@ export type ProviderStreamEvent =
   | { kind: 'think_delta'; content: string }
   | { kind: 'content_delta'; content: string; finish_reason?: 'stop' | string }
   | { kind: 'usage'; inputTokens: number; outputTokens: number }
-  // 2026-09-09（diag/pro-sse-paths）：SSE 流字节 + + 路径集。仅一次、流末由 parser emit，Router
-  接手后写入 log.sseBytes/ssePaths——判断 Pro 模型场景 B-1（只返 thinking）与 B-2（未识别 path）
-  的唯一依据。
-  | { kind: 'stream_stats'; bytes: number; paths: string[] };
+  // 2026-09-09（diag/pro-sse-paths）：SSE 流字节 + 路径集。仅一次、流末由 parser emit，Router
+  // 接手后写入 log.sseBytes/ssePaths——判断 Pro 模型场景 B-1（只返 thinking）与 B-2（未识别 path）
+  // 的唯一依据。rawSample：原始 SSE 文本前 600 字符（诊断 unknown 事件真实内容，v0.1.73）。
+  | { kind: 'stream_stats'; bytes: number; paths: string[]; rawSample?: string };
 export { ModelInfo };

@@ -104,4 +104,29 @@ describe('completionEvents (真实 SSE 格式 p/o/v)', () => {
     const usage = evs.filter(e => e.kind === 'usage').map(e => (e as any).outputTokens);
     expect(usage).toContain(66);
   });
+
+  // 2026-09-09（diag/raw-sample）：v0.1.71/72 实测 Pro（model_type=expert）在网页 web API 上
+  // 返回 sseBytes≈320 + paths 只含 ['ready','unknown:unknown','unknown:type','unknown:click_behavior']，
+  // 0 content 0 thinking；Flash 正常返回 response/content。
+  // 光有 paths 不够——需要原始 SSE 文本来确定这 3 个 unknown 事件到底是什么。
+  // 修：completionEvents 流末 stream_stats 携带 rawSample（前 600 字符原始 SSE 文本），
+  // log 透出后可读真实事件内容。
+  it('analyze: stream_stats 携带 rawSample（前 600 字符原始 SSE 文本）', async () => {
+    const proSse = [
+      'event: ready\ndata: {"request_message_id":1,"response_message_id":2,"model_type":"expert"}\n\n',
+      'data: {"unknown":"xxx"}\n\n',
+      'data: {"type":"click_behavior","count":1}\n\n',
+      'data: {"click_behavior":{"enabled":true}}\n\n',
+    ].join('');
+    const chunks: Uint8Array[] = [];
+    for (const block of proSse.split('\n\n')) chunks.push(new TextEncoder().encode(block + '\n\n'));
+    const iter = (async function* () { for (const c of chunks) yield c; })();
+    const evs: ProviderStreamEvent[] = [];
+    for await (const ev of completionEvents(iter, 1000, () => {})) evs.push(ev);
+    const stats = evs.find(e => e.kind === 'stream_stats') as any;
+    expect(stats.bytes).toBeGreaterThan(0);
+    expect(stats.paths).toContain('unknown:type');
+    expect(stats.rawSample).toContain('click_behavior');
+    expect(stats.rawSample).toContain('"unknown":"xxx"');
+  });
 });

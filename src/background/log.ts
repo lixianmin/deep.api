@@ -39,6 +39,7 @@ export interface LogEntry {
   //   场景 B-3：bytes == 0 + paths == [] → 上游完全没返（与 onStreamError 不同路径）
   sseBytes?: number;
   ssePaths?: string[];
+  sseRaw?: string;
 }
 
 export class RingLog {

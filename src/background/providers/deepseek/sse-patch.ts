@@ -94,7 +94,7 @@ export async function* completionEvents(
     // 用于诊断 Pro（model_type=expert）在 DeepSeek 网页 web API 上是否只返 thinking fragments
     // （场景 B-1：bytes > 0 但 paths 只含 'response/fragments'+type='think'）还是用了未识别 path（场景 B-2：
     // paths 含 parser 不认识的 path）。bytes = 0 表示上游本就未返任何字节。
-    yield { kind: 'stream_stats', bytes: stats.bytes, paths: [...stats.paths] };
+    yield { kind: 'stream_stats', bytes: stats.bytes, paths: [...stats.paths], rawSample: stats.raw };
   } finally {
     // best-effort 关闭底层迭代器；不 await：源停在未决 await 上时 spec 规定 return() 须等其完成（会死锁），故 fire-and-forget
     void iter.return?.().catch(() => {});
@@ -103,7 +103,7 @@ export async function* completionEvents(
 
 function makeProcessor(onReady: (ids: { requestMessageId: number; responseMessageId: number }) => void): {
   processBlock(block: string): ProviderStreamEvent[];
-  stats: { bytes: number; paths: Set<string> };
+  stats: { bytes: number; paths: Set<string>; raw: string };
 } {
   const tree = new ResponseTree();
   let sentReady = false;
@@ -112,10 +112,15 @@ function makeProcessor(onReady: (ids: { requestMessageId: number; responseMessag
   // 2026-09-09（diag/pro-sse-paths）：path 集（含 ready/request_message_id/response_message_id
   // 都记）。ready event 有顶层 request_message_id/response_message_id，不走 path 路径——加
   // 哨兵 'ready' 让 stats.paths 准确反映「上游到底返了什么」。
-  const stats = { bytes: 0, paths: new Set<string>() };
+  const stats = { bytes: 0, paths: new Set<string>(), raw: '' as string };
   const processBlock = (block: string): ProviderStreamEvent[] => {
     const out: ProviderStreamEvent[] = [];
     for (const ev of parseSseText(block)) {
+      // 2026-09-09（diag/raw-sample）：保留原始 SSE 文本前 600 字符，供诊断 Pro（expert）
+      // 返回的未知事件（unknown:xxx）的真实内容。仅记录一次（raw === '' 时）。
+      if (stats.raw.length < 600 && ev.data) {
+        stats.raw += (stats.raw ? '\n' : '') + ev.data.slice(0, 600 - stats.raw.length);
+      }
       let data: unknown; try { data = JSON.parse(ev.data); } catch { continue; }
       if (!sentReady) {
         const ids = extractReadyIds(data);

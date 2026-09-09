@@ -28,6 +28,7 @@ interface RunState {
   // 2026-09-09（diag/pro-sse-paths）：SSE 调试统计。stream 末事件里推入，与 done() 一起入 log。
   sseBytes?: number;
   ssePaths?: string[];
+  sseRaw?: string;
 }
 
 const NO_PROGRESS_MS = 600_000;          // spec §4.5 兜底断流
@@ -106,7 +107,7 @@ export class Router {
       deletedOld: preDecide.action === 'rebuild' && preDecide.existing !== null,
       webSessionId: handle.session.webSessionId,
     };
-    const done = (ok: boolean, ms: number, error?: string, extra?: { finishReason?: string; parentMessageId?: string | number | null; replySample?: string; reasoningSample?: string; sseBytes?: number; ssePaths?: string[] }) =>
+    const done = (ok: boolean, ms: number, error?: string, extra?: { finishReason?: string; parentMessageId?: string | number | null; replySample?: string; reasoningSample?: string; sseBytes?: number; ssePaths?: string[]; sseRaw?: string }) =>
       this.d.log.push({
         at: this.d.now(), provider: provider.id, model: modelId, ok, ms, error, ...diag,
         finishReason: extra?.finishReason, parentMessageId: extra?.parentMessageId,
@@ -114,6 +115,7 @@ export class Router {
         reasoningSample: extra?.reasoningSample,
         sseBytes: extra?.sseBytes,
         ssePaths: extra?.ssePaths,
+        sseRaw: extra?.sseRaw,
         firstDiffIdx,
         messagesFull: JSON.stringify(messages),
         mirrorFull: threadFound
@@ -130,7 +132,7 @@ export class Router {
       done(false, this.d.now() - started, (e as Error).message);
       throw this.mapErr(e);
     }
-    done(true, this.d.now() - started, undefined, { finishReason: agg.finishReason ?? 'stop', parentMessageId: handle.run.parentMessageId, replySample: agg.content.slice(0, 200), reasoningSample: agg.reasoning.slice(0, 200), sseBytes: handle.run.sseBytes, ssePaths: handle.run.ssePaths });
+    done(true, this.d.now() - started, undefined, { finishReason: agg.finishReason ?? 'stop', parentMessageId: handle.run.parentMessageId, replySample: agg.content.slice(0, 200), reasoningSample: agg.reasoning.slice(0, 200), sseBytes: handle.run.sseBytes, ssePaths: handle.run.ssePaths, sseRaw: handle.run.sseRaw });
     return toAggregate({ id: `chatcmpl-${ctx.requestId}`, model: modelId, created: Math.floor(started / 1000) }, agg);
   }
 
@@ -223,6 +225,7 @@ export class Router {
       case 'stream_stats':
         run.sseBytes = ev.bytes;
         run.ssePaths = ev.paths;
+        run.sseRaw = ev.rawSample;
         break;
     }
   }
@@ -268,7 +271,7 @@ export class Router {
     agg.finishReason = agg.finishReason ?? 'stop';
   }
 
-  private encodeStream(provider: ProviderAdapter, handle: { stream: AsyncIterable<ProviderStreamEvent>; session: ProviderSession; convId: string; thread: ThreadEntry; run: RunState }, ctx: ProviderContext, model: string, started: number, messages: Message[], toolCtx: ToolContext, done: (ok: boolean, ms: number, error?: string, extra?: { finishReason?: string; parentMessageId?: string | number | null; replySample?: string; reasoningSample?: string; sseBytes?: number; ssePaths?: string[] }) => void): AsyncIterable<ChatCompletionChunk> & { cancel(): Promise<void> } {
+  private encodeStream(provider: ProviderAdapter, handle: { stream: AsyncIterable<ProviderStreamEvent>; session: ProviderSession; convId: string; thread: ThreadEntry; run: RunState }, ctx: ProviderContext, model: string, started: number, messages: Message[], toolCtx: ToolContext, done: (ok: boolean, ms: number, error?: string, extra?: { finishReason?: string; parentMessageId?: string | number | null; replySample?: string; reasoningSample?: string; sseBytes?: number; ssePaths?: string[]; sseRaw?: string }) => void): AsyncIterable<ChatCompletionChunk> & { cancel(): Promise<void> } {
     const cctx: StreamContext = { id: `chatcmpl-${ctx.requestId}`, model, created: Math.floor(started / 1000) };
     const agg: StreamAggregate = { content: '', reasoning: '', toolCalls: [], finishReason: null };
     const self = this;
@@ -287,6 +290,7 @@ export class Router {
           if (ev.kind === 'stream_stats') {
             handle.run.sseBytes = ev.bytes;
             handle.run.ssePaths = ev.paths;
+            handle.run.sseRaw = ev.rawSample;
           }
         }
         // 2026-09-09（fix/mirror-content）：SSE content delta 发出的原始完整文本（含 <tool_calls> 标签），

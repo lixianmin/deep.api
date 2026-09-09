@@ -1,6 +1,8 @@
 import { getPanelApi } from './panel-api';
 import type { LogEntry } from '../../background/log';
 
+const escapeHtml = (s: string): string => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+
 const ACTIONS = ['rebuild', 'incremental', 'error', 'undefined'] as const;
 
 export function mountLog(pane: HTMLElement): () => void {
@@ -84,6 +86,7 @@ export function mountLog(pane: HTMLElement): () => void {
           <span style="margin-left:8px;color:#888;">paths:</span>
           <span style="margin-left:4px;">${paths.length ? paths.join(', ') : '(none)'}</span>
         </div>
+        ${(l.sseRaw ?? '') ? `<div style="margin-left:8px;margin-top:2px;color:#888;max-width:900px;word-break:break-all;">raw: ${escapeHtml(l.sseRaw!.slice(0, 400))}</div>` : ''}
       </div>`;
     }).join('');
     listEl.querySelectorAll<HTMLButtonElement>('[data-copy]').forEach(btn => {
