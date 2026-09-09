@@ -202,3 +202,33 @@ describe('SessionMapper 周期 sweep（fix/evict-expired）', () => {
     }
   });
 });
+
+describe('SessionMapper persist debounce（fix/persist-debounce，2026-09-09）', () => {
+  it('fail-to-pass: 100ms 内连续 commit 只触发一次 onPersist', async () => {
+    vi.useFakeTimers();
+    try {
+      const writes: number[] = [];
+      const now = () => 1_000_000;
+      const mapper = new SessionMapper(
+        { createSession: async () => ({ webSessionId: '' }), deleteSession: async () => {}, now },
+        { poolSize: 2, ttlMs: 60_000 },
+      );
+      mapper.onPersist = () => { writes.push(mapper.serialize().seq); };
+
+      // 连续 3 次 commit（模拟 agent loop 内多轮 LLM 调用）
+      const t = mapper.register('deepseek', 'auto:1', 's1', [m('user', 'a')]);
+      mapper.commit('deepseek', 'auto:1', [m('user', 'a')], 's1', 1);
+      mapper.commit('deepseek', 'auto:1', [m('user', 'a')], 's1', 1);
+      mapper.commit('deepseek', 'auto:1', [m('user', 'a')], 's1', 1);
+
+      // 100ms 内 timer 未触发，onPersist 还没被调
+      expect(writes.length).toBe(0);
+
+      // 推进 100ms 让 debounce timer 触发
+      await vi.runAllTimersAsync();
+      expect(writes.length).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

@@ -141,8 +141,15 @@ export class SessionMapper {
 
   // 2026-09-09（fix/thread-persistence）：serialize → onPersist（sw.ts 写 chrome.storage.local）。
   // 只在真正变更后通知（register/commit/fail/淘汰），避免每轮 commit 都打空转。
-  private persist() {
-    this.onPersist?.(this.serialize());
+  // 2026-09-09（fix/persist-debounce）：spice agent loop 一次用户回合会多次 commit
+  // （user turn + 工具循环内部轮）→ 100ms debounce 合并多次写为一次。
+  private persistTimer: ReturnType<typeof setTimeout> | null = null;
+  private persist(): void {
+    if (this.persistTimer) return;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      this.onPersist?.(this.serialize());
+    }, 100);
   }
 
   stats() { return { threads: this.threads.size, busy: [...this.threads.values()].filter(t => t.busy).length }; }
