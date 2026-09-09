@@ -97,9 +97,9 @@ window.addEventListener('message', (ev: MessageEvent) => {
 });
 
 function streamHandle(id: number) {
-  // OpenAI SSE 兼容：yield 的是 `data: {json}\n\n` 字符串帧，不是 JS 对象。
-  // bridge-main 在这里统一加上 SSE 帧边界 + 末尾 [DONE] 帧，让下游可以使用标准 SSE 解析器。
-  // 错误/cancel 也要推 SSE 帧（error: 帧 + [DONE]）并 settled=true，让 consumer 的 for-await 正常退出。
+  // OpenAI SSE 契约：stream:true 返回值必须是 Response-like（含 body.getReader，content-type: text/event-stream），
+  // 下游可用标准 SSE 解析器读 data: {json}\n\n 帧（spec §3 Shape B）。v0.1.49 修复——之前返回 AsyncIterable<string>
+  // 使下游（如 spice parseDeepApiSse）判定非 Response，fall back 到 parseDeepApiJson 得空响应 → 「AI 无回复」。
   const Q_MAX = 1024;  // 背压：限制队列长度，模型推太快防止 OOM
   const q: string[] = [];
   let settled = false;
@@ -149,9 +149,22 @@ function streamHandle(id: number) {
       await new Promise<void>((r) => { wake = r; });
     }
   })();
-  return {
-    [Symbol.asyncIterator]: () => iter,
-    async cancel() {
+  // 把 AsyncIterable<string> 包装成 Response（spec §3 Shape B：body.getReader + text/event-stream）。
+  // pull() 每次从 iter 取一帧编码入队；consumer 用 reader.read() 读到 Uint8Array 后自行 decode。
+  // 错误/cancel/done 都会推 [DONE] 帧，iter 自然结束 → controller.close()。
+  // stream.cancel() 触发 SW cancel + 推 [DONE]（避免 consumer hang）。
+  const encoder = new TextEncoder();
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { value, done } = await iter.next();
+        if (done) { controller.close(); return; }
+        controller.enqueue(encoder.encode(value));
+      } catch (e) {
+        controller.error(e);
+      }
+    },
+    cancel() {
       p.cancelled = true;
       try { postRequest('chat.completions.cancel', { requestId: id }); } catch { /* ignore */ }
       // cancel 后若还卡住（SW 未发 done），主动 settled
@@ -162,7 +175,8 @@ function streamHandle(id: number) {
         notify();
       }
     },
-  };
+  });
+  return new Response(body, { headers: { 'content-type': 'text/event-stream' } });
 }
 
 // ---- 暴露给 page 的 API ----

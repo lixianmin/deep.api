@@ -149,10 +149,15 @@ document.querySelectorAll('button[data-act]').forEach(btn => {
         const msgs = [{ role: 'user', content: '用三句话讲讲 R1 推理模型。' }];
         const res = await window.deepApi.chat.completions.create({ model: m, messages: msgs, ...opts, stream: true });
         log('[流式开始；收到 SSE 帧：');
+        // v0.1.49：bridge 改返 Response（body.getReader），用 TextDecoder 读字节流
+        const reader = res.body.getReader();
+        const dec = new TextDecoder('utf-8');
         let content = '', reasoning = '';
         let buf = '';
-        for await (const frame of res) {
-          buf += frame;
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
           // 按 \n\n 切帧；每帧形如 "data: {...json...}\n\n" 或 "data: [DONE]\n\n"
           let nl;
           while ((nl = buf.indexOf('\n\n')) >= 0) {
