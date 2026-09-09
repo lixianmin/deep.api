@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { SessionMapper } from '../../src/background/session-mapper';
+import { RingLog } from '../../src/background/log';
 import type { Message } from '../../src/shared/api-types';
 
 const m = (role: Message['role'], content: string, extra: Partial<Message> = {}): Message => ({ role, content, ...extra });
@@ -337,3 +338,39 @@ describe('SessionMapper modelType tracking（fix/model-switch-rebuild）', () =>
     if (d2.action === 'incremental') expect(d2.thread.webSessionId).toBe('s-flash');
   });
 });
+
+// 2026-09-09（feat/debug-dashboard）：panel.listThreads 后端聚合——按 cid 取 log.action 最近一次决策现场
+const now = () => 1_700_000_000_000;
+const deps = { createSession: async () => ({ webSessionId: 'ws1' }), deleteSession: async () => {}, now };
+
+describe('SessionMapper.listThreads', () => {
+  it('空 Map 返回 []', () => {
+    const m = new SessionMapper(deps, { poolSize: 10, ttlMs: 60_000 });
+    expect(m.listThreads()).toEqual([]);
+  });
+
+  it('thread 无 log 时 lastDecision 为 undefined', () => {
+    const m = new SessionMapper(deps, { poolSize: 10, ttlMs: 60_000 });
+    m.register('deepseek', 'auto:1', 'ws1', [{ role: 'user', content: 'hi' }]);
+    const rows = m.listThreads();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.conversationId).toBe('auto:1');
+    expect(rows[0]!.lastDecision).toBeUndefined();
+  });
+
+  it('thread 的 lastDecision 取最近一次该 cid 的 log.action', () => {
+    const m = new SessionMapper(deps, { poolSize: 10, ttlMs: 60_000 });
+    m.register('deepseek', 'auto:1', 'ws1', [{ role: 'user', content: 'hi' }]);
+    const log = new RingLog(500);
+    log.push({ at: now() - 1000, provider: 'deepseek', model: 'm', ok: true, ms: 100, cid: 'auto:1', action: 'incremental' });
+    log.push({ at: now(),         provider: 'deepseek', model: 'm', ok: true, ms: 100, cid: 'auto:1', action: 'rebuild' });
+    // 把 log 注入 mapper（通过 setLogForTest 或构造时传入）
+    (m as any).log = log;
+    const rows = m.listThreads();
+    expect(rows[0]!.lastDecision).toBe('rebuild');
+    expect(rows[0]!.lastDecisionAt).toBe(now());
+
+
+  });
+});
+

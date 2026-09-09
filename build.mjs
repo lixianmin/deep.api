@@ -14,6 +14,7 @@ await Promise.all([
   build({ ...shared, entryPoints: ['src/content/bridge-main.ts'], outfile: 'extension/bridge-main.js', format: 'iife' }),
   build({ ...shared, entryPoints: ['src/content/bridge-relay.ts'], outfile: 'extension/bridge-relay.js', format: 'iife' }),
   build({ ...shared, entryPoints: ['src/popup/popup.ts'], outfile: 'extension/popup.js', format: 'iife' }),
+  build({ ...shared, entryPoints: ['src/demo/debug-panel.ts'], outfile: 'extension/demo/debug.js', format: 'iife', target: 'chrome120' }),
 ]);
 
 await cp('src/popup/popup.html', 'extension/popup.html');
@@ -23,7 +24,6 @@ await cp('src/popup/popup.css', 'extension/popup.css');
 await cp('manifest.json', 'extension/manifest.json');
 // 复制 demo 页到 extension/demo/，让 popup 能通过 chrome.runtime.getURL('demo/index.html') 在新窗口打开
 await cp('src/demo/demo-page/index.html', 'extension/demo/index.html');
-await cp('src/demo/demo-page/demo.js', 'extension/demo/demo.js');
 console.log('build + copy done');
 
 // 验证 demo.js 是合法 ES2022+ JS（防 v0.1.44 那类 TS 语法泄漏到浏览器报 SyntaxError）

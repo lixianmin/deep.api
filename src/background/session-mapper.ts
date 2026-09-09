@@ -1,4 +1,5 @@
 import type { Message } from '../shared/api-types';
+import { RingLog, type LogEntry } from './log';
 
 // 2026-09-09（fix/mirror-hash）：commit 时算 mirror 内容 64-bit FNV-1a hash（同步轻量）。
 // Chrome MV3 SW 没有 Node crypto.createHash 也不支持 subtle.digest 同步调用，
@@ -56,9 +57,28 @@ export type Decision =
   | { action: 'rebuild'; existing: ThreadEntry | null }
   | { action: 'error'; code: 'invalid_request_error'; message: string };
 
+// 2026-09-09（feat/debug-dashboard）：debug 页「线程」tab 行数据，由 SessionMapper.listThreads 返回。
+// shape 是 ThreadEntry 的精简子集 + log 聚合（lastDecision/lastDecisionAt）。
+// 注意：不暴露 mirror 原文（避免日志区把多 KB base64/JSON 贴进 AI prompt）。
+export interface ThreadRow {
+  conversationId: string;
+  kind: 'auto' | 'named';
+  mirrorLen: number;
+  webSessionId: string;
+  parentMessageId: string | number | null;
+  lastUsedAt: number;
+  busy: boolean;
+  lastDecision?: 'rebuild' | 'incremental' | 'error';
+  lastDecisionAt?: number;
+}
+
 export class SessionMapper {
   private threads = new Map<string, ThreadEntry>();
   private seq = 0;
+  // 2026-09-09（feat/debug-dashboard）：panel.listThreads 用——遍历 threads.values() 时按 cid
+  // 在 log.list() 里取最近一次 action，作为 ThreadRow.lastDecision（debug 页「决策现场」字段）。
+  // 由 sw.ts 在 build() 时注入；测试可直接赋值。无 log 时 lastDecision/lastDecisionAt 省略。
+  log?: RingLog;
   // 2026-09-09（fix/thread-persistence）：状态变更回调——sw.ts 挂 chrome.storage 持久化，
   // 重装扩展/刷新页面（MV3 SW 重启）后 threads 从数据层恢复，续聊仍对应 DeepSeek 同一会话。
   onPersist?: (snap: { seq: number; threads: ThreadEntry[] }) => void;
@@ -213,6 +233,40 @@ export class SessionMapper {
   }
 
   stats() { return { threads: this.threads.size, busy: [...this.threads.values()].filter(t => t.busy).length }; }
+
+  // 2026-09-09（feat/debug-dashboard）：panel.listThreads 后端聚合。
+  // 输出 ThreadRow 列表，shape 由 spec §7.1 约定；lastDecision/lastDecisionAt 可选（thread
+  // 尚无对应 log 条目时不输出）。注入 log 后才能填这两个字段；无 log 时仅输出基础字段。
+  listThreads(): ThreadRow[] {
+    const rows: ThreadRow[] = [];
+    for (const t of this.threads.values()) {
+      const row: ThreadRow = {
+        conversationId: t.conversationId,
+        kind: t.kind,
+        mirrorLen: t.mirror.length,
+        webSessionId: t.webSessionId,
+        parentMessageId: t.parentMessageId,
+        lastUsedAt: t.lastUsedAt,
+        busy: t.busy,
+      };
+      if (this.log) {
+        let bestAt = -1;
+        let bestAction: LogEntry['action'] | undefined;
+        for (const e of this.log.list()) {
+          if (e.cid === t.conversationId && e.at > bestAt) {
+            bestAt = e.at;
+            bestAction = e.action;
+          }
+        }
+        if (bestAction) {
+          row.lastDecision = bestAction;
+          row.lastDecisionAt = bestAt;
+        }
+      }
+      rows.push(row);
+    }
+    return rows;
+  }
 
   // 2026-09-09（fix/thread-persistence）：MV3 service worker 被浏览器终止后内存全清——
   // threads Map 丢失 → decide 找不到 thread → rebuild → DeepSeek 新 Conversation（用户实测：

@@ -60,12 +60,12 @@ function probeHeaders(token: string): Record<string, string> {
   return { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
 }
 
-let cached: { router: Router; log: RingLog } | null = null;
+let cached: { router: Router; log: RingLog; mapper: SessionMapper } | null = null;
 const panelPorts = new Set<chrome.runtime.Port>();   // 当前打开的 popup 面板 port
 
-async function build(): Promise<{ router: Router; log: RingLog }> {
+async function build(): Promise<{ router: Router; log: RingLog; mapper: SessionMapper }> {
   if (cached) return cached;
-  const log = new RingLog(200);   // 2026-09-09 调到 200：popup 日志区要把 decision.action / deletedOld 等现场贴给 AI，20 条不够回看
+  const log = new RingLog(500);   // 2026-09-09（feat/debug-dashboard）调到 500：debug 页日志 tab 看更多决策现场
   const cfg = await getProviderConfig('deepseek');
   const mapper = new SessionMapper(
     { createSession: async () => ({ webSessionId: '' }), deleteSession: async () => {}, now: () => Date.now() },
@@ -149,7 +149,10 @@ async function build(): Promise<{ router: Router; log: RingLog }> {
     log,
     now: () => Date.now(),
   });
-  cached = { router, log };
+  // 2026-09-09（feat/debug-dashboard）：注入 log 给 mapper，让 listThreads() 能按 cid 聚合最近一次决策现场。
+  // 单实例仅一次；重复 build 命中 cached 短路。
+  if (!mapper.log) mapper.log = log;
+  cached = { router, log, mapper };
   return cached;
 }
 
@@ -339,6 +342,9 @@ chrome.runtime.onConnect.addListener((port) => {
         await setProviderConfig('deepseek', { ttlMinutes: msg.payload.ttlMinutes });
       } else if (msg?.kind === 'panel.listLogs') {
         safePostPanel({ kind: 'state', payload: { log: log.list() } });
+      } else if (msg?.kind === 'panel.listThreads') {
+        const { mapper } = await build();
+        safePostPanel({ kind: 'state', payload: { threads: mapper.listThreads() } });
       } else if (msg?.kind === 'ping') {
         safePostPanel({ kind: 'pong' });
       }
