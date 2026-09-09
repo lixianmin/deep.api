@@ -232,7 +232,7 @@ describe('Router', () => {
       streamCompletion: async function* () {
         yield { kind: 'message_id', id: 1 };
         yield { kind: 'content_delta', content: 'hi', finish_reason: 'stop' };
-        yield { kind: 'stream_stats', bytes: 4096, paths: ['ready', 'response/thinking_content', 'response/content'] };
+        yield { kind: 'stream_stats', bytes: 4096, paths: ['ready', 'response/thinking_content', 'response/content'], rawSample: '{"unknown":"xxx"}' };
       },
     });
     const r = makeRouter(a);
@@ -241,6 +241,10 @@ describe('Router', () => {
     const e = r['d'].log.list().at(-1)!;
     expect(e.sseBytes).toBe(4096);
     expect(e.ssePaths).toEqual(['ready', 'response/thinking_content', 'response/content']);
+    // 2026-09-09（diag/raw-sample 现场 B）：encodeStream 尾部 done 调用漏传 sseRaw——v0.1.73/74
+    // 用户实测 version=0.1.74 但日志无 sseRaw（连空串都没有）：sseBytes/ssePaths 有值、sseRaw 缺失
+    // 组合只有一种解释——流路径 done 没带这字段。修：line 322 done 补 sseRaw: handle.run.sseRaw。
+    expect(e.sseRaw).toBe('{"unknown":"xxx"}');
   });
 
   it('fail-to-pass: Pro 风格「只返 thinking fragments」→ paths 只含 response/fragments (B-1 现场)', async () => {
