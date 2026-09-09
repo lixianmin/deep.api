@@ -283,6 +283,11 @@ export class Router {
           if (ev.kind === 'usage' && ev.inputTokens > 0 && ev.outputTokens >= 0) {
             agg.usage = { prompt_tokens: ev.inputTokens, completion_tokens: ev.outputTokens, total_tokens: ev.inputTokens + ev.outputTokens };
           }
+          // 2026-09-09（fix/encode-stream-stats）：stream 路径补 case 与 non-stream 路径（consumeEvent）保持一致
+          if (ev.kind === 'stream_stats') {
+            handle.run.sseBytes = ev.bytes;
+            handle.run.ssePaths = ev.paths;
+          }
         }
         // 2026-09-09（fix/mirror-content）：SSE content delta 发出的原始完整文本（含 <tool_calls> 标签），
         // 与 spice 端 asst.content 保持一致——parseToolCalls 剥标签后的 remainder 只用于

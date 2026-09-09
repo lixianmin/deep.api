@@ -210,6 +210,26 @@ describe('Router', () => {
     expect(e.ssePaths).toEqual(['ready', 'response/content']);
   });
 
+  // 2026-09-09（fix/encode-stream-stats）：v0.1.69/70 在 encodeStream 里漏了 stream_stats case，
+  // 导致 stream 路径下 log.sseBytes/ssePaths 永远 undefined（non-stream 路径走 consumeEvent
+  // 是对的）。用户实测 Debug 页 chat tab 的 Pro 请求：ok=true 但 log 缺这俩字段。
+  // 修：encodeStream 内联累加逻辑补 case。非流/流两路径一致写 run.sseBytes/ssePaths。
+  it('fail-to-pass: stream:true 路径上 stream_stats → log 同样记 sseBytes/ssePaths', async () => {
+    const a = stubAdapter({
+      streamCompletion: async function* () {
+        yield { kind: 'message_id', id: 1 };
+        yield { kind: 'content_delta', content: 'hi', finish_reason: 'stop' };
+        yield { kind: 'stream_stats', bytes: 4096, paths: ['ready', 'response/thinking_content', 'response/content'] };
+      },
+    });
+    const r = makeRouter(a);
+    const s = await r.create(TOKEN, { model: 'deepseek-v4-pro', messages: [m('user', '这是个测试')], stream: true });
+    for await (const _ of s as AsyncIterable<unknown>) { void _; }
+    const e = r['d'].log.list().at(-1)!;
+    expect(e.sseBytes).toBe(4096);
+    expect(e.ssePaths).toEqual(['ready', 'response/thinking_content', 'response/content']);
+  });
+
   it('fail-to-pass: Pro 风格「只返 thinking fragments」→ paths 只含 response/fragments (B-1 现场)', async () => {
     // 模拟 Pro 返了 thinking 但不接 content：parser 会看到 ready + response/fragments path
     // （parser 走的是 response/fragments path，因为 Pro 不走 response/content 老路径）
