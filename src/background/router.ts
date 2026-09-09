@@ -35,6 +35,16 @@ function isContentEvent(e: ProviderStreamEvent): boolean {
   return e.kind === 'content_delta' || e.kind === 'think_delta';   // 重试只发生在任何内容增量之前（spec §6.4）
 }
 
+// 2026-09-09（fix/mirror-content）：日志摘要——每条消息 role + 内容前 60 字 + tool_calls 名字/参数摘要。
+// 用户贴 popup 复制的日志，第一眼就能看出 mirror 与 messages 在哪一条上不一致。
+function msgSummary(m: Message): string {
+  const content = (m.content ?? '').replace(/\s+/g, ' ').slice(0, 60);
+  const tcs = m.tool_calls?.length
+    ? ` →tools[${m.tool_calls.map((t) => `${t.function.name}(${t.function.arguments.slice(0, 30)})`).join(', ')}]`
+    : '';
+  return `${m.role}: ${content}${tcs}`;
+}
+
 export class Router {
   constructor(private d: RouterDeps) {}
 
@@ -68,6 +78,22 @@ export class Router {
     const mirrorLen = preDecide.action === 'incremental' ? preDecide.thread.mirror.length
       : preDecide.action === 'rebuild' && preDecide.existing ? preDecide.existing.mirror.length
       : undefined;
+    // 2026-09-09（fix/mirror-content）：mirror 匹配失败时定位第一个不同点——用户贴日志就能看出
+    // 是 asst.content 不一致（标签剥没剥）还是 tool_calls 不一致还是别的。
+    const mismatch = threadFound
+      ? (() => {
+        const mirror: Message[] = preDecide.action === 'incremental' ? preDecide.thread.mirror
+          : preDecide.action === 'rebuild' && preDecide.existing ? preDecide.existing.mirror : [];
+        for (let i = 0; i < Math.min(mirror.length, messages.length); i++) {
+          const a = mirror[i]!; const b = messages[i]!;
+          if (a.role !== b.role || (a.content ?? '') !== (b.content ?? '')
+            || JSON.stringify(a.tool_calls ?? null) !== JSON.stringify(b.tool_calls ?? null)) {
+            return { idx: i, detail: `i=${i} mirror=${msgSummary(a)} | messages=${msgSummary(b)}` };
+          }
+        }
+        return { idx: mirror.length, detail: `mirror(${mirror.length}) < messages(${messages.length}) 前缀比较到尽头无 diff` };
+      })()
+      : null;
     const handle = await this.runCompletion(provider, resolved, messages, toolCtx, conversationId, ctx, overrides);
     const diag = {
       cid: handle.convId, msgsLen: messages.length, action: handle.thread.kind ? (preDecide.action === 'incremental' ? 'incremental' as const : 'rebuild' as const) : undefined,
@@ -76,7 +102,16 @@ export class Router {
       webSessionId: handle.session.webSessionId,
     };
     const done = (ok: boolean, ms: number, error?: string, extra?: { finishReason?: string; parentMessageId?: string | number | null }) =>
-      this.d.log.push({ at: this.d.now(), provider: provider.id, model: modelId, ok, ms, error, ...diag, finishReason: extra?.finishReason, parentMessageId: extra?.parentMessageId });
+      this.d.log.push({
+        at: this.d.now(), provider: provider.id, model: modelId, ok, ms, error, ...diag,
+        finishReason: extra?.finishReason, parentMessageId: extra?.parentMessageId,
+        firstDiffIdx: mismatch?.idx, firstDiffDetail: mismatch?.detail,
+        messagesSample: messages.map(msgSummary).join('\n'),
+        mirrorSample: threadFound
+          ? (preDecide.action === 'incremental' ? preDecide.thread.mirror
+            : preDecide.action === 'rebuild' && preDecide.existing ? preDecide.existing.mirror : []).map(msgSummary).join('\n')
+          : undefined,
+      });
     if (p.stream === true) return this.encodeStream(provider, handle, ctx, modelId, started, messages, toolCtx, done);
     const agg: StreamAggregate = { content: '', reasoning: '', toolCalls: [], finishReason: null };
     try {
@@ -232,6 +267,10 @@ export class Router {
             agg.usage = { prompt_tokens: ev.inputTokens, completion_tokens: ev.outputTokens, total_tokens: ev.inputTokens + ev.outputTokens };
           }
         }
+        // 2026-09-09（fix/mirror-content）：SSE content delta 发出的原始完整文本（含 <tool_calls> 标签），
+        // 与 spice 端 asst.content 保持一致——parseToolCalls 剥标签后的 remainder 只用于
+        // 非流式聚合返回（toAggregate）与 toolCalls 提取，不再写进 mirror。
+        const sentRawContent = agg.content;
         if (toolCtx.promptSuffix !== '' && !handle.run.repairDone) {
           const parsed = parseToolCalls(agg.content);
           if (parsed) {
@@ -244,8 +283,12 @@ export class Router {
           }
         }
         yield finalChunk(cctx, agg.finishReason ?? 'stop', agg.usage);
-        // mirror 含 assistant 回复（同 finalize 的修复）：保证下一轮增量命中
-        const mirrorMessages: Message[] = [...messages, { role: 'assistant', content: agg.content, ...(agg.toolCalls.length ? { tool_calls: agg.toolCalls } : {}) }];
+        // 2026-09-09（fix/mirror-content）：mirror 的 asst.content 必须与「发送给 spice 的 SSE content」一致。
+        // SSE content delta 发出的是 LLM 完整输出（**含** <tool_calls> 标签文本），spice 端 asst.content
+        // 存盘、回发的就是这段完整文本；而这里 agg.content 已被 parseToolCalls 剥成 remainder（**不含**标签）
+        // → 下一轮 spice 回灌时同一条 asst content 两边不一致 → mirrorIsPrefix 失败 → rebuild 删旧 thread。
+        // 修：mirror 用剥前原始文本（sentRawContent），与 SSE 发出的 content 保持一致。
+        const mirrorMessages: Message[] = [...messages, { role: 'assistant', content: sentRawContent, ...(agg.toolCalls.length ? { tool_calls: agg.toolCalls } : {}) }];
         self.d.mapper.commit(provider.id, handle.convId, mirrorMessages, handle.session.webSessionId, handle.run.parentMessageId ?? handle.session.parentMessageId);
         done(true, self.d.now() - started, undefined, { finishReason: agg.finishReason ?? 'stop', parentMessageId: handle.run.parentMessageId });
       } catch (e) {

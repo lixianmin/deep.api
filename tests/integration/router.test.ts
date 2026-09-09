@@ -205,3 +205,64 @@ describe('Router 诊断日志（v0.1.50）', () => {
     expect(e1.mirrorLen).toBe(3);   // call 1 commit 后 mirror = 3 条
   });
 });
+
+
+// 2026-09-09（fix/mirror-content）：mirror 的 assistant.content 必须与「发送给客户端的 SSE content」一致。
+// 根因：spice 走流式，SSE 发出的 content_delta 是 LLM 完整输出（**含** <tool_calls> 标签文本）；
+// spice 端 asst.content 存盘、回发的就是这段完整文本。但 deep.api mirror 存的 agg.content
+// 是 parseToolCalls 剥离后的 remainder（**不含**标签）→ 下一轮 spice 回灌时同一条 asst
+// content 两边不一致 → mirrorIsPrefix 失败 → rebuild → chat thread 反复被删。
+// trace spice-45e6c9b6 实测：finishReason=tool_calls 的回合之后必然「重建 删除旧 thread」。
+describe('mirror assistant.content 与 SSE 一致（fix/mirror-content）', () => {
+  // 真实 spice 请求带 tools（Read 等）；不带 tools 时 toolCtx.promptSuffix=''，parseToolCalls 根本不会跑
+  const TOOL_FOR_TEST = [{ type: 'function', function: { name: 'Read', description: 'read', parameters: { type: 'object' } } }];
+  const FULL = '好的我先读一下文件\n<tool_calls>[\n {"id":"c1","type":"function","function":{"name":"Read","arguments":"{\\\"path\\\":\\\"sketch.ino\\\"}"}}\n]</tool_calls>';
+
+  function makeAdapterWithTextThenTool() {
+    let n = 0;
+    return stubAdapter({
+      streamCompletion: async function* () {
+        n++;
+        yield { kind: 'message_id', id: 1 };
+        if (n === 1) yield { kind: 'content_delta', content: FULL };   // 完整文本含标签
+        else yield { kind: 'content_delta', content: '读完了', finish_reason: 'stop' };
+      },
+    });
+  }
+
+  it('fail-to-pass：流式 tool_calls 后 mirror assistant.content = 完整文本（含标签），下轮 spice 回灌 → incremental', async () => {
+    const r = makeRouter(makeAdapterWithTextThenTool());
+    // turn 1 第一轮：spice 初始 messages
+    const s_ = await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'q1')], tools: TOOL_FOR_TEST, stream: true, conversation_id: 'cid' });
+    for await (const _c of s_ as AsyncIterable<unknown>) { void _c; }
+    const t = (r as any).d.mapper.threads.get('deepseek:cid');
+    const asst = t.mirror[t.mirror.length - 1]!;
+    // mirror 必须存完整文本（含 <tool_calls> 标签）——与 SSE 发给 spice 的一致
+    expect(asst.content).toContain('<tool_calls>');
+    expect(asst.content).toContain('好的我先读一下文件');
+
+    // turn 1 第二轮：spice 回灌 asst(完整文本+tool_calls) + tool 结果
+    const s2 = await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [
+      m('user', 'q1'),
+      m('assistant', FULL, { tool_calls: [{ id: 'c1', type: 'function', function: { name: 'Read', arguments: '{\"path\":\"sketch.ino\"}' } }] } as any),
+      m('tool', 's1内容', { tool_call_id: 'c1', name: 'Read' } as any),
+    ], tools: TOOL_FOR_TEST, stream: true, conversation_id: 'cid' });
+    for await (const _c of s2 as AsyncIterable<unknown>) { void _c; }
+
+    // turn 2：spice 从 chat-store 加载完整历史（含 tool）再发新 user
+    const s3 = await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [
+      m('user', 'q1'),
+      m('assistant', FULL, { tool_calls: [{ id: 'c1', type: 'function', function: { name: 'Read', arguments: '{\"path\":\"sketch.ino\"}' } }] } as any),
+      m('tool', 's1内容', { tool_call_id: 'c1', name: 'Read' } as any),
+      m('assistant', '读完了'),
+      m('user', 'q2'),
+    ], tools: TOOL_FOR_TEST, stream: true, conversation_id: 'cid' });
+    for await (const _c of s3 as AsyncIterable<unknown>) { void _c; }
+
+    const list = r['d'].log.list();
+    const e2 = list[2]!;   // turn 2 的决策
+    expect(e2.action).toBe('incremental');
+    expect(e2.mirrorPrefixOk).toBe(true);
+    expect(e2.deletedOld).toBe(false);
+  });
+});

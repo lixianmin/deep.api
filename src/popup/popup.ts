@@ -20,6 +20,11 @@ type LogEntry = {
   webSessionId?: string;
   parentMessageId?: string | number | null;
   finishReason?: string;
+  // v0.1.52（fix/mirror-content）：mirror 匹配失败现场
+  firstDiffIdx?: number;
+  firstDiffDetail?: string;
+  messagesSample?: string;
+  mirrorSample?: string;
 };
 type PanelState = {
   providers?: Record<string, {
@@ -84,6 +89,7 @@ function render() {
     if (e.parentMessageId !== undefined && e.parentMessageId !== null) detailParts.push(`parent=${String(e.parentMessageId).slice(0, 8)}`);
     if (e.finishReason) detailParts.push(`finish=${e.finishReason}`);
     if (e.error) detailParts.push(`<span class="err">err=${e.error.slice(0, 80)}</span>`);
+    if (e.firstDiffIdx !== undefined) detailParts.push(`<span class="err" title="${(e.firstDiffDetail ?? '').replace(/"/g, '&quot;')}">diff@${e.firstDiffIdx}</span>`);
     return `<li><span class="${okCls}">${okMark}</span> ${new Date(e.at).toLocaleTimeString()} ${e.provider}/${e.model} ${e.ms}ms ${actionBadge} <span class="small">${detailParts.join(' ')}</span></li>`;
   }).join('');
 }

@@ -19,6 +19,11 @@ export interface LogEntry {
   webSessionId?: string;
   parentMessageId?: string | number | null;
   finishReason?: string;
+  // 2026-09-09（fix/mirror-content）：mirrorIsPrefix 失败时定位现场
+  firstDiffIdx?: number;                                        // 第一条不同消息的索引（mirror 与 messages 比较）
+  firstDiffDetail?: string;                                     // 两端该条消息的 role + content 摘要对比
+  messagesSample?: string;                                      // 本请求 messages 摘要（每条约 60 字）
+  mirrorSample?: string;                                        // 本 thread mirror 摘要（每条约 60 字）
 }
 
 export class RingLog {
