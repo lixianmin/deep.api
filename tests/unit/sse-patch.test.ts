@@ -36,6 +36,36 @@ describe('ResponseTree', () => {
     expect(out[2]).toMatchObject({ kind: 'content_delta', content: '你好' });
     expect(out[3]).toMatchObject({ kind: 'usage', outputTokens: 17 });
   });
+
+  // 2026-09-09（fix/snapshot-fragments）：v0.1.76 用户实测 Pro（expert）sseRaw 现场：
+  // {"v":{"response":{"fragments":[{"id":2,"type":"TIP","content":"专家模式暂不支持搜索…"},
+  // {"id":3,"type":"RESPONSE","content":"这是一个","references":[],"stage_id":2}]}}}
+  // ——内容在嵌套快照里，sse-patch 的形态3 把这当「快照跳过」，fragments 没进 tree 上下文，
+  // 后续 response/fragments/-1/content 增量也因 frag 不存在被丢弃 → replySample 空。
+  // 修：ResponseTree.applySnapshot 解析 {"v":{"response":{"fragments":[...]}}}，
+  // RESPONSE→content_delta、THINK/THINKING→think_delta、TIP 等其它 type 跳过；
+  // 并把 fragments 推进 tree.fragments 供后续 /-1/content 增量接续。
+  it('applies nested snapshot fragments: RESPONSE→content, THINK→thinking, TIP 跳过', () => {
+    const tree = new ResponseTree();
+    const data = {
+      v: {
+        response: {
+          fragments: [
+            { id: 2, type: 'TIP', content: '专家模式暂不支持搜索，请使用快速模式', style: 'INFO' },
+            { id: 3, type: 'RESPONSE', content: '这是一个', references: [], stage_id: 2 },
+            { id: 4, type: 'THINK', content: '先想想', stage_id: 3 },
+          ],
+        },
+      },
+    };
+    const out = tree.applySnapshot(data as never);
+    expect(out.map(e => e.kind)).toEqual(['content_delta', 'think_delta']);
+    expect(out[0]).toMatchObject({ kind: 'content_delta', content: '这是一个' });
+    expect(out[1]).toMatchObject({ kind: 'think_delta', content: '先想想' });
+    // 增量接续：快照后的 /-1/content 能接到最后 frag（THINK）上
+    const more = tree.apply({ op: 'APPEND', path: 'response/fragments/-1/content', value: '中' });
+    expect(more).toEqual([{ kind: 'think_delta', content: '中' }]);
+  });
 });
 describe('extractReadyIds', () => {
   it('extracts message ids', () => {

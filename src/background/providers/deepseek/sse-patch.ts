@@ -23,6 +23,32 @@ type Frag = { type: 'think' | 'response'; content: string };
 export class ResponseTree {
   private fragments: Frag[] = [];
   private usage: number | null = null;
+  // 2026-09-09（fix/snapshot-fragments）：嵌套快照 {"v":{"response":{"fragments":[...]}}}
+  // ——v0.1.76 实测 Pro（expert）的内容就藏在这个形态里（sseRaw 现场），llmweb2api 也专门
+  // 处理该分支。RESPONSE→content、THINK/THINKING→thinking；TIP/其它 type（UI 提示）跳过；
+  // 同时把 fragments 推进 this.fragments，供后续 /-1/content 增量接续（否则增量全丢）。
+  applySnapshot(d: Record<string, unknown>): ProviderStreamEvent[] {
+    const out: ProviderStreamEvent[] = [];
+    const vObj = d.v as Record<string, unknown> | undefined;
+    const response = vObj?.response as Record<string, unknown> | undefined;
+    if (!response || typeof response !== 'object') return out;
+    const frags = response.fragments;
+    if (!Array.isArray(frags)) return out;
+    for (const f of frags) {
+      const t = (f as { type?: unknown }).type;
+      const content = (f as { content?: unknown }).content;
+      if (typeof content !== 'string' || content === '') continue;
+      if (t === 'THINK' || t === 'THINKING') {
+        this.fragments.push({ type: 'think', content: '' });
+        out.push({ kind: 'think_delta', content });
+      } else if (t === 'RESPONSE' || t === 'response') {
+        this.fragments.push({ type: 'response', content: '' });
+        out.push({ kind: 'content_delta', content });
+      }
+      // 其它 type（TIP/INFO/TEXT 等 UI 提示）不产生内容事件，也不推进 fragments
+    }
+    return out;
+  }
   apply(op: { op: string; path: string; value?: unknown }): ProviderStreamEvent[] {
     const out: ProviderStreamEvent[] = [];
     const value = (op.value ?? null) as unknown;
@@ -158,9 +184,20 @@ function makeProcessor(onReady: (ids: { requestMessageId: number; responseMessag
             }
           }
           if (!parsedAny) {
-            // 形态3 没匹配上：记录未知顶层 key 以便诊断 Pro 是否有新 path
-            const unknownKey = Object.keys(d)[0] ?? 'unknown';
-            stats.paths.add(`unknown:${unknownKey}`);
+            // 2026-09-09（fix/snapshot-fragments）：先试嵌套快照（Pro 内容藏在这里），再落 unknown 兜底
+            const snap = tree.applySnapshot(d);
+            if (snap.length > 0) {
+              stats.paths.add('snapshot:fragments');
+              // 快照解析后，后续简写增量 {"v":"..."} 应接续到最后一个 RESPONSE/THINK
+              // fragment 的 /-1/content（与形态2继承逻辑一致）；快照本身没有 p/o 上下文。
+              lastPath = 'response/fragments/-1/content';
+              lastOp = 'APPEND';
+              out.push(...snap);
+            } else {
+              // 形态3 没匹配上：记录未知顶层 key 以便诊断 Pro 是否有新 path
+              const unknownKey = Object.keys(d)[0] ?? 'unknown';
+              stats.paths.add(`unknown:${unknownKey}`);
+            }
           }
         }
       }
