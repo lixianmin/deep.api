@@ -56,13 +56,26 @@ if (!window.deepApi && typeof chrome !== 'undefined' && chrome.runtime && chrome
     pending.set(id, p);
     port.postMessage({ __deepApi: { id, method: 'chat.completions.create', params } });
     if (isStream) {
-      return (async function* () {
-        while (true) {
-          if (p.queue.length) { yield p.queue.shift(); continue; }
-          if (p.settled) return;
-          await new Promise((r) => { p._wake = r; });
-        }
-      })();
+      // OpenAI SDK 期望 Response-like 对象：body 是 ReadableStream<Uint8Array>。
+      // 每个 chunk 含一个或多个 SSE 帧（'data: {...}\n\n' 或 'data: [DONE]\n\n'）。
+      // Tab 代码（chat.ts / scenarios.ts stream 分支）用 res.body.getReader() + TextDecoder 按 \n\n 切帧。
+      const enc = new TextEncoder();
+      return new Response(
+        new ReadableStream({
+          async pull(controller) {
+            // 等数据或关闭
+            while (p.queue.length === 0 && !p.settled) {
+              await new Promise((r) => { p._wake = r; });
+            }
+            // drain 队列（按帧保持，不要把多帧拼一起 enqueue，避免 tab 切帧时跨 chunk 边界问题）
+            while (p.queue.length > 0) {
+              controller.enqueue(enc.encode(p.queue.shift()));
+            }
+            if (p.settled) controller.close();
+          },
+        }),
+        { headers: { 'Content-Type': 'text/event-stream' } },
+      );
     }
     return new Promise((res, rej) => { p._resolve = res; p._reject = rej; });
   };
