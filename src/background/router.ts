@@ -34,6 +34,27 @@ const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 function isContentEvent(e: ProviderStreamEvent): boolean {
   return e.kind === 'content_delta' || e.kind === 'think_delta';   // 重试只发生在任何内容增量之前（spec §6.4）
 }
+/**
+ * 2026-09-09（fix/mirror-strip-tool）：spice 端 chat-store 不持久化 tool 消息也不保留 assistant.tool_calls，
+ * 下一轮 spice 再调时 messages 数组没有 tool/tool_calls 段 → deep.api mirrorIsPrefix 在第一个有 tool_calls
+ * 的 assistant 那里就 mismatch → 永远 rebuild → 每次都新建 webSessionId → chat thread 反复被删 + context 断。
+ * 修：mirror 只存 user/assistant 文本（剥 tool 消息 + 剥 assistant.tool_calls）。这样跟 spice 下一轮
+ * 发来的 messages 字节级一致 → incremental 命中 → parent_message_id 链续上 → chat.deepseek.com 累积。
+ * 注意：tool 段在单 turn 内的 router.create 之间通过 messages 数组正常传递（spice 的 agent loop 内部用），
+ * 只是不进 mirror 长期存储。LLM 的上下文不丢——每轮都把完整 messages 发给 DeepSeek。
+ */
+function mirrorableMessages(messages: Message[]): Message[] {
+  return messages
+    .filter((m) => {
+      if (m.role === 'tool') return false;
+      // 2026-09-09：assistant 只有 tool_calls 没 content 的（典型 tool_call 响应），spice chat-store 不持久化，
+      // 下一轮 spice 拉历史时这条会丢——mirror 里也跳过，让两端对齐。
+      if (m.role === 'assistant' && !m.content && m.tool_calls && m.tool_calls.length > 0) return false;
+      return true;
+    })
+    .map((m) => m.role === 'assistant' ? { role: 'assistant' as const, content: m.content } : m);
+}
+
 
 export class Router {
   constructor(private d: RouterDeps) {}
@@ -111,7 +132,7 @@ export class Router {
       const s = await provider.createSession(ctx);
       // 优先级：existing 保留同名 cid > 用户传的 cid（named 首次请求） > auto 顺序号
       convId = decision.existing?.conversationId ?? conversationId ?? this.d.mapper.nextAutoConversationId();
-      thread = this.d.mapper.register(pid, convId, s.webSessionId, messages);
+      thread = this.d.mapper.register(pid, convId, s.webSessionId, mirrorableMessages(messages));
       session = { providerId: pid, webSessionId: s.webSessionId, parentMessageId: null };
       prompt = renderTranscript(messages).ok
         ? (renderTranscript(messages) as { ok: true; prompt: string }).prompt + toolCtx.promptSuffix
@@ -210,7 +231,7 @@ export class Router {
     }
     // mirror 必须含 assistant 回复：下一轮 client 传 [..., user 新问题] 时，
     // tail 首条是 user → 命中 incremental → 复用同一 DeepSeek 会话与 parent_message_id 链（上下文不丢）。
-    const mirrorMessages: Message[] = [...messages, { role: 'assistant', content: agg.content, ...(toolCalls.length ? { tool_calls: toolCalls } : {}) }];
+    const mirrorMessages: Message[] = [...mirrorableMessages(messages), { role: 'assistant', content: agg.content }];
     this.d.mapper.commit(provider.id, handle.convId, mirrorMessages, handle.session.webSessionId, handle.run.parentMessageId ?? handle.session.parentMessageId);
     agg.toolCalls = toolCalls;
     agg.finishReason = agg.finishReason ?? 'stop';
@@ -245,7 +266,7 @@ export class Router {
         }
         yield finalChunk(cctx, agg.finishReason ?? 'stop', agg.usage);
         // mirror 含 assistant 回复（同 finalize 的修复）：保证下一轮增量命中
-        const mirrorMessages: Message[] = [...messages, { role: 'assistant', content: agg.content, ...(agg.toolCalls.length ? { tool_calls: agg.toolCalls } : {}) }];
+        const mirrorMessages: Message[] = [...mirrorableMessages(messages), { role: 'assistant', content: agg.content }];
         self.d.mapper.commit(provider.id, handle.convId, mirrorMessages, handle.session.webSessionId, handle.run.parentMessageId ?? handle.session.parentMessageId);
         done(true, self.d.now() - started, undefined, { finishReason: agg.finishReason ?? 'stop', parentMessageId: handle.run.parentMessageId });
       } catch (e) {
