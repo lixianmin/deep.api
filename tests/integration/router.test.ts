@@ -326,19 +326,33 @@ describe('thread 持久化 + system 豁免比对（fix/thread-persistence）', (
 });
 
 // onPersist 数据层接线：register/commit 后回调必须触发（sw.ts 借此写 chrome.storage.local）
-describe('持久化钩子（fix/thread-persistence）', () => {
-  it('register/commit 各触发一次 onPersist，快照含完整 ThreadEntry', () => {
-    const now = vi.fn(() => 1000);
-    const mapper2 = new SessionMapper(
-      { createSession: async () => ({ webSessionId: 's1' }), deleteSession: async () => {}, now },
-      { poolSize: 2, ttlMs: 60_000 },
-    );
-    const snaps: { seq: number; threads: { conversationId: string; webSessionId: string; mirror: unknown[] }[] }[] = [];
-    mapper2.onPersist = (s) => snaps.push(s as never);
-    mapper2.register('deepseek', 'cid', 'ws-1', [msg('user', 'q1')]);
-    mapper2.commit('deepseek', 'cid', [msg('user', 'q1'), msg('assistant', 'a1')], 'ws-1', 2);
-    expect(snaps.length).toBe(2);
-    expect(snaps[1]!.threads[0]!.webSessionId).toBe('ws-1');
-    expect(snaps[1]!.threads[0]!.mirror.length).toBe(2);
+// 2026-09-09（fix/persist-debounce）：register + commit 在 100ms 内合并为 1 次 onPersist。
+describe('持久化钩子（fix/thread-persistence + fix/persist-debounce）', () => {
+  it('register+commit 在 100ms 内合并为一次 onPersist，快照含最终 mirror', async () => {
+    vi.useFakeTimers();
+    try {
+      let now = 1000;
+      const mapper2 = new SessionMapper(
+        { createSession: async () => ({ webSessionId: 's1' }), deleteSession: async () => {}, now: () => now },
+        { poolSize: 2, ttlMs: 60_000 },
+      );
+      const snaps: { seq: number; threads: { conversationId: string; webSessionId: string; mirror: unknown[] }[] }[] = [];
+      mapper2.onPersist = (s) => snaps.push(s as never);
+
+      mapper2.register('deepseek', 'cid', 'ws-1', [msg('user', 'q1')]);
+      mapper2.commit('deepseek', 'cid', [msg('user', 'q1'), msg('assistant', 'a1')], 'ws-1', 2);
+
+      // 100ms 内 debounce timer 未触发 → onPersist 0 次
+      expect(snaps.length).toBe(0);
+      // 推进 fake timer 100ms 让 debounce 触发
+      now += 100;
+      await vi.runAllTimersAsync();
+      // 合并后只写一次，快照含最终 mirror（2 条）
+      expect(snaps.length).toBe(1);
+      expect(snaps[0]!.threads[0]!.webSessionId).toBe('ws-1');
+      expect(snaps[0]!.threads[0]!.mirror.length).toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
