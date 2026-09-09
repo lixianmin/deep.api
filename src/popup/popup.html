@@ -13,15 +13,18 @@
     <button class="tab-btn" data-tab="settings" role="tab">设置</button>
   </nav>
 
-  <!-- 主页 Panel（默认 active）：登录 + 模型 + snippet + Demo -->
+  <!-- 主页 Panel（默认 active）：登录 + 模型 + snippet -->
   <section class="tab-panel active" data-tab-panel="home">
     <section class="card">
       <div class="row">
         <h3 style="flex:1;margin:0;font-size:12px;color:#666;font-weight:600">登录状态</h3>
-        <button id="btn-resync-auth" title="强制重新注入 content script 同步 token 后重新探测登录状态">🔄 重新同步</button>
       </div>
       <div id="auth-state" class="bad">未登录</div>
-      <button id="btn-login" style="margin-top:6px">打开登录页</button>
+      <div class="row" style="margin-top:6px">
+        <button id="btn-resync-auth" title="强制重新注入 content script 同步 token 后重新探测登录状态">🔄 重新同步</button>
+        <button id="btn-login">打开登录页</button>
+        <button id="btn-open-demo">Open Demo</button>
+      </div>
     </section>
 
     <section class="card">
@@ -33,11 +36,6 @@
       <h3>接入 snippet</h3>
       <textarea id="snippet" rows="6" readonly></textarea>
       <button id="btn-copy-snippet">复制 snippet</button>
-    </section>
-
-    <section class="card">
-      <h3>Demo</h3>
-      <button id="btn-open-demo">↗ Open Demo in new tab</button>
     </section>
   </section>
 
