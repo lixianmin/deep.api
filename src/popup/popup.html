@@ -7,45 +7,60 @@
 <body>
   <header><b>deep.api</b> <span id="version" class="small"></span></header>
 
-  <section class="card">
-    <div class="row">
-      <h3 style="flex:1;margin:0;font-size:12px;color:#666;font-weight:600">登录状态</h3>
-      <button id="btn-refresh-auth" title="重新探测">↻</button>
-    <button id="btn-repush-auth" title="强制重新注入 content script 并同步 token">🔄 立即同步</button>
-    </div>
-    <div id="auth-state" class="bad">未登录</div>
-    <button id="btn-login" style="margin-top:6px">打开登录页</button>
+  <nav class="tab-bar" role="tablist">
+    <button class="tab-btn active" data-tab="home" role="tab">主页</button>
+    <button class="tab-btn" data-tab="settings" role="tab">设置</button>
+    <button class="tab-btn" data-tab="logs" role="tab">日志</button>
+  </nav>
+
+  <!-- 主页 Panel（默认 active）：snippet + 模型 + Open Demo 按钮 -->
+  <section class="tab-panel active" data-tab-panel="home">
+    <section class="card">
+      <h3>接入 snippet</h3>
+      <textarea id="snippet" rows="6" readonly></textarea>
+      <button id="btn-copy-snippet">复制 snippet</button>
+    </section>
+
+    <section class="card">
+      <h3>模型</h3>
+      <ul id="model-list"></ul>
+    </section>
+
+    <section class="card">
+      <h3>Demo</h3>
+      <button id="btn-open-demo">↗ Open Demo in new tab</button>
+    </section>
   </section>
 
-  <section class="card">
-    <h3>接入 snippet</h3>
-    <textarea id="snippet" rows="6" readonly></textarea>
-    <button id="btn-copy-snippet">复制 snippet</button>
+  <!-- 设置 Panel：登录状态 + 线程池/TTL -->
+  <section class="tab-panel" data-tab-panel="settings">
+    <section class="card">
+      <div class="row">
+        <h3 style="flex:1;margin:0;font-size:12px;color:#666;font-weight:600">登录状态</h3>
+        <button id="btn-refresh-auth" title="重新探测">↻</button>
+        <button id="btn-repush-auth" title="强制重新注入 content script 并同步 token">🔄 立即同步</button>
+      </div>
+      <div id="auth-state" class="bad">未登录</div>
+      <button id="btn-login" style="margin-top:6px">打开登录页</button>
+    </section>
+
+    <section class="card">
+      <h3>配置</h3>
+      <label>线程池 <input id="pool-size" type="number" min="1" max="5" value="2"></label>
+      <label>TTL 分钟 <input id="ttl-min" type="number" min="1" value="30"></label>
+    </section>
   </section>
 
-  <section class="card">
-    <h3>模型</h3>
-    <ul id="model-list"></ul>
-  </section>
-
-  <section class="card">
-    <h3>配置</h3>
-    <label>线程池 <input id="pool-size" type="number" min="1" max="5" value="2"></label>
-    <label>TTL 分钟 <input id="ttl-min" type="number" min="1" value="30"></label>
-  </section>
-
-  <section class="card">
-    <div class="row">
-      <h3 style="flex:1;margin:0;font-size:12px;color:#666;font-weight:600">日志</h3>
-      <button id="btn-copy-log" title="复制最近 200 条日志为 JSON（排查用）">复制</button>
-    </div>
-    <p class="small">每条 chat.completions.create 的路由决策现场：rebuild 旧 web session 被删、incremental 复用、threadFound / mirror 是否匹配。复制后贴给 AI / 自己看。</p>
-    <ul id="log-list"></ul>
-  </section>
-
-  <section class="card">
-    <h3>Demo</h3>
-    <button id="btn-open-demo">↗ Open Demo in new tab</button>
+  <!-- 日志 Panel -->
+  <section class="tab-panel" data-tab-panel="logs">
+    <section class="card">
+      <div class="row">
+        <h3 style="flex:1;margin:0;font-size:12px;color:#666;font-weight:600">日志</h3>
+        <button id="btn-copy-log" title="复制最近 200 条日志为 JSON（排查用）">复制</button>
+      </div>
+      <p class="small">每条 chat.completions.create 的路由决策现场：rebuild 旧 web session 被删、incremental 复用、threadFound / mirror 是否匹配。复制后贴给 AI / 自己看。</p>
+      <ul id="log-list"></ul>
+    </section>
   </section>
 
   <script src="popup.js"></script>
