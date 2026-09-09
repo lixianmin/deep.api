@@ -151,3 +151,18 @@ function refresh() {
 }
 refresh();
 setInterval(refresh, 2000);
+
+// Tab 切换（v0.1.61 popup 重构）：监听 .tab-btn click，切换 .active class。
+// HTML 已预置第一个 panel/btn 为 active，无需默认 click()。
+setupTabs();
+function setupTabs(): void {
+  const btns = document.querySelectorAll<HTMLButtonElement>('.tab-btn');
+  const panels = document.querySelectorAll<HTMLElement>('.tab-panel');
+  for (const btn of btns) {
+    btn.addEventListener('click', () => {
+      const target = btn.dataset.tab;
+      for (const b of btns) b.classList.toggle('active', b === btn);
+      for (const p of panels) p.classList.toggle('active', p.dataset.tabPanel === target);
+    });
+  }
+}
