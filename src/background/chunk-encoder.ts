@@ -15,6 +15,11 @@ export function eventToChunks(ev: ProviderStreamEvent, ctx: StreamContext): Chat
       return [{ ...base, choices: [{ index: 0, delta: {}, finish_reason: null }], usage: { prompt_tokens: ev.inputTokens, completion_tokens: ev.outputTokens, total_tokens: ev.inputTokens + ev.outputTokens } }];
     case 'message_id':
       return [];
+    // 2026-09-09（fix/event-stats-stream）：诊断事件，SSE 流末 emit，不发到客户端。
+    // data 走 Router 的 run.sseBytes/ssePaths 后入 log；返回 [] 避免在 encodeStream 的
+    // `for (let w of eventToChunks(h, d))` 被 for-of 处理 undefined。
+    case 'stream_stats':
+      return [];
   }
 }
 export function finalChunk(ctx: StreamContext, finishReason: FinishReason, usage?: ChatCompletionUsage): ChatCompletionChunk {

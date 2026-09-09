@@ -20,6 +20,14 @@ describe('eventToChunks', () => {
     const u = eventToChunks({ kind: 'usage', inputTokens: 10, outputTokens: 5 }, ctx);
     expect(u[0]!.usage).toEqual({ prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
   });
+  // 2026-09-09（fix/event-stats-stream）：stream_stats 是诊断事件，SSE 流末 emit，仅入 log。
+  // eventToChunks 不应发到客户端（会让 spice 收到莫名 chunk），必须返回 []。漏 case 时返回
+  // undefined，encodeStream 里的 `for (let w of eventToChunks(h, d))` 抛
+  // "X is not a function or its return value is not iterable"——v0.1.69 Pro 场景就是这个错。
+  it('fail-to-pass: stream_stats 返回空数组（不发到客户端，仅 Router 写 log）', () => {
+    const out = eventToChunks({ kind: 'stream_stats', bytes: 1024, paths: ['ready', 'response/content'] }, ctx);
+    expect(out).toEqual([]);
+  });
 });
 describe('finalChunk', () => {
   it('emits terminal chunk with finish_reason and optional usage', () => {
