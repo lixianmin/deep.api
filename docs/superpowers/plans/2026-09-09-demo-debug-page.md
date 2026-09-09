@@ -1683,4 +1683,4 @@ git worktree remove .worktrees/demo-debug-page
 1. **panel-api 简化 in-flight 队列**（Task 2 注释）：debug 页 tab 内部不会并发调 listLogs/listThreads（拉刷新串行），单 in-flight 队列够用。如果未来 tab 内出现并发调用，需要升级到 seq 配对模式（push 时记 seq，listener 收到 state 时按 payload 类型 + seq 配对）。当前选择避免引入 seq 计数，先满足 90% 用法。
 2. **listThreads 聚合 log 用 O(n·m)**（spec 风险 #7）：500 × 几十 < 30000 操作可忽略。如果 threads 数超过 100 或 ring buffer 调大导致性能问题，再换索引（`Map<cid, lastDecisionAt>`）。
 3. **SSE 帧 tab 不存原始 SSE 字节**（spec Tab 4）：诊断靠 `replySample`（200 字）+ `webSessionId` 分组够用；要拿完整 SSE 流得新加 `kind: 'sse_frame'` 的 log entry，会让 ring buffer 体积膨胀，留 v2 再议。
-4. **Scenarios tab 简化骨架**（Task 8 Step 3 注释）：实操时按 demo.js:128-258 一对一拆函数，没在 plan 里全部列出来——避免 plan 过长；reviewer 看实现时如果发现 6 个场景函数与 demo.js 不一致，要求执行人对照 demo.js 改正。
+
