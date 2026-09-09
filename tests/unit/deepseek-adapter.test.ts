@@ -36,6 +36,33 @@ describe('DeepSeekAdapter', () => {
     expect(a.auth.requiredCookies).toEqual(expect.arrayContaining(['userToken']));
   });
 
+  // 2026-09-09（fix/expert-client-version）：v0.1.75 sseRaw 现场抓到服务端明确错误：
+  // {"type":"error","content":"Update to the latest version to use Expert.","finish_reason":"unsupported_client_by_model"}
+  // Pro（model_type=expert）在 chat.deepseek.com/api/v0 上强制检查客户端版本——网页端/官方客户端
+  // 都带 x-app-version / x-client-version 等浏览器指纹头，deep.api 只带 Authorization+Content-Type
+  // 被视为「旧客户端」→ 服务端拒绝 Expert（Flash default 不检查所以正常）。
+  // 对齐 nguyenduclong-ict/llmweb2api（可工作的参考实现）的 webHeaders。
+  // 修：streamCompletion 请求头加 x-app-version / x-client-version / x-client-platform / x-client-locale。
+  it('fix-to-pass: streamCompletion headers 带客户端版本指纹（expert 必备）', async () => {
+    let sentHeaders: Record<string, string> | undefined;
+    const a = createDeepSeekAdapter(mkDeps({
+      fetchStream: vi.fn(async (path: string, headers: Record<string, string>) => {
+        sentHeaders = headers;
+        return { status: 200, headers: new Headers(), body: (async function* () { yield new TextEncoder().encode('event: ready\ndata: {}\n\n'); })() as unknown as AsyncIterable<Uint8Array> };
+      }),
+      pow: { getChallenge: async () => ({}), solve: async () => 'pow-ok' } as any,
+    }));
+    const ctx: ProviderContext = { token: 'tok' } as any;
+    const req: ProviderCompletion = {
+      session: { webSessionId: 's1', parentMessageId: null } as any,
+      prompt: 'hi',
+      model: { modelId: 'deepseek-v4-pro', modelType: 'expert', thinking: false } as any,
+    } as any;
+    for await (const _ of a.streamCompletion(ctx, req)) { void _; }
+    expect(sentHeaders?.['x-client-version']).toBe('2.4.0');
+    expect(sentHeaders?.['x-client-bundle-id']).toBe('com.deepseek.chat');
+  });
+
   it('classifies errors: 429 → rate-limited', () => {
     const a = createDeepSeekAdapter(mkDeps());
     expect(a.isRateLimited({ status: 429 })).toBe(true);

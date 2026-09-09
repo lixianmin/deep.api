@@ -21,7 +21,23 @@ export function createDeepSeekAdapter(deps: AdapterDeps): ProviderAdapter {
       .getChallenge(ctx, '/api/v0/chat/completion')
       .catch((e) => { throw classifyErr(Object.assign(e instanceof Error ? e : new Error(String(e)), { status: 503 })); });
     const header = await deps.pow.solve(challenge, ctx);
-    return { ...baseHeaders(ctx.token), 'X-Ds-Pow-Response': header };
+    // 2026-09-09（fix/expert-client-version）：completion 请求必须带客户端版本指纹——
+    // v0.1.75 sseRaw 现场：Pro（expert）返回 {"type":"error","content":"Update to the latest
+    // version to use Expert.","finish_reason":"unsupported_client_by_model"}——服务端按
+    // x-client-version 判客户端新旧，不带 = 旧客户端 = 拒用 Expert。
+    // 2026-09-09 用户抓包（Chrome DevTools）真实验证：网页端带 x-client-version: 2.4.0、
+    // x-client-bundle-id: com.deepseek.chat、x-client-locale、x-client-timezone-offset；
+    // **不带** x-app-version；x-hif-dliq/x-hif-leim 是 Cloudflare Zaraz 分析 token（API 不要求）。
+    // User-Agent/Referer 在浏览器 fetch 是 forbidden header 不能设（服务端不校验。
+    return {
+      ...baseHeaders(ctx.token),
+      'X-Ds-Pow-Response': header,
+      'x-client-version': '2.4.0',
+      'x-client-bundle-id': 'com.deepseek.chat',
+      'x-client-platform': 'web',
+      'x-client-locale': 'zh_CN',
+      'x-client-timezone-offset': '28800',
+    };
   }
 
   async function fetchJsonSafe(path: string, headers: Record<string, string>, body: unknown): Promise<unknown> {
