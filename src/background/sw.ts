@@ -313,14 +313,12 @@ chrome.runtime.onConnect.addListener((port) => {
         });
       } else if (msg?.kind === 'panel.openLogin') {
         await chrome.tabs.create({ url: 'https://chat.deepseek.com/' });
-      } else if (msg?.kind === 'panel.refreshAuth') {
-        await refreshAuthAndLog();
-        await broadcastPanelState();
-      } else if (msg?.kind === 'panel.repushAuth') {
-        // 强制对所有 chat.deepseek.com 标签页重新注入 content script（不需要用户手动 F5）
+      } else if (msg?.kind === 'panel.resyncAuth') {
+        // 重新同步（v0.1.63）：先 repush（重注 content script 同步 token），再探测登录状态。
+        // 代替 v0.1.62 的两个独立按钮「重新探测」+ 「立即同步」——一次操作同时覆盖正常场景与 token 缓存过期场景。
         try {
           const tabs = await chrome.tabs.query({ url: 'https://chat.deepseek.com/*' });
-          console.log('[deep.api sw] repushAuth: found', tabs.length, 'chat.deepseek.com tab(s)');
+          console.log('[deep.api sw] resyncAuth: found', tabs.length, 'chat.deepseek.com tab(s)');
           for (const t of tabs) {
             if (t.id !== undefined) {
               try {
@@ -328,11 +326,13 @@ chrome.runtime.onConnect.addListener((port) => {
                   target: { tabId: t.id, allFrames: true },
                   files: ['bridge-main.js'],
                 });
-                console.log('[deep.api sw] repushAuth: re-injected into tab', t.id, t.url);
-              } catch (e) { console.warn('[deep.api sw] repushAuth: failed for tab', t.id, e); }
+                console.log('[deep.api sw] resyncAuth: re-injected into tab', t.id, t.url);
+              } catch (e) { console.warn('[deep.api sw] resyncAuth: failed for tab', t.id, e); }
             }
           }
-        } catch (e) { console.warn('[deep.api sw] repushAuth error', e); }
+        } catch (e) { console.warn('[deep.api sw] resyncAuth: repush error', e); }
+        await refreshAuthAndLog();
+        await broadcastPanelState();
       } else if (msg?.kind === 'panel.setPool') {
         await setProviderConfig('deepseek', { poolSize: msg.payload.poolSize });
       } else if (msg?.kind === 'panel.setTtl') {

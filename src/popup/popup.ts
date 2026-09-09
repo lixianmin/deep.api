@@ -113,8 +113,7 @@ console.log('第二轮:', r2.choices[0].message.content);
 }
 
 document.getElementById('btn-login')!.addEventListener('click', () => send('panel.openLogin'));
-document.getElementById('btn-refresh-auth')!.addEventListener('click', () => send('panel.refreshAuth'));
-document.getElementById('btn-repush-auth')!.addEventListener('click', () => send('panel.repushAuth'));
+document.getElementById('btn-resync-auth')!.addEventListener('click', () => send('panel.resyncAuth'));
 document.getElementById('btn-copy-snippet')!.addEventListener('click', () => navigator.clipboard.writeText((document.getElementById('snippet') as HTMLTextAreaElement).value));
 document.getElementById('pool-size')!.addEventListener('change', (e) => send('panel.setPool', { poolSize: Number((e.target as HTMLInputElement).value) }));
 document.getElementById('ttl-min')!.addEventListener('change', (e) => send('panel.setTtl', { ttlMinutes: Number((e.target as HTMLInputElement).value) }));
