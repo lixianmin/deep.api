@@ -56,6 +56,51 @@ describe('parseToolCalls', () => {
     expect(TOOL_TAGS.ends).toEqual(expect.arrayContaining(['<|tool_call_end|>', '</tool_calls>', '</tool_call>']));
   });
 
+  // 2026-09-09（fix/dsml-toolcalls）：DeepSeek Vision（deepseek-v4-flash-vision-exp）不用 prompt
+  // 教的 <tool_calls> 标签——它有自己的 DSML 格式（DeepSeek Markup Language），包裹用全角
+  // 竖线 ｜（U+FF5C）不是 ASCII |。现场：<｜｜DSML｜｜tool_calls>{...}<｜｜DSML｜｜>，
+  // end 标签不带 tool_calls 后缀。router tool-pipeline 原三种标签全不匹配 → 工具调用
+  // 被当纯文本写进 mirror.content，spice 端不会真去执行工具。
+  // 修：TOOL_TAGS + findBlocks 正则增 DSML（start 要求含 tool_calls 防 end 误匹配），
+  // parseBlocks 容错 JSON 数组/多个紧贴对象/单对象。
+  it('parses DSML-wrapped tool calls array (Vision 模型现场·数组形态)', () => {
+    const text =
+      '<｜｜DSML｜｜tool_calls>' +
+      '[{"id":"1","type":"function","function":{"name":"Read","arguments":"{\\"path\\":\\"sketch.ino\\"}"}},' +
+      '{"id":"2","type":"function","function":{"name":"Read","arguments":"{\\"path\\":\\"diagram.json\\"}"}}]' +
+      '<｜｜DSML｜｜>';
+    const r = parseToolCalls(text);
+    expect(r).not.toBeNull();
+    expect(r!.calls).toHaveLength(2);
+    expect(r!.calls[0]!.function.name).toBe('Read');
+    expect(JSON.parse(r!.calls[0]!.function.arguments)).toEqual({ path: 'sketch.ino' });
+    expect(JSON.parse(r!.calls[1]!.function.arguments)).toEqual({ path: 'diagram.json' });
+    // 包裹标签必须从 remainder 中剩除（spice 端看到的是干净文本）。
+    expect(r!.remainder).not.toContain('DSML');
+    expect(r!.remainder).not.toContain('tool_calls>');
+  });
+
+  // 2026-09-09（fix/dsml-toolcalls）：Vision 也可能输出多个紧贴 JSON 对象而非数组
+  // （用户实际 sseRaw 转写后看不出分隔），parseBlocks 容错：试数组 → 试单对象 → 尝试
+  // 以对象为间隔切分为多个对象解析。
+  it('parses DSML-wrapped concatenated objects (Vision 输出无包裹数组容错)', () => {
+    const text =
+      '<｜｜DSML｜｜tool_calls>' +
+      '{"id":"1","type":"function","function":{"name":"Read","arguments":"{\\"path\\":\\"a\\"}"}}' +
+      '{"id":"2","type":"function","function":{"name":"Read","arguments":"{\\"path\\":\\"b\\"}"}}' +
+      '<｜｜DSML｜｜>';
+    const r = parseToolCalls(text);
+    expect(r).not.toBeNull();
+    expect(r!.calls).toHaveLength(2);
+    expect(JSON.parse(r!.calls[0]!.function.arguments)).toEqual({ path: 'a' });
+    expect(JSON.parse(r!.calls[1]!.function.arguments)).toEqual({ path: 'b' });
+  });
+
+  it('TOOL_TAGS exposes DSML start/end pairs (Vision 补）', () => {
+    expect(TOOL_TAGS.starts).toEqual(expect.arrayContaining(['<｜｜DSML｜｜tool_calls>']));
+    expect(TOOL_TAGS.ends).toEqual(expect.arrayContaining(['<｜｜DSML｜｜>']));
+  });
+
   it('parses missing-< opening tag variant (model output deformation)', () => {
     const text = ['tool_calls>', '[{"id":"c1","type":"function","function":{"name":"f","arguments":"{\\"a\\":1}"}}]', '</tool_calls>', '', '根据查询结果，北京明天晴。'].join('\n');
     const r = parseToolCalls(text);

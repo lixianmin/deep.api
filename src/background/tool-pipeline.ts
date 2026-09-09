@@ -1,9 +1,11 @@
 import type { ToolChoice, ToolDef, ToolCall } from '../shared/api-types';
 
-/** ds-free-api 默认工具标签范集（spec §4.4） */
+/** ds-free-api 默认工具标签范集（spec §4.4）。含 DeepSeek Vision（deepseek-v4-flash-vision-exp）
+ *  的 DSML 包裹——Vision 不听 prompt 里教的 <tool_calls>，自带 DSML 格式（DeepSeek Markup
+ *  Language），包裹用全角 ｜（U+FF5C）不是 ASCII |。start 要求含 tool_calls 防 end 误匹配。 */
 export const TOOL_TAGS = {
-  starts: ['<|tool_call_begin|>', '<tool_calls>', '<tool_call>'] as const,
-  ends: ['<|tool_call_end|>', '</tool_calls>', '</tool_call>'] as const,
+  starts: ['<|tool_call_begin|>', '<tool_calls>', '<tool_call>', '<｜｜DSML｜｜tool_calls>'] as const,
+  ends: ['<|tool_call_end|>', '</tool_calls>', '</tool_call>', '<｜｜DSML｜｜>'] as const,
 };
 
 export interface ToolContext { promptSuffix: string }
@@ -105,10 +107,16 @@ function parseBlocks(content: string, blocks: Located[]): { calls: ToolCall[]; r
       try { parsed = JSON.parse(repaired1); } catch {
         const repaired2 = repairUnquotedKeys(repaired1);
         try { parsed = JSON.parse(repaired2); } catch {
-          // try wrapping object into array if parsed-like object
-          const obj = tryParseSingleObject(repaired2);
-          if (obj !== undefined) parsed = [obj];
-          else continue;
+          // 2026-09-09（fix/dsml-toolcalls）：Vision 可能输出多个紧贴 JSON 对象而非数组。
+          // 在试单对象之前先试「以顶层对象边界切分」——在每个 }{ 边界处拆分为多个独立 JSON 解析。
+          const split = splitConcatenatedObjects(repaired2);
+          if (split.length > 0) {
+            parsed = split;
+          } else {
+            const obj = tryParseSingleObject(repaired2);
+            if (obj !== undefined) parsed = [obj];
+            else continue;
+          }
         }
       }
     }
@@ -153,6 +161,9 @@ function findBlocks(content: string): Located[] {
     { start: /<\|tool_call_begin\|>/i, end: /<\|tool_call_end\|>/i },
     { start: /<{0,1}\s*tool_calls\s*>?/i, end: /<{0,1}\s*\/tool_calls\s*>?/i },   // 容忍缺 < / 空格 / 大小写
     { start: /<{0,1}\s*tool_call\s*>?/i, end: /<{0,1}\s*\/tool_call\s*>?/i },
+    // 2026-09-09（fix/dsml-toolcalls）：DeepSeek Vision DSML 包裹——全角 ｜（U+FF5C），
+    // start 要求含 tool_calls 后缀（end 是 <｜｜DSML｜｜> 不带 tool_calls），防 start 误匹配 end。
+    { start: /<｜｜DSML｜｜tool_calls>/, end: /<｜｜DSML｜｜>/ },
   ];
   for (const { start: startRe, end: endRe } of patterns) {
     let cursor = 0;
@@ -193,6 +204,43 @@ function tryParseSingleObject(s: string): unknown | undefined {
   const trimmed = s.trim();
   if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) return undefined;
   try { return JSON.parse(trimmed); } catch { return undefined; }
+}
+
+// 2026-09-09（fix/dsml-toolcalls）：Vision 输出可能为多个紧贴 JSON 对象 `{...}{...}{...}`，
+// 不是合规 JSON。用顶层括号配对器逐个拆分后逐个 parse——不允许括号嵌套扫描时只计「非引号
+// 非转义」的 { }。返回空数组表示不是「紧贴对象」形态，调用方走原有 tryParseSingleObject 兑底。
+function splitConcatenatedObjects(s: string): unknown[] {
+  const trimmed = s.trim();
+  if (!trimmed.startsWith('{')) return [];
+  const out: unknown[] = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escape = false;
+  for (let i = 0; i < trimmed.length; i++) {
+    const c = trimmed[i];
+    if (escape) { escape = false; continue; }
+    if (c === '\\') { escape = true; continue; }
+    if (c === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (c === '{') { if (depth === 0) start = i; depth++; }
+    else if (c === '}') {
+      depth--;
+      if (depth === 0 && start >= 0) {
+        const piece = trimmed.slice(start, i + 1);
+        try {
+          out.push(JSON.parse(piece));
+        } catch {
+          return [];
+        }
+        start = -1;
+      } else if (depth < 0) {
+        return [];
+      }
+    }
+  }
+  // 拆出 0 个表示不是紧贴对象形态（兑底走单对象试 parse）
+  return out.length > 1 ? out : [];
 }
 function coerceToToolCall(v: unknown): ToolCall | null {
   if (!v || typeof v !== 'object') return null;
