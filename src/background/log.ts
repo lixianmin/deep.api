@@ -22,8 +22,11 @@ export interface LogEntry {
   // 2026-09-09（fix/mirror-content）：mirrorIsPrefix 失败时定位现场
   firstDiffIdx?: number;                                        // 第一条不同消息的索引（mirror 与 messages 比较）
   firstDiffDetail?: string;                                     // 两端该条消息的 role + content 摘要对比
-  messagesSample?: string;                                      // 本请求 messages 摘要（每条约 60 字）
+  messagesSample?: string;                                      // 本请求 messages 摘要（每条约 60 字，popup 展示用）
   mirrorSample?: string;                                        // 本 thread mirror 摘要（每条约 60 字）
+  // 2026-09-09（fix/full-tool-prompt）：完整内容（复制 JSON 时拿到全部 user/assistant/tool 消息原文）
+  messagesFull?: string;                                        // 本请求 messages 完整 JSON
+  mirrorFull?: string;                                          // 本 thread mirror 完整 JSON
 }
 
 export class RingLog {

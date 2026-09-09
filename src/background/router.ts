@@ -107,9 +107,14 @@ export class Router {
         finishReason: extra?.finishReason, parentMessageId: extra?.parentMessageId,
         firstDiffIdx: mismatch?.idx, firstDiffDetail: mismatch?.detail,
         messagesSample: messages.map(msgSummary).join('\n'),
+        messagesFull: JSON.stringify(messages),
         mirrorSample: threadFound
           ? (preDecide.action === 'incremental' ? preDecide.thread.mirror
             : preDecide.action === 'rebuild' && preDecide.existing ? preDecide.existing.mirror : []).map(msgSummary).join('\n')
+          : undefined,
+        mirrorFull: threadFound
+          ? JSON.stringify(preDecide.action === 'incremental' ? preDecide.thread.mirror
+            : preDecide.action === 'rebuild' && preDecide.existing ? preDecide.existing.mirror : [])
           : undefined,
       });
     if (p.stream === true) return this.encodeStream(provider, handle, ctx, modelId, started, messages, toolCtx, done);
