@@ -1,6 +1,5 @@
 // popup.ts - 通过 port 与 SW 通信；只在 MV3 popup 内执行（chrome.* 在此文件中）
 import { formatAuthState } from './snippet';
-import { mountDemo } from '../demo/demo-runner';
 
 const port = chrome.runtime.connect({ name: 'deepapi-panel' });
 type PanelState = {
@@ -76,23 +75,11 @@ document.getElementById('btn-copy-snippet')!.addEventListener('click', () => nav
 document.getElementById('pool-size')!.addEventListener('change', (e) => send('panel.setPool', { poolSize: Number((e.target as HTMLInputElement).value) }));
 document.getElementById('ttl-min')!.addEventListener('change', (e) => send('panel.setTtl', { ttlMinutes: Number((e.target as HTMLInputElement).value) }));
 
-// Demo 折叠面板：首次点击按钮加载 demo 控件，之后可隐藏/展开
-let demoUnmount: (() => void) | null = null;
-const btnToggleDemo = document.getElementById('btn-toggle-demo')!;
-const demoMount = document.getElementById('demo-mount') as HTMLDivElement;
-btnToggleDemo.addEventListener('click', () => {
-  const opened = !demoMount.hidden;
-  if (opened) {
-    // 折叠
-    demoMount.hidden = true;
-    btnToggleDemo.textContent = '▶ Open Demo';
-    if (demoUnmount) { demoUnmount(); demoUnmount = null; }
-  } else {
-    // 展开
-    demoMount.hidden = false;
-    btnToggleDemo.textContent = '▼ Close Demo';
-    if (!demoUnmount) demoUnmount = mountDemo(demoMount);
-  }
+// "Open Demo in new window" 按钮：chrome-extension:// 协议代替 file://（Chrome 扩展开不了 file://）
+// demo HTML 在 build.mjs 复制到 dist/demo/index.html；通过 web_accessible_resources 暴露
+document.getElementById('btn-open-demo')!.addEventListener('click', () => {
+  const url = chrome.runtime.getURL('demo/index.html');
+  chrome.windows.create({ url, type: 'normal', width: 960, height: 800, focused: true });
 });
 
 send('panel.getState');

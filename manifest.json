@@ -25,6 +25,12 @@
     "default_popup": "popup.html",
     "default_title": "deep.api"
   },
+  "web_accessible_resources": [
+    {
+      "resources": ["demo/index.html"],
+      "matches": ["<all_urls>"]
+    }
+  ],
   "content_scripts": [
     {
       "matches": [

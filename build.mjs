@@ -17,6 +17,8 @@ await Promise.all([
 
 await cp('src/popup/popup.html', 'dist/popup.html');
 await cp('src/popup/popup.css', 'dist/popup.css');
+// 复制 demo 页到 dist/demo/，让 popup 能通过 chrome.runtime.getURL('demo/index.html') 在新窗口打开
+await cp('examples/demo-page/index.html', 'dist/demo/index.html');
 console.log('build + copy done');
 
 // 验证 demo 页 <script> 是合法 ES2022+ JS（防 v0.1.44 那类 TS 语法泄漏到 HTML 浏览器报 SyntaxError）
