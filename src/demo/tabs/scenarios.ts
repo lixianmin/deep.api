@@ -146,8 +146,9 @@ export function mountScenarios(pane: HTMLElement): () => void {
     return o;
   };
 
-  // 加载模型列表
-  (window as any).deepApi.models.list().then((r: any) => {
+  // 加载模型列表（optional chain 防御：shim 在 chrome-extension:// 加载时正常装上；
+  // 但外部网页（如 example.com）由 bridge-main 注入 deepApi。任何场景下都可工作）。
+  (window as any).deepApi?.models?.list?.()?.then((r: any) => {
     modelSel.innerHTML = (r.data as any[]).map(m => `<option value="${m.id}">${m.id}</option>`).join('');
   }).catch(() => {});
 
