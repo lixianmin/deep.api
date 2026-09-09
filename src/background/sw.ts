@@ -280,14 +280,29 @@ chrome.runtime.onConnect.addListener((port) => {
       }
     });
   } else if (port.name === 'deepapi-panel') {
+    // port 存活追踪：reload 扩展 / popup 关闭 / SW 重启时 port 被 Chrome 关闭，
+    // 后续 postMessage 会抛 "Attempting to use a disconnected port object"。
+    // 所有发送走 safePostPanel（与 deepapi 分支 safePost 同范式）。
+    let panelAlive = true;
     panelPorts.add(port);
-    port.onDisconnect.addListener(() => { panelPorts.delete(port); });
+    port.onDisconnect.addListener(() => {
+      panelAlive = false;
+      panelPorts.delete(port);
+    });
+    const safePostPanel = (m: unknown): void => {
+      if (!panelAlive) return;
+      try {
+        port.postMessage(m as any);
+      } catch {
+        panelAlive = false;
+      }
+    };
     port.onMessage.addListener(async (msg: any) => {
       const { router, log } = await build();
       if (msg?.kind === 'panel.getState') {
         const provCfg = await getProviderConfig('deepseek');
         const logList = (await STORAGE.get('log')) as unknown as { log?: any[] };
-        port.postMessage({
+        safePostPanel({
           kind: 'state',
           payload: {
             providers: {
@@ -323,9 +338,9 @@ chrome.runtime.onConnect.addListener((port) => {
       } else if (msg?.kind === 'panel.setTtl') {
         await setProviderConfig('deepseek', { ttlMinutes: msg.payload.ttlMinutes });
       } else if (msg?.kind === 'panel.listLogs') {
-        port.postMessage({ kind: 'state', payload: { log: log.list() } });
+        safePostPanel({ kind: 'state', payload: { log: log.list() } });
       } else if (msg?.kind === 'ping') {
-        port.postMessage({ kind: 'pong' });
+        safePostPanel({ kind: 'pong' });
       }
     });
   }
