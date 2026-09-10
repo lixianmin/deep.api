@@ -107,8 +107,13 @@ console.log('第二轮:', r2.choices[0].message.content);
 `;
 }
 
-document.getElementById('btn-login')!.addEventListener('click', () => send('panel.openLogin'));
-document.getElementById('btn-resync-auth')!.addEventListener('click', () => send('panel.resyncAuth'));
+// 09-10（用户拍板）：原「打开登录页」+ 「重新同步」两按钮合一。点击先 openLogin（新 tab 立即视觉反馈，
+// 且新 tab 靠 manifest content_scripts 自动注入 bridge），再 resyncAuth（SW 串行处理，对已开的
+// chat.deepseek.com tab 重新注入 bridge-main.js 并重探登录态）。发送顺序即 SW 处理顺序。
+document.getElementById('btn-resync-auth')!.addEventListener('click', () => {
+  send('panel.openLogin');
+  send('panel.resyncAuth');
+});
 document.getElementById('btn-copy-snippet')!.addEventListener('click', () => navigator.clipboard.writeText((document.getElementById('snippet') as HTMLTextAreaElement).value));
 document.getElementById('pool-size')!.addEventListener('change', (e) => send('panel.setPool', { poolSize: Number((e.target as HTMLInputElement).value) }));
 document.getElementById('ttl-min')!.addEventListener('change', (e) => send('panel.setTtl', { ttlMinutes: Number((e.target as HTMLInputElement).value) }));
