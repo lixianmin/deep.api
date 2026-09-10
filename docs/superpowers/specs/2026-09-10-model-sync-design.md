@@ -279,3 +279,7 @@ As of 2026-09-14 12:00 Beijing time, DeepSeek retired `deepseek-v4-flash`, `deep
 `client.ts MODELS` is the single source of truth for the live chat model list (now 1 entry). `client.ts LIMITS` keeps a vision entry (`deepseek-v4-flash-vision-exp`) because vision is an independent experimental model outside this retirement — the partner has not asked about it. Re-check if vision also retires.
 
 This feature (`models-sync`) only enriches the `description` field; it does **not** maintain the model list itself. The web scraping is best-effort: if the live DOM doesn't match the candidates, the hardcoded MODELS value still ships.
+
+### 9.1 Compat-only restoration of `deepseek-v4-flash` (2026-09-14, fix/accept-v4-flash-alias)
+
+The §9 change removed the retired IDs from both `MODELS` **and** `LIMITS`. That made `resolveModel('deepseek-v4-flash')` return `null`, so downstream apps that still send the retired ID got a 400 `unknown model` — even though the DeepSeek API compat layer still accepts it and routes to V4.1-Flash. Restoration: `deepseek-v4-flash` is back in `LIMITS` with the same config as `deepseek-flash` (so it is a true alias: same `modelType`, no mapper rebuild when switching between them), but it is **not** re-added to `MODELS` — the model picker and `GET /v1/models` stay at one entry. `deepseek-v4-pro` is still unresolved; restore it only if a partner reports it.

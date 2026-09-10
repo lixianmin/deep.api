@@ -3,8 +3,9 @@ import { labelToModelId, type ModelOption } from '../../../content/models-sync';
 
 // 2026-09-14（fix/models-v4-retired）：V4 三个 ID（flash / pro / vision-exp）官方
 // 9/14 12:00 起全部 retired，统一为 V4.1 Flash 新 ID `deepseek-flash`（UI
-// 显示 "default"）。`MODELS` 是单一真相源——不要在别处另写一份。
-// 旧 ID 仍被 API 兼容层接受（路由到 V4.1 Flash），但本常量不再导出它们。
+// 显示 "default"）。`MODELS` 是模型列表的单一真相源——不要在别处另写一份。
+// 2026-09-14（fix/accept-v4-flash-alias）：`deepseek-v4-flash` 只在 `LIMITS` 里保留
+// 兼容解析（旧下游仍发此 ID），**不**列进 `MODELS`。
 export const MODELS: ModelInfo[] = [
   { id: 'deepseek-flash', provider: 'deepseek', description: 'DeepSeek V4.1 Flash — 快速/便宜，统一默认模型' },
 ];
@@ -50,6 +51,15 @@ export function mergeWithHardcoded(
 // 兼容；如 vision-exp 后续也 retire，再删。
 const LIMITS = {
   'deepseek-flash': { modelType: 'vision' as const, thinking: true, limitChars: 2_621_440 },
+  // 2026-09-14（fix/accept-v4-flash-alias）：`fix/models-v4-retired` 误把旧 chat ID 从
+  // `resolveModel` 一并删掉，导致仍发 `deepseek-v4-flash` 的下游被 router 拦成 400
+  // `unknown model`。DeepSeek API 兼容层仍接受该 ID（路由到 V4.1 Flash），故恢复解析。
+  // 配置与 `deepseek-flash` 完全一致（同一底层模型，含 vision），保持别名语义：
+  // 两者相互切换时 mapper 的 modelType 相同 → 仍走 incremental，不触发 rebuild。
+  'deepseek-v4-flash': { modelType: 'vision' as const, thinking: true, limitChars: 2_621_440 },
+  // 2026-09-10（fix/vision-button）：V4.1 Flash 统一后 `deepseek-flash` 也走 vision pipeline
+  // （服务端路由到 V4.1 Flash，支持 image_url content array）。vision-exp 仅保留做向后
+  // 兼容；如 vision-exp 后续也 retire，再删。
   'deepseek-v4-flash-vision-exp': { modelType: 'vision' as const, thinking: true, limitChars: 2_621_440 },
 };
 

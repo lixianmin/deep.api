@@ -5,6 +5,7 @@ import { Queue } from '../../src/background/queue';
 import { RingLog } from '../../src/background/log';
 import type { ProviderAdapter, ProviderCompletion, ProviderContext, ProviderSession, ProviderStreamEvent } from '../../src/background/providers/adapter';
 import type { Message } from '../../src/shared/api-types';
+import { resolveModel as clientResolveModel } from '../../src/background/providers/deepseek/client';
 
 const MODELS = [
   { id: 'deepseek-v4-flash', provider: 'deepseek', description: 'v4-flash' },
@@ -101,6 +102,15 @@ describe('Router', () => {
   it('unknown model → 400', async () => {
     const r = makeRouter(stubAdapter());
     await expect(r.create(TOKEN, { model: 'gpt-4o', messages: [m('user', 'hi')] })).rejects.toMatchObject({ status: 400, error: { error: { code: 'invalid_request_error' } } });
+  });
+
+  // 2026-09-14（fix/accept-v4-flash-alias）：下游仍发 retired 的 `deepseek-v4-flash`，
+  // v0.1.87 砍掉 resolveModel 后变 400 `unknown model`。用**真实 client.resolveModel**
+  // 走 router.create，复现并锁死“旧 ID 走兼容解析、不再 400”。
+  it('accepts retired chat ID deepseek-v4-flash via compat resolution (no 400)', async () => {
+    const r = makeRouter(stubAdapter({ resolveModel: (id: string) => clientResolveModel(id) }));
+    const res: any = await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'hi')] });
+    expect(res.choices[0].message.content).toBe('ok');
   });
 
   it('incremental second call sends only tail', async () => {

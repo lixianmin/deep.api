@@ -22,8 +22,9 @@ describe('DeepSeekAdapter', () => {
     expect(a.resolveModel('deepseek-flash')).toMatchObject({ modelType: 'vision', thinking: true });
     // vision 兼容层仍保留
     expect(a.resolveModel('deepseek-v4-flash-vision-exp')).toMatchObject({ modelType: 'vision', thinking: true });
-    // 旧 V4 chat ID 已不再 resolve（用户应改用 deepseek-flash）
-    expect(a.resolveModel('deepseek-v4-flash')).toBeNull();
+    // 2026-09-14（fix/accept-v4-flash-alias）：`deepseek-v4-flash` 恢复兼容解析（旧下游仍发此 ID）
+    expect(a.resolveModel('deepseek-v4-flash')).toMatchObject({ modelType: 'vision', thinking: true });
+    // 仍未恢复的旧 V4 chat ID
     expect(a.resolveModel('deepseek-v4-pro')).toBeNull();
     expect(a.resolveModel('gpt-4o')).toBeNull();
     // a.models 只暴露 1 个 chat model

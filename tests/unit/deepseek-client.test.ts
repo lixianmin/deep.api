@@ -75,8 +75,10 @@ describe('deepseek client', () => {
       // 回滚：所有模型默认 thinking=true（与官方默认对齐）。调用方仍可显式覆盖。
       expect(flash.thinking).toBe(true);
       expect(vision.thinking).toBe(true);
-      // 旧 V4 chat ID（retired 兼容层仍 accept，但不在 MODELS/LIMITS 单一真相源）→ null
-      expect(resolveModel('deepseek-v4-flash')).toBeNull();
+      // 2026-09-14（fix/accept-v4-flash-alias）：`deepseek-v4-flash` 恢复兼容解析（与
+      // `deepseek-flash` 同配置），但**不**进 MODELS（模型列表仍只 1 项）。
+      expect(resolveModel('deepseek-v4-flash')).toMatchObject({ modelType: 'vision', thinking: true });
+      // 仍未恢复的旧 ID → null
       expect(resolveModel('deepseek-v4-pro')).toBeNull();
     });
 
