@@ -44,11 +44,32 @@ export interface LogEntry {
   sseBytes?: number;
   ssePaths?: string[];
   sseRaw?: string;
+  // 2026-09-10（feat/log-b64-export）：上面三个现场字符串的 base64（纯 ASCII）。
+  // 动机：DSML 标记（｜DSML｜，U+FF5C）在「聊天/终端粘贴」链路上会被吃掉——用户贴回来的样本
+  // 永远看不到它，导致无法判断现场字节形态。base64 只含 A-Za-z0-9+/=，可无损跨粘贴链；
+  // 原字段与 base64 字段同时保留（人眼可读 + 字节可验）。切片上限见 router 的 B64_SAMPLE_CHARS。
+  replyB64?: string;                                        // replySample 的 base64
+  rawB64?: string;                                          // 归一化**前**的模型原文 base64
+  sseRawB64?: string;                                       // sseRaw 的 base64（最上游：SSE 原始帧样本）
   // 2026-09-10（diag/request-snapshot）：本次真正发给 chat.deepseek.com 的关键参数快照
   // （model_type / thinking / search / reasoning_effort / tool_choice / tools 名单 / ref_file_ids 数 /
   // prompt 长度）。动机：同一模型下 demo 场景返回标准 <tool_calls>，spice 请求返回 DSML——
   // 两条路径共用 router.create()，差异只可能在输入侧；原日志只有 client messages，无法两边 diff。
   requestFull?: string;
+}
+
+/**
+ * UTF-8 字符串 → base64（纯 ASCII）。给现场取证用：DSML 标记（｜DSML｜）在聊天/终端粘贴链上会被
+ * 吃掉，base64 能逐字节还原。空输入返回 undefined（不写空字段）；环境无 btoa 时不抛，返 undefined。
+ * 2026-09-10（feat/log-b64-export）。
+ */
+export function toB64(s: string | undefined): string | undefined {
+  if (!s) return undefined;
+  try {
+    let bin = '';
+    for (const b of new TextEncoder().encode(s)) bin += String.fromCharCode(b);
+    return btoa(bin);
+  } catch { return undefined; }
 }
 
 export class RingLog {

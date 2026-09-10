@@ -10,6 +10,7 @@ import { eventToChunks, finalChunk, toAggregate, toolCallDeltaChunks, type Strea
 import { buildToolPrompt, parseToolCalls, hasToolTags, type ToolContext } from './tool-pipeline';
 import { createDsmlStreamNormalizer } from './providers/deepseek/dsml-parser';
 import type { RingLog } from './log';
+import { toB64 } from './log';
 
 export interface RouterDeps {
   registry: Record<ProviderId, ProviderAdapter>;
@@ -40,6 +41,11 @@ interface RunState {
 }
 
 const NO_PROGRESS_MS = 600_000;          // spec §4.5 兜底断流
+// 2026-09-10（feat/log-b64-export）：base64 现场取证的字符上限。取 4000 的依据：现场 DSML 块（3 个
+// invoke）约 380 字符，但多工具/长参数会成倍增长；旧的 replySample 上限 1200 曾把块截在闭合标签之前
+// （定位不了形态，见 memory 的 200→1200 教训），故取证字段放宽到 4000（base64 约 5.3KB/条，
+// 只落在带工具标记的日志条目上）。
+const B64_SAMPLE_CHARS = 4000;
 const REPAIR_INSTRUCTION = '你的上一条回复包含无法解析的工具调用 JSON。请重新输出，且只输出修复后的 JSON（不要解释、不要代码块）。';
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
@@ -133,6 +139,7 @@ export class Router {
         at: this.d.now(), provider: provider.id, model: modelId, ok: false, ms: this.d.now() - started, error: msg, version: this.d.version,
         finishReason: undefined, parentMessageId: null,
         replySample: undefined, reasoningSample: undefined, sseBytes: undefined, ssePaths: undefined, sseRaw: undefined,
+        replyB64: undefined, rawB64: undefined, sseRawB64: undefined,
         messagesFull: JSON.stringify(messages),
         mirrorFull: undefined,
       });
@@ -198,7 +205,7 @@ export class Router {
       deletedOld: preDecide.action === 'rebuild' && preDecide.existing !== null,
       webSessionId: handle.session.webSessionId,
     };
-    const done = (ok: boolean, ms: number, error?: string, extra?: { finishReason?: string; parentMessageId?: string | number | null; replySample?: string; reasoningSample?: string; sseBytes?: number; ssePaths?: string[]; sseRaw?: string }) =>
+    const done = (ok: boolean, ms: number, error?: string, extra?: { finishReason?: string; parentMessageId?: string | number | null; replySample?: string; rawSample?: string; reasoningSample?: string; sseBytes?: number; ssePaths?: string[]; sseRaw?: string }) =>
       this.d.log.push({
         at: this.d.now(), provider: provider.id, model: modelId, ok, ms, error, version: this.d.version, ...diag,
         finishReason: extra?.finishReason, parentMessageId: extra?.parentMessageId,
@@ -207,6 +214,11 @@ export class Router {
         sseBytes: extra?.sseBytes,
         ssePaths: extra?.ssePaths,
         sseRaw: extra?.sseRaw,
+        // 2026-09-10（feat/log-b64-export）：同一份现场字符串再给 base64 版本——DSML 标记（｜DSML｜）
+        // 会在聊天/终端粘贴链上被吃掉，只有 base64 能把字节原样送出来。
+        replyB64: toB64(extra?.replySample),
+        rawB64: toB64(extra?.rawSample),
+        sseRawB64: toB64(extra?.sseRaw),
         firstDiffIdx,
         requestFull,
         messagesFull: JSON.stringify(messages),
@@ -217,14 +229,19 @@ export class Router {
       });
     if (p.stream === true) return this.encodeStream(provider, handle, ctx, modelId, started, messages, toolCtx, done);
     const agg: StreamAggregate = { content: '', reasoning: '', toolCalls: [], finishReason: null };
+    // 2026-09-10（feat/log-b64-export）：finalize 会改写 agg.content（剥掉工具块后的 remainder），
+    // 先留住「解析前」的模型原文，供 rawB64 做字节级取证。
+    let rawSample = '';
     try {
       for await (const ev of handle.stream) this.consumeEvent(ev, agg, handle.run);
+      rawSample = agg.content.slice(0, B64_SAMPLE_CHARS);
       await this.finalize(provider, handle, messages, agg, ctx, toolCtx);
     } catch (e) {
-      done(false, this.d.now() - started, (e as Error).message);
+      // 2026-09-10：失败路径也要带现场样本——parsing 失败（400）恰恰是最需要字节证据的场景。
+      done(false, this.d.now() - started, (e as Error).message, { replySample: agg.content.slice(0, 1200), rawSample, sseBytes: handle.run.sseBytes, ssePaths: handle.run.ssePaths, sseRaw: handle.run.sseRaw });
       throw this.mapErr(e);
     }
-    done(true, this.d.now() - started, undefined, { finishReason: agg.finishReason ?? 'stop', parentMessageId: handle.run.parentMessageId, replySample: agg.content.slice(0, 1200), reasoningSample: agg.reasoning.slice(0, 200), sseBytes: handle.run.sseBytes, ssePaths: handle.run.ssePaths, sseRaw: handle.run.sseRaw });
+    done(true, this.d.now() - started, undefined, { finishReason: agg.finishReason ?? 'stop', parentMessageId: handle.run.parentMessageId, replySample: agg.content.slice(0, 1200), rawSample, reasoningSample: agg.reasoning.slice(0, 200), sseBytes: handle.run.sseBytes, ssePaths: handle.run.ssePaths, sseRaw: handle.run.sseRaw });
     return toAggregate({ id: `chatcmpl-${ctx.requestId}`, model: modelId, created: Math.floor(started / 1000) }, agg);
   }
 
@@ -384,9 +401,12 @@ export class Router {
     return parseToolCalls(buf, toolCtx.tools);
   }
 
-  private encodeStream(provider: ProviderAdapter, handle: { stream: AsyncIterable<ProviderStreamEvent>; session: ProviderSession; convId: string; thread: ThreadEntry; run: RunState }, ctx: ProviderContext, model: string, started: number, messages: Message[], toolCtx: ToolContext, done: (ok: boolean, ms: number, error?: string, extra?: { finishReason?: string; parentMessageId?: string | number | null; replySample?: string; reasoningSample?: string; sseBytes?: number; ssePaths?: string[]; sseRaw?: string }) => void): AsyncIterable<ChatCompletionChunk> & { cancel(): Promise<void> } {
+  private encodeStream(provider: ProviderAdapter, handle: { stream: AsyncIterable<ProviderStreamEvent>; session: ProviderSession; convId: string; thread: ThreadEntry; run: RunState }, ctx: ProviderContext, model: string, started: number, messages: Message[], toolCtx: ToolContext, done: (ok: boolean, ms: number, error?: string, extra?: { finishReason?: string; parentMessageId?: string | number | null; replySample?: string; rawSample?: string; reasoningSample?: string; sseBytes?: number; ssePaths?: string[]; sseRaw?: string }) => void): AsyncIterable<ChatCompletionChunk> & { cancel(): Promise<void> } {
     const cctx: StreamContext = { id: `chatcmpl-${ctx.requestId}`, model, created: Math.floor(started / 1000) };
     const agg: StreamAggregate = { content: '', reasoning: '', toolCalls: [], finishReason: null };
+    // 2026-09-10（feat/log-b64-export）：归一化**前**的模型原文。归一化器的输出才是 agg.content，
+    // 光看它无法判断上游到底吐了什么形状——字节级取证必须拿归一化前的原串。
+    let rawContent = '';
     const self = this;
     const gen = (async function* () {
       try {
@@ -398,6 +418,7 @@ export class Router {
         // 队列锁已在 runCompletion 内的 runExclusiveStream 持有，此处直接消费 handle.stream 即可。
         for await (const ev of handle.stream) {
           if (dsml && ev.kind === 'content_delta') {
+            rawContent += ev.content;
             const text = dsml.feed(ev.content);
             if (text) {
               agg.content += text;
@@ -466,9 +487,11 @@ export class Router {
         const mirrorMessages: Message[] = [...messages, { role: 'assistant', content: sentRawContent, ...(agg.toolCalls.length ? { tool_calls: agg.toolCalls } : {}) }];
         // 2026-09-09（fix/model-switch-rebuild）：commit 时同步 modelType。
         self.d.mapper.commit(provider.id, handle.convId, mirrorMessages, handle.session.webSessionId, handle.run.parentMessageId ?? handle.session.parentMessageId, handle.run.model.modelType);
-        done(true, self.d.now() - started, undefined, { finishReason: agg.finishReason ?? 'stop', parentMessageId: handle.run.parentMessageId, replySample: agg.content.slice(0, 1200), reasoningSample: agg.reasoning.slice(0, 200), sseBytes: handle.run.sseBytes, ssePaths: handle.run.ssePaths, sseRaw: handle.run.sseRaw });
+        done(true, self.d.now() - started, undefined, { finishReason: agg.finishReason ?? 'stop', parentMessageId: handle.run.parentMessageId, replySample: agg.content.slice(0, 1200), rawSample: rawContent.slice(0, B64_SAMPLE_CHARS), reasoningSample: agg.reasoning.slice(0, 200), sseBytes: handle.run.sseBytes, ssePaths: handle.run.ssePaths, sseRaw: handle.run.sseRaw });
       } catch (e) {
-        done(false, self.d.now() - started, (e as Error).message);
+        // 2026-09-10（feat/log-b64-export）：失败路径（含工具解析失败 400）也要带现场样本——
+        // 这正是最需要字节证据的场景（旧实现只记 error，拿不到模型原文）。
+        done(false, self.d.now() - started, (e as Error).message, { replySample: agg.content.slice(0, 1200), rawSample: rawContent.slice(0, B64_SAMPLE_CHARS), sseBytes: handle.run.sseBytes, ssePaths: handle.run.ssePaths, sseRaw: handle.run.sseRaw });
         throw mapErrStatic(e, self.d.registry);
       }
     })();

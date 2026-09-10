@@ -769,3 +769,42 @@ describe('流式：命名空间被剥离的 DSML（现场 replySample 形态）'
     expect(calls()).toBe(2);
   });
 });
+
+// 2026-09-10（feat/log-b64-export）：现场取证通道。用户贴回的日志里 ｜DSML｜ 会被粘贴链吃掉，
+// 造成“无法判断字节形态”无法收敛。日志同时带 base64 版本（纯 ASCII，可无损跨粘贴链）。
+// 本用例锁最需要证据的那条路径：工具解析**失败**（400）时仍要能取回模型原文。
+describe('日志字节取证（feat/log-b64-export）', () => {
+  const READ = 'Read';
+  const I = 'inv' + 'oke', N = 'na' + 'me', P = 'para' + 'meter', S = 'str' + 'ing';
+  const TOOL = [{ type: 'function' as const, function: { name: READ, description: 'read', parameters: { type: 'object', properties: { path: { type: 'string' } } } } }];
+  const bare = (tag: string, attrs = ''): string => `<${tag}${attrs}>`;
+  const BROKEN =
+    `${bare('tool_calls')}\n` +
+    `${bare(I, ` ${N}="${READ}"`)}\n` +
+    `${bare(P, ` ${N}="path" ${S}="true"`)}broken.ino</${P}>\n` +
+    `</tool_calls>`;
+
+  it('fail-to-pass：工具解析失败（400）时，rawB64 仍能无损还原带标记的模型原文', async () => {
+    let n = 0;
+    const a = stubAdapter({
+      streamCompletion: async function* () {
+        n += 1;
+        yield { kind: 'message_id', id: 1 };
+        yield { kind: 'content_delta', content: n === 1 ? BROKEN : '我还是不会' };
+      },
+    });
+    const r = makeRouter(a);
+    const s = await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', '描述项目')], tools: TOOL, stream: true, conversation_id: 'b64-cid' });
+    try { for await (const _c of s as AsyncIterable<unknown>) { void _c; } } catch { /* 期望 400 */ }
+
+    const e = r['d'].log.list().at(-1)! as any;
+    expect(e.ok).toBe(false);
+    expect(e.version).toBe('0.0.0-test');   // 自证构建版本：用户是否 reload 过一眼可辨
+    expect(typeof e.rawB64).toBe('string');
+    const raw = Buffer.from(e.rawB64, 'base64').toString('utf8');
+    expect(raw).toContain(`${I} ${N}=`);    // 标记字节被完整带出来（不经粘贴链）
+    expect(raw).toContain('broken.ino');
+    // fail-closed：标记没被当正文透传给下游
+    expect(e.replyB64).toBeUndefined();
+  });
+});
