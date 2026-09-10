@@ -95,3 +95,166 @@ describe('mountChat', () => {
     }
   });
 });
+
+// 2026-09-09（feat/debug-chat-redesign）：把控件从顶部 topbar 重排为底部控件行
+// （学 DeepSeek/ChatGPT 聊天页面风格）。保持原有 data-* 属性名使旧测试过过。
+describe('mountChat: 控件重排 + 移除 reasoning_effort', () => {
+  it('控件行在 textarea 与 send 按钮之后（顺序: stream > textarea > 控件行 > send）', () => {
+    const pane = document.createElement('div');
+    mountChat(pane);
+    const stream = pane.querySelector('[data-chat-stream]')!;
+    const input = pane.querySelector('[data-chat-input]')!;
+    const sendBtn = pane.querySelector('[data-chat-send]')!;
+    const modelSel = pane.querySelector('[data-chat-model]')!;
+    const thinkingSel = pane.querySelector('[data-chat-thinking]')!;
+    const searchCb = pane.querySelector('[data-chat-search]')!;
+    // stream 第一个；input 接下来；model/thinking/search 在 input 之后；send 最后
+    expect(stream.compareDocumentPosition(input) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(input.compareDocumentPosition(modelSel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(modelSel.compareDocumentPosition(thinkingSel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(thinkingSel.compareDocumentPosition(searchCb) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(searchCb.compareDocumentPosition(sendBtn) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('reasoning_effort 已移除（DeepSeek 网页不设这个控件，对齐）', () => {
+    const pane = document.createElement('div');
+    mountChat(pane);
+    expect(pane.querySelector('[data-chat-effort]')).toBeNull();
+  });
+
+  it('流区域不写死 max-height：60vh——改用 flex 布局贴高', () => {
+    const pane = document.createElement('div');
+    mountChat(pane);
+    const stream = pane.querySelector('[data-chat-stream]') as HTMLElement;
+    // 移除 60vh 限制，不应再有 max-height:60vh
+    const style = stream.getAttribute('style') || '';
+    expect(style).not.toMatch(/max-height:\s*60vh/);
+  });
+});
+
+// 2026-09-09（feat/debug-chat-redesign）：图片上传 UI（Vision multimodal 调试用）。
+// FileReader readAsDataURL mock + 缩略图预览 + 发送转 content array。
+describe('mountChat: vision 图片上传', () => {
+  it('渲染上传按钮（默认 model 为 flash 时禁用 + tooltip）', async () => {
+    // 模型列表只含 flash + vision-exp，install 默认选第一个
+    (globalThis as any).deepApi.models.list = vi.fn().mockResolvedValue({
+      data: [{ id: 'deepseek-v4-flash' }, { id: 'deepseek-v4-flash-vision-exp' }],
+    });
+    const pane = document.createElement('div');
+    mountChat(pane);
+    // 等模型列表加载
+    await new Promise(r => setTimeout(r, 10));
+    const uploadBtn = pane.querySelector<HTMLButtonElement>('[data-chat-upload]');
+    expect(uploadBtn).toBeTruthy();
+    // 默认选第一个 model（flash）—— 上传按钮禁用
+    expect(uploadBtn!.disabled).toBe(true);
+    expect(uploadBtn!.title).toMatch(/vision/);
+  });
+
+  it('选 vision-exp 模型后，上传按钮启用', async () => {
+    (globalThis as any).deepApi.models.list = vi.fn().mockResolvedValue({
+      data: [{ id: 'deepseek-v4-flash' }, { id: 'deepseek-v4-flash-vision-exp' }],
+    });
+    const pane = document.createElement('div');
+    mountChat(pane);
+    await new Promise(r => setTimeout(r, 10));
+    const modelSel = pane.querySelector<HTMLSelectElement>('[data-chat-model]')!;
+    modelSel.value = 'deepseek-v4-flash-vision-exp';
+    modelSel.dispatchEvent(new Event('change'));
+    const uploadBtn = pane.querySelector<HTMLButtonElement>('[data-chat-upload]')!;
+    expect(uploadBtn.disabled).toBe(false);
+  });
+
+  it('选文件后：FileReader readAsDataURL → 缩略图预览 + 缩略图 × 按钮', async () => {
+    // mock FileReader
+    const origFileReader = (globalThis as any).FileReader;
+    let lastReader: any = null;
+    (globalThis as any).FileReader = class {
+      onload: ((e: any) => void) | null = null;
+      result: string | null = null;
+      readAsDataURL(_blob: Blob) {
+        lastReader = this;
+        this.result = 'data:image/png;base64,FAKE';
+        queueMicrotask(() => this.onload?.({ target: this } as never));
+      }
+    };
+    try {
+      const pane = document.createElement('div');
+      mountChat(pane);
+      // 启用上传
+      const modelSel = pane.querySelector<HTMLSelectElement>('[data-chat-model]')!;
+      const uploadBtn = pane.querySelector<HTMLButtonElement>('[data-chat-upload]')!;
+      // mock file input click + change
+      const fileInput = pane.querySelector<HTMLInputElement>('[data-chat-file-input]')!;
+      const file = new Blob([ new Uint8Array([1, 2, 3]) ], { type: 'image/png' });
+      // 设置 file（jsdom 用 defineProperty 覆盖原型 getter）
+      Object.defineProperty(fileInput, 'files', { value: [file], configurable: true });
+      fileInput.dispatchEvent(new Event('change'));
+      await new Promise(r => setTimeout(r, 10));
+      // 缩略图出现
+      const thumbs = pane.querySelectorAll('[data-chat-thumb]');
+      expect(thumbs.length).toBe(1);
+      // × 按钮可点
+      const removeBtn = thumbs[0]!.querySelector('[data-chat-thumb-remove]');
+      expect(removeBtn).toBeTruthy();
+      removeBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await new Promise(r => setTimeout(r, 5));
+      expect(pane.querySelectorAll('[data-chat-thumb]').length).toBe(0);
+    } finally {
+      (globalThis as any).FileReader = origFileReader;
+    }
+  });
+
+  it('发送时：图片 + 文本 → content array 含 image_url + text 块', async () => {
+    (globalThis as any).deepApi.models.list = vi.fn().mockResolvedValue({
+      data: [{ id: 'deepseek-v4-flash-vision-exp' }],
+    });
+    // mock FileReader（同步触发 onload）
+    const origFileReader = (globalThis as any).FileReader;
+    class MockFR {
+      result: string | null = null;
+      onload: ((e: any) => void) | null = null;
+      readAsDataURL(_b: Blob) {
+        this.result = 'data:image/png;base64,FAKE_BYTES';
+        queueMicrotask(() => this.onload?.({ target: this } as never));
+      }
+    }
+    (globalThis as any).FileReader = MockFR;
+    // mock SSE 流响应
+    const sseBody = new ReadableStream<Uint8Array>({
+      start(c) { c.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n')); c.close(); },
+    });
+    const createMock = vi.fn().mockResolvedValue({ body: sseBody });
+    (globalThis as any).deepApi.chat.completions.create = createMock;
+
+    try {
+      const pane = document.createElement('div');
+      mountChat(pane);
+      await new Promise(r => setTimeout(r, 10));  // 等模型列表
+      // 加图片
+      const fileInput = pane.querySelector<HTMLInputElement>('[data-chat-file-input]')!;
+      Object.defineProperty(fileInput, 'files', { value: [new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' })], configurable: true });
+      fileInput.dispatchEvent(new Event('change'));
+      await new Promise(r => setTimeout(r, 20));  // 等 FileReader setTimeout(0) + 渲染缩略图
+      // 确认缩略图已渲染
+      expect(pane.querySelectorAll('[data-chat-thumb]').length).toBe(1);
+      // 输入文本 + 发送
+      const input = pane.querySelector<HTMLTextAreaElement>('[data-chat-input]')!;
+      input.value = '看这图';
+      pane.querySelector<HTMLButtonElement>('[data-chat-send]')!.click();
+      await new Promise(r => setTimeout(r, 30));
+
+      expect(createMock).toHaveBeenCalledTimes(1);
+      const args = createMock.mock.calls[0]![0];
+      const userMsg = args.messages[args.messages.length - 1];
+      expect(Array.isArray(userMsg.content)).toBe(true);
+      const types = userMsg.content.map((b: any) => b.type);
+      expect(types).toContain('text');
+      expect(types).toContain('image_url');
+      const imgBlock = userMsg.content.find((b: any) => b.type === 'image_url');
+      expect(imgBlock.image_url.url).toMatch(/^data:image\/png;base64,/);
+    } finally {
+      (globalThis as any).FileReader = origFileReader;
+    }
+  });
+});
