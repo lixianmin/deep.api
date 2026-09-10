@@ -8,7 +8,7 @@ import { PowSolver, instantiateDeepSeekWasm, type WasmInstance } from './provide
 import { isBridgeRequest, BridgeError, type BridgeResponseMsg } from '../shared/protocol';
 import type { ChatCompletionChunk } from '../shared/api-types';
 import { createRegistry } from './providers/registry';
-import { onCatalogUpdate } from './models-sync';
+// 2026-09-14（fix/models-v4-retired）：`onCatalogUpdate` 不再用——仅 register-catalog-listener.ts 调用。
 import { registerCatalogListener } from './register-catalog-listener';
 
 const STORAGE = chrome.storage.local;
@@ -291,14 +291,9 @@ chrome.runtime.onConnect.addListener((port) => {
           safePost({ __deepApi: { id: env.id, kind: 'error', error } } as unknown as BridgeResponseMsg);
           return;
         }
-        // 2026-09-10（feat/models-sync）：content script 推 catalog 到 SW（Task 2 / Task 5）。
-        // 不走 Router，直接调 onCatalogUpdate 写 chrome.storage.local；router.models() 自己读。
-        if (env.method === 'models-catalog:update') {
-          const params = env.params as { models?: { label: string; value?: string }[] };
-          if (Array.isArray(params?.models)) onCatalogUpdate(params.models);
-          safePost({ __deepApi: { id: env.id, kind: 'done' } } as unknown as BridgeResponseMsg);
-          return;
-        }
+        // 2026-09-14（fix/models-v4-retired）：删除 models-catalog:update 死分支。
+        // content script 走 chrome.runtime.sendMessage（registerCatalogListener 接听），
+        // 桥接 port 不再有该方法的合法调用方。深先 2026-09-10 原有 plan error 误以为是补口。
         if (env.method === 'chat.completions.create') {
           // 2026-09-10（fix/sw-vision-error）：vision pipeline 拋错不应让 listener 整个 reject
           // 变 unhandledrejection（Chrome MV3 SW 不默认 console.error）。明确 try/catch + 发

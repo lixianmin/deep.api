@@ -272,3 +272,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 ## 8. 与"图片上传失败"的并行
 
 图片上传失败诊断（用户等 SW console 证据）独立 worktree 进行，**不影响**本 spec 实现。
+## 9. Deprecation note (2026-09-14)
+
+As of 2026-09-14 12:00 Beijing time, DeepSeek retired `deepseek-v4-flash`, `deepseek-v4-pro`, and `deepseek-v4-flash-vision-exp` on the **chat surface** (the 3 entries users see in the model picker). The API still accepts these IDs for compatibility, but routes all of them to **DeepSeek-V4.1-Flash**. The new unified chat ID is `deepseek-flash` (display name "default" in the chat UI).
+
+`client.ts MODELS` is the single source of truth for the live chat model list (now 1 entry). `client.ts LIMITS` keeps a vision entry (`deepseek-v4-flash-vision-exp`) because vision is an independent experimental model outside this retirement — the partner has not asked about it. Re-check if vision also retires.
+
+This feature (`models-sync`) only enriches the `description` field; it does **not** maintain the model list itself. The web scraping is best-effort: if the live DOM doesn't match the candidates, the hardcoded MODELS value still ships.

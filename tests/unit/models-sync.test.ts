@@ -2,13 +2,22 @@ import { describe, it, expect, vi } from 'vitest';
 import { extractModelOptions, labelToModelId, sendCatalogUpdate } from '../../src/content/models-sync';
 
 describe('labelToModelId', () => {
-  it('maps "DeepSeek V4 Flash" → "deepseek-v4-flash"', () => {
-    expect(labelToModelId('DeepSeek V4 Flash')).toBe('deepseek-v4-flash');
+  // 2026-09-14（fix/models-v4-retired）：DeepSeek 官方 9/14 起统一为 V4.1 Flash
+  // 新 ID `deepseek-flash`（UI 显示 "default"）。labelToModelId 优先匹配新 ID。
+  it('maps "default" → "deepseek-flash"（V4.1 统一后 UI 默认文案）', () => {
+    expect(labelToModelId('default')).toBe('deepseek-flash');
   });
-  it('maps "DeepSeek V4 Pro" → "deepseek-v4-pro"', () => {
+  it('maps "DeepSeek V4.1 Flash" → "deepseek-flash"（V4.1 完整标签）', () => {
+    expect(labelToModelId('DeepSeek V4.1 Flash')).toBe('deepseek-flash');
+  });
+  it('maps "DeepSeek Flash" → "deepseek-flash"（脱版本号）', () => {
+    expect(labelToModelId('DeepSeek Flash')).toBe('deepseek-flash');
+  });
+  // 旧 ID 兼容（retired 兼容层 label 仍可能出现）
+  it('maps "DeepSeek V4 Pro" → "deepseek-v4-pro"（retired 兼容）', () => {
     expect(labelToModelId('DeepSeek V4 Pro')).toBe('deepseek-v4-pro');
   });
-  it('maps "DeepSeek V4 Flash Vision Exp" → "deepseek-v4-flash-vision-exp"', () => {
+  it('maps "DeepSeek V4 Flash Vision Exp" → "deepseek-v4-flash-vision-exp"（retired 兼容）', () => {
     expect(labelToModelId('DeepSeek V4 Flash Vision Exp')).toBe('deepseek-v4-flash-vision-exp');
   });
   it('returns null for unknown labels', () => {

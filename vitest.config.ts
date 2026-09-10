@@ -6,6 +6,7 @@ export default defineConfig({
       ['tests/integration/bridge.test.ts', 'jsdom'],
       ['tests/unit/demo-runner.test.ts', 'jsdom'],
       ['tests/unit/models-sync.test.ts', 'jsdom'],
+      ['tests/unit/models-sync-trigger.test.ts', 'jsdom'],
       ['tests/debug/**/*.test.ts', 'jsdom'],
     ],
   },

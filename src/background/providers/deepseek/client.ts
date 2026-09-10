@@ -1,11 +1,12 @@
 import type { ModelInfo, ProviderSession, ResolvedModel } from '../adapter';
 import { labelToModelId, type ModelOption } from '../../../content/models-sync';
 
-// 当前线上公开模型（来源: https://api-docs.deepseek.com/quick_start/pricing，spike 任务 #1 校准）
+// 2026-09-14（fix/models-v4-retired）：V4 三个 ID（flash / pro / vision-exp）官方
+// 9/14 12:00 起全部 retired，统一为 V4.1 Flash 新 ID `deepseek-flash`（UI
+// 显示 "default"）。`MODELS` 是单一真相源——不要在别处另写一份。
+// 旧 ID 仍被 API 兼容层接受（路由到 V4.1 Flash），但本常量不再导出它们。
 export const MODELS: ModelInfo[] = [
-  { id: 'deepseek-v4-flash', provider: 'deepseek', description: 'V4-Flash — 快速/便宜，默认推荐' },
-  { id: 'deepseek-v4-pro', provider: 'deepseek', description: 'V4-Pro — 推理能力更强，含 thinking' },
-  { id: 'deepseek-v4-flash-vision-exp', provider: 'deepseek', description: 'V4-Flash-Vision — 视觉模型（图转 token 计费）' },
+  { id: 'deepseek-flash', provider: 'deepseek', description: 'DeepSeek V4.1 Flash — 快速/便宜，统一默认模型' },
 ];
 
 export interface MergedModel {
@@ -40,16 +41,13 @@ export function mergeWithHardcoded(
 
 // 内部 web API 模型类型（chat.deepseek.com/api/v0 用 default/expert/vision）
 // 公开模型 ID → 内部模型类型 + 字符上限 + 是否开启 thinking
-// 字符上限按 ds-free-api 默认（待 spike 实测调整）
-// 默认 thinking=true：与 DeepSeek 官方文档对齐（官方：thinking 默认 enabled，effort 默认 high）
-// 调用方传 thinking:false 可显式关
+// 2026-09-14（fix/models-v4-retired）：V4 三个 chat ID（flash / pro / vision-exp）官方
+// 9/14 12:00 起 retired，统一为 V4.1 Flash 新 ID `deepseek-flash`。
+// 但 vision-exp 实际是独立实验模型，不在本次统一范围内（DeepSeek changelog
+// 只提 3 个 chat 入口；vision 是 file upload side-model）—— 保留兼容层让 vision 继续可用。
+// 如 vision-exp 后续也 retire，再删。
 const LIMITS = {
-  'deepseek-v4-flash': { modelType: 'default' as const, thinking: true, limitChars: 2_621_440 },
-  // 2026-09-09（fix/pro-thinking-true）：v0.1.72 曾设 thinking:false——当时误判「只思考不说话」
-  // 是 thinking 开启导致。实际根因是 v0.1.75-78 修的三件套（客户端版本头缺失 / 嵌套快照未解析 /
-  // APPEND 数组未处理），与 thinking 无关；thinking 模式已实测正常（reasoningSample+replySample
-  // 都有）。回滚官方默认 thinking=true。调用方显式传 thinking:false 可关。
-  'deepseek-v4-pro': { modelType: 'expert' as const, thinking: true, limitChars: 163_840 },
+  'deepseek-flash': { modelType: 'default' as const, thinking: true, limitChars: 2_621_440 },
   'deepseek-v4-flash-vision-exp': { modelType: 'vision' as const, thinking: true, limitChars: 2_621_440 },
 };
 

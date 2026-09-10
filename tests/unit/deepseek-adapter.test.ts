@@ -15,16 +15,19 @@ function mkDeps(over: Partial<AdapterDeps> = {}): AdapterDeps {
 }
 
 describe('DeepSeekAdapter', () => {
-  it('resolves current public models and rejects unknown', () => {
+  it('resolves current public models (V4.1 unified) and rejects unknown', () => {
     const a = createDeepSeekAdapter(mkDeps());
-    expect(a.resolveModel('deepseek-v4-flash')).toMatchObject({ modelType: 'default', thinking: true });
-    // 2026-09-09（fix/pro-thinking-true）：v0.1.72 误判回滚——Pro 默认 thinking=true（官方默认），
-    // 与 Flash / vision 一致。调用方仍可显式传 thinking:false 覆盖。
-    expect(a.resolveModel('deepseek-v4-pro')).toMatchObject({ modelType: 'expert', thinking: true });
+    // 2026-09-14（fix/models-v4-retired）：V4 三个 chat ID retired，只 1 个新 chat ID。
+    expect(a.resolveModel('deepseek-flash')).toMatchObject({ modelType: 'default', thinking: true });
+    // vision 兼容层仍保留
     expect(a.resolveModel('deepseek-v4-flash-vision-exp')).toMatchObject({ modelType: 'vision', thinking: true });
+    // 旧 V4 chat ID 已不再 resolve（用户应改用 deepseek-flash）
+    expect(a.resolveModel('deepseek-v4-flash')).toBeNull();
+    expect(a.resolveModel('deepseek-v4-pro')).toBeNull();
     expect(a.resolveModel('gpt-4o')).toBeNull();
-    const ids = a.models.map(m => m.id);
-    expect(ids).toEqual(expect.arrayContaining(['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-v4-flash-vision-exp']));
+    // a.models 只暴露 1 个 chat model
+    const ids = a.models.map((m) => m.id);
+    expect(ids).toEqual(['deepseek-flash']);
   });
 
   it('exposes capability flags', () => {

@@ -62,27 +62,25 @@ describe('deepseek client', () => {
       expect(resolveModel('unknown')).toBeNull();
     });
 
-    it('resolves flash/pro/vision 默认 thinking=true（官方默认；v0.1.72 Pro 误判已回滚）', () => {
-      const flash = resolveModel('deepseek-v4-flash')!;
-      const pro = resolveModel('deepseek-v4-pro')!;
+    it('resolves chat/vision 默认 thinking=true（V4.1 Flash 统一后 + vision 兼容）', () => {
+      const flash = resolveModel('deepseek-flash')!;
       const vision = resolveModel('deepseek-v4-flash-vision-exp')!;
       expect(flash.modelType).toBe('default');
-      expect(pro.modelType).toBe('expert');
       expect(vision.modelType).toBe('vision');
       // 2026-09-09（fix/pro-thinking-true）：v0.1.72 误判「thinking_enabled=true 会让 Pro 只思考
       // 不说话」——实际根因是客户端版本头缺失 + 嵌套快照/APPEND 数组未解析（v0.1.75-78 已修），
       // 与 thinking 无关。thinking 模式实测正常（reasoningSample+replySample 都有）。
       // 回滚：所有模型默认 thinking=true（与官方默认对齐）。调用方仍可显式覆盖。
       expect(flash.thinking).toBe(true);
-      expect(pro.thinking).toBe(true);
       expect(vision.thinking).toBe(true);
+      // 旧 V4 chat ID（retired 兼容层仍 accept，但不在 MODELS/LIMITS 单一真相源）→ null
+      expect(resolveModel('deepseek-v4-flash')).toBeNull();
+      expect(resolveModel('deepseek-v4-pro')).toBeNull();
     });
 
-    it('lists three models including vision', () => {
-      const ids = MODELS.map(m => m.id);
-      expect(ids).toContain('deepseek-v4-flash');
-      expect(ids).toContain('deepseek-v4-pro');
-      expect(ids).toContain('deepseek-v4-flash-vision-exp');
+    it('lists single live chat model: deepseek-flash', () => {
+      const ids = MODELS.map((m) => m.id);
+      expect(ids).toEqual(['deepseek-flash']);
     });
   });
 });

@@ -699,3 +699,12 @@ Expected: model labels match what chat.deepseek.com shows. If labels still show 
 - `labelToModelId` defined in `src/content/models-sync.ts` (Task 1), used by Task 4
 
 All cross-task references match. Plan ready for execution.
+## Deprecation update (2026-09-14, fix/models-v4-retired)
+
+DeepSeek retired all 3 V4 chat IDs on 2026-09-14 12:00 Beijing time. The chat UI now shows a single "default" option (new ID `deepseek-flash`). Followed up in `fix/models-v4-retired`:
+
+- `client.ts MODELS` shrunk to 1 entry: `deepseek-flash`. Single source of truth.
+- `client.ts LIMITS` keeps `deepseek-v4-flash-vision-exp` for the vision path (vision is a separate experimental model, not part of the V4→V4.1 chat retirement).
+- `labelToModelId` regex set: new `deepseek-flash` patterns added at the top; old V4 patterns remain as a safety net for any straggler labels from the API compat layer.
+- Content script trigger now also runs (Task 1 was library-only — the FINAL_REVIEW fix added the top-level invocation).
+- See spec §9 for full context.

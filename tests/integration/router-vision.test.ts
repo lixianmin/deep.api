@@ -31,10 +31,9 @@ function makeMockAdapter(opts: {
       yield { kind: 'content_delta', content: '看到了，这是电路图' };
       yield { kind: 'usage', inputTokens: 100, outputTokens: 50 };
     },
+    // 2026-09-14（fix/models-v4-retired）：V4 三个 ID retired，只 1 个新模型。
     models: [
-      { id: 'deepseek-v4-flash', provider: 'deepseek', description: 'deepseek-v4-flash' },
-      { id: 'deepseek-v4-pro', provider: 'deepseek', description: 'deepseek-v4-pro' },
-      { id: 'deepseek-v4-flash-vision-exp', provider: 'deepseek', description: 'deepseek-v4-flash-vision-exp' },
+      { id: 'deepseek-flash', provider: 'deepseek', description: 'deepseek-flash' },
     ],
     resolveModel(): ResolvedModel | null {
       return { modelId: 'deepseek-v4-flash-vision-exp', modelType: 'vision', thinking: true, limitChars: 100000 };
@@ -255,8 +254,9 @@ describe('router.models(): merged catalog from storage', () => {
     const adapter = makeMockAdapter({});
     const router = makeRouter(adapter, { storageStub: { get: async () => undefined } });
     const r = await router.models();
+    // 2026-09-14（fix/models-v4-retired）：V4 三个 ID retired，只 1 个 deepseek-flash。
     expect(r.data.map((m) => m.description)).toEqual([
-      'deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-v4-flash-vision-exp',
+      'deepseek-flash',
     ]);
   });
 
@@ -268,16 +268,16 @@ describe('router.models(): merged catalog from storage', () => {
         get: async (k: string) => k === 'modelsCatalog' ? {
           source: 'chat.deepseek.com', capturedAt,
           models: [
-            { label: 'DeepSeek V4 Flash' },
-            { label: 'DeepSeek V4 Pro' },
-            { label: 'DeepSeek V4 Flash Vision Exp' },
+            { label: 'default' },                  // V4.1 UI 文案
+            { label: 'DeepSeek V4.1 Flash' },     // V4.1 完整标签
           ],
         } : undefined,
       },
     });
     const r = await router.models();
+    // first-match-wins：catalog.models 按顺序取第一个匹配 deepseek-flash 的 label
     expect(r.data.map((m) => m.description)).toEqual([
-      'DeepSeek V4 Flash', 'DeepSeek V4 Pro', 'DeepSeek V4 Flash Vision Exp',
+      'default',
     ]);
   });
 });
