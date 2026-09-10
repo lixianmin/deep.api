@@ -36,7 +36,7 @@ function makeMockAdapter(opts: {
       { id: 'deepseek-flash', provider: 'deepseek', description: 'deepseek-flash' },
     ],
     resolveModel(): ResolvedModel | null {
-      return { modelId: 'deepseek-v4-flash-vision-exp', modelType: 'vision', thinking: true, limitChars: 100000 };
+      return { modelId: 'deepseek-v4-flash-vision-exp', modelType: 'vision', supportsImages: true, thinking: true, limitChars: 100000 };
     },
     isRateLimited: () => false,
     isAuthExpired: () => false,
@@ -131,7 +131,7 @@ describe('router: vision multimodal 路由', () => {
 
   it('flash + array content 含 image_url：拒绝（保留 v0.1.66 行为）', async () => {
     const adapter = makeMockAdapter({});
-    adapter.resolveModel = (() => ({ modelId: 'deepseek-v4-flash', modelType: 'default', thinking: false, limitChars: 100000 }));
+    adapter.resolveModel = (() => ({ modelId: 'deepseek-v4-flash', modelType: 'default', supportsImages: false, thinking: false, limitChars: 100000 }));
     const router = makeRouter(adapter);
     const req: ChatCompletionRequest = {
       model: 'deepseek-v4-flash',
@@ -148,6 +148,30 @@ describe('router: vision multimodal 路由', () => {
         },
       },
     });
+  });
+
+  // 2026-09-10（fix/vision-model-type）：图片能力与 wire model_type 解耦的 fail-to-pass。
+  // deepseek-flash 改为 modelType='default' + supportsImages=true：修复前 gate 是
+  // `resolved.modelType === 'vision'` → flash 掉进 else 被 400 拒；修复后走上传，completion
+  // 发 model_type='default'（避开 vision 变体的 DSML 工具调用格式，下游才能解析工具调用）。
+  it('fail-to-pass: flash(modelType=default)+supportsImages → 上传图片且 completion 发 model_type=default', async () => {
+    const uploadFile = vi.fn(async () => ({ id: 'file-flash-1', filename: 'x.png', bytes: 11, status: 'uploaded' }));
+    const pollFileReady = vi.fn(async () => {});
+    const adapter = makeMockAdapter({ uploadFile, pollFileReady });
+    adapter.resolveModel = (() => ({ modelId: 'deepseek-flash', modelType: 'default', supportsImages: true, thinking: true, limitChars: 100000 }));
+    const router = makeRouter(adapter);
+    const req: ChatCompletionRequest = {
+      model: 'deepseek-flash',
+      messages: [{ role: 'user', content: [
+        { type: 'text', text: '看图' },
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,AAA' } },
+      ] }],
+    };
+    const res: any = await router.create('T', req);
+    expect(res.choices[0].message.content).toBe('看到了，这是电路图');
+    expect(uploadFile).toHaveBeenCalledTimes(1);
+    expect(adapter.streamCalls[0]!.refFileIds).toEqual(['file-flash-1']);
+    expect(adapter.streamCalls[0]!.model.modelType).toBe('default');
   });
 
   it('vision + 多张图：多个 file_id 传给 ref_file_ids', async () => {

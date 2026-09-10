@@ -31,11 +31,11 @@ function stubAdapter(over: StubExtras = {}): ProviderAdapter {
     },
     models: MODELS,
     resolveModel: (id: string) => id === 'deepseek-v4-flash'
-      ? { modelId: id, modelType: 'default' as const, thinking: false, limitChars: 2_621_440 }
+      ? { modelId: id, modelType: 'default' as const, supportsImages: false, thinking: false, limitChars: 2_621_440 }
       : id === 'deepseek-v4-pro'
-        ? { modelId: id, modelType: 'expert' as const, thinking: true, limitChars: 163_840 }
+        ? { modelId: id, modelType: 'expert' as const, supportsImages: false, thinking: true, limitChars: 163_840 }
         : id === 'deepseek-v4-flash-vision-exp'
-          ? { modelId: id, modelType: 'vision' as const, thinking: false, limitChars: 2_621_440 }
+          ? { modelId: id, modelType: 'vision' as const, supportsImages: true, thinking: false, limitChars: 2_621_440 }
           : null,
     isRateLimited: (e: any) => e?.status === 429,
     isAuthExpired: (e: any) => e?.status === 401,

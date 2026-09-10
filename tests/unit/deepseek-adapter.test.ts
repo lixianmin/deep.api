@@ -18,12 +18,13 @@ describe('DeepSeekAdapter', () => {
   it('resolves current public models (V4.1 unified) and rejects unknown', () => {
     const a = createDeepSeekAdapter(mkDeps());
     // 2026-09-14（fix/models-v4-retired）：V4 三个 chat ID retired，只 1 个新 chat ID。
-    // 2026-09-10（fix/vision-button）：V4.1 Flash 统一后 deepseek-flash 也走 vision pipeline。
-    expect(a.resolveModel('deepseek-flash')).toMatchObject({ modelType: 'vision', thinking: true });
+    // 2026-09-10（fix/vision-model-type）：deepseek-flash 改为 wire model_type='default' +
+    // 独立 supportsImages（避开 vision 变体的 DSML 工具调用格式）。
+    expect(a.resolveModel('deepseek-flash')).toMatchObject({ modelType: 'default', supportsImages: true, thinking: true });
     // vision 兼容层仍保留
-    expect(a.resolveModel('deepseek-v4-flash-vision-exp')).toMatchObject({ modelType: 'vision', thinking: true });
+    expect(a.resolveModel('deepseek-v4-flash-vision-exp')).toMatchObject({ modelType: 'vision', supportsImages: true, thinking: true });
     // 2026-09-14（fix/accept-v4-flash-alias）：`deepseek-v4-flash` 恢复兼容解析（旧下游仍发此 ID）
-    expect(a.resolveModel('deepseek-v4-flash')).toMatchObject({ modelType: 'vision', thinking: true });
+    expect(a.resolveModel('deepseek-v4-flash')).toMatchObject({ modelType: 'default', supportsImages: true, thinking: true });
     // 仍未恢复的旧 V4 chat ID
     expect(a.resolveModel('deepseek-v4-pro')).toBeNull();
     expect(a.resolveModel('gpt-4o')).toBeNull();

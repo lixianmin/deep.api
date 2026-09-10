@@ -14,6 +14,7 @@ export interface MergedModel {
   id: string;
   description: string;
   modelType: 'default' | 'expert' | 'vision';
+  supportsImages: boolean;
   thinking: boolean;
   limitChars: number;
   capturedAt?: number;
@@ -41,26 +42,26 @@ export function mergeWithHardcoded(
 }
 
 // 内部 web API 模型类型（chat.deepseek.com/api/v0 用 default/expert/vision）
-// 公开模型 ID → 内部模型类型 + 字符上限 + 是否开启 thinking
+// 公开模型 ID → 内部模型类型 + 是否支持图片输入 + 字符上限 + 是否开启 thinking
 // 2026-09-14（fix/models-v4-retired）：V4 三个 chat ID（flash / pro / vision-exp）官方
 // 9/14 12:00 起 retired，统一为 V4.1 Flash 新 ID `deepseek-flash`。
 // 但 vision-exp 实际是独立实验模型，不在本次统一范围内（DeepSeek changelog
 // 只提 3 个 chat 入口；vision 是 file upload side-model）—— 保留兼容层让 vision 继续可用。
-// 2026-09-10（fix/vision-button）：V4.1 Flash 统一后 `deepseek-flash` 也走 vision pipeline
-// （服务端路由到 V4.1 Flash，支持 image_url content array）。vision-exp 仅保留做向后
-// 兼容；如 vision-exp 后续也 retire，再删。
+// 2026-09-10（fix/vision-model-type）：图片能力与 wire `model_type` 解耦。网页端带图请求用
+// `model_type:"default"` + `ref_file_ids`（用户抓包实证），而 `model_type:"vision"` 会路由到
+// 用 DSML（`<|dsml|tool_calls>`）工具调用格式的 vision 变体——下游按标准 `<tool_calls>` 解析
+// 会失败。所以 chat 模型一律发 `default`，图片支持改由 `supportsImages` 独立表达。
 const LIMITS = {
-  'deepseek-flash': { modelType: 'vision' as const, thinking: true, limitChars: 2_621_440 },
+  'deepseek-flash': { modelType: 'default' as const, supportsImages: true, thinking: true, limitChars: 2_621_440 },
   // 2026-09-14（fix/accept-v4-flash-alias）：`fix/models-v4-retired` 误把旧 chat ID 从
   // `resolveModel` 一并删掉，导致仍发 `deepseek-v4-flash` 的下游被 router 拦成 400
   // `unknown model`。DeepSeek API 兼容层仍接受该 ID（路由到 V4.1 Flash），故恢复解析。
-  // 配置与 `deepseek-flash` 完全一致（同一底层模型，含 vision），保持别名语义：
+  // 配置与 `deepseek-flash` 完全一致（同一底层模型，含图片支持），保持别名语义：
   // 两者相互切换时 mapper 的 modelType 相同 → 仍走 incremental，不触发 rebuild。
-  'deepseek-v4-flash': { modelType: 'vision' as const, thinking: true, limitChars: 2_621_440 },
-  // 2026-09-10（fix/vision-button）：V4.1 Flash 统一后 `deepseek-flash` 也走 vision pipeline
-  // （服务端路由到 V4.1 Flash，支持 image_url content array）。vision-exp 仅保留做向后
-  // 兼容；如 vision-exp 后续也 retire，再删。
-  'deepseek-v4-flash-vision-exp': { modelType: 'vision' as const, thinking: true, limitChars: 2_621_440 },
+  'deepseek-v4-flash': { modelType: 'default' as const, supportsImages: true, thinking: true, limitChars: 2_621_440 },
+  // 2026-09-10（fix/vision-model-type）：vision-exp 是唯一仍需 `model_type:"vision"` 的
+  // 独立实验模型；保留兼容层，如后续 retire 再删。
+  'deepseek-v4-flash-vision-exp': { modelType: 'vision' as const, supportsImages: true, thinking: true, limitChars: 2_621_440 },
 };
 
 export function resolveModel(modelId: string): ResolvedModel | null {

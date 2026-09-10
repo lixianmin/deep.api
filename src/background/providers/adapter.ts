@@ -32,7 +32,7 @@ export interface ProviderCompletion {
   overrides?: CompletionOverrides;
   requestId: string;
 }
-export interface ResolvedModel { modelId: string; modelType: 'default' | 'expert' | 'vision'; thinking: boolean; limitChars: number }
+export interface ResolvedModel { modelId: string; modelType: 'default' | 'expert' | 'vision'; supportsImages: boolean; thinking: boolean; limitChars: number }
 export interface ProviderAdapter {
   readonly id: ProviderId;
   auth: {

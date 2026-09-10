@@ -29,7 +29,7 @@ function adapterFromStub(stub: { events?: ProviderStreamEvent[] }): ProviderAdap
     streamCompletion,
     models: [{ id: 'deepseek-v4-flash', provider: 'deepseek', description: 'v4-flash' }],
     resolveModel: (id: string) => id === 'deepseek-v4-flash'
-      ? { modelId: id, modelType: 'default' as const, thinking: false, limitChars: 2_621_440 }
+      ? { modelId: id, modelType: 'default' as const, supportsImages: false, thinking: false, limitChars: 2_621_440 }
       : null,
     isRateLimited: () => false,
     isAuthExpired: () => false,

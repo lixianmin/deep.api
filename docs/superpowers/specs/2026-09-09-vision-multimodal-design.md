@@ -65,12 +65,17 @@
 
 ### 3.2 Router 行为矩阵
 
+> 2026-09-10（fix/vision-model-type）变更：图片能力不再由 `modelType === 'vision'` 决定，改由模型配置的
+> `supportsImages` 决定；wire `model_type` 对 `deepseek-flash` / `deepseek-v4-flash` 一律发 `default`
+> （`model_type:"vision"` 会路由到用 DSML 工具调用格式的 vision 变体，下游按标准 `<tool_calls>` 解析不了）。
+> 网页端带图请求本身就是 `model_type:"default"` + `ref_file_ids`（用户抓包实证）。下表按新规则更新。
+
 | model | content 类型 | 行为 |
 |---|---|---|
-| `flash` / `pro` / `vision-exp` | `string` | 现有行为（无图） |
-| `flash` / `pro` | array（含 image） | **400** `invalid_request_error`：vision 图片不支持 v1（保留 v0.1.66 拒绝行为） |
-| `vision-exp` | array（仅 text 块） | 等价 string（忽略 image_url 缺位警告） |
-| `vision-exp` | array（含 image_url 块） | **触发 vision pipeline**（§4） |
+| `deepseek-flash` / `deepseek-v4-flash`（`supportsImages: true`） | `string` | 现有行为（无图） |
+| 任意 `supportsImages: false` 的模型 | array（含 image） | **400** `invalid_request_error`：模型不支持图片输入 |
+| `supportsImages: true`（含 `deepseek-v4-flash-vision-exp`） | array（仅 text 块） | 等价 string |
+| `supportsImages: true`（含 `deepseek-v4-flash-vision-exp`） | array（含 image_url 块） | **触发 vision pipeline**（§4），completion 发该模型自己的 `model_type` |
 
 ### 3.3 错误语义
 

@@ -77,11 +77,12 @@ export class Router {
     // unhandledrejection）。外层包 try/catch + 写 log（ok:false + error message）保证错误不静默：
     // 1) Debug Log tab 有记录  2) BridgeError 透传到 SW line 280 catch 发 kind:'error' 给 bridge。
     try {
-      // 2026-09-09（feat/vision-multimodal）：原 v0.1.66 拒绝 array content；现在为 vision 模型
-      // 放开——vision 接受 image_url 块，走 vision-pipeline 上传转 ref_file_ids。
-      // flash/pro 仍拒绝 image_url（保留 v0.1.66）。
+      // 2026-09-09（feat/vision-multimodal）：原 v0.1.66 拒绝 array content；现在为支持图片的模型
+      // 放开——接受 image_url 块，走 vision-pipeline 上传转 ref_file_ids。
+      // 2026-09-10（fix/vision-model-type）：判断依据从 modelType==='vision' 改为独立
+      // supportsImages——wire model_type 要发 default（避免 vision 变体的 DSML 工具调用格式）。
       const refFileIds: string[] = [];
-      if (resolved.modelType === 'vision' && provider.uploadFile && provider.pollFileReady) {
+      if (resolved.supportsImages && provider.uploadFile && provider.pollFileReady) {
         // 抽所有 user message 的 image_url，按出现顺序上传
         let imgIdx = 0;
         for (let i = 0; i < messages.length; i++) {
@@ -110,11 +111,11 @@ export class Router {
           }
         }
       } else {
-        // flash/pro：array content 含 image_url → 400（保留 v0.1.66 拒绝）
+        // 不支持图片的模型：array content 含 image_url → 400（保留 v0.1.66 拒绝）
         for (let i = 0; i < messages.length; i++) {
           const refs = extractImageRefs(messages[i]!);
           if (refs.length > 0) {
-            throw err('invalid_request_error', `messages[${i}] 含 image_url 但模型 ${resolved.modelId} 不支持视觉；仅 deepseek-v4-flash-vision-exp 可接收图片`, 400);
+            throw err('invalid_request_error', `messages[${i}] 含 image_url 但模型 ${resolved.modelId} 不支持图片输入`, 400);
           }
         }
       }

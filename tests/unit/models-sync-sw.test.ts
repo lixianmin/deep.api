@@ -47,7 +47,7 @@ import { mergeWithHardcoded, type MergedModel } from '../../src/background/provi
 
 // 2026-09-14（fix/models-v4-retired）：V4 三个 ID 全部 retired。hardcoded 只 1 个。
 const HARDCODED: MergedModel[] = [
-  { id: 'deepseek-flash', modelType: 'default', thinking: true, limitChars: 2621440, description: 'DeepSeek V4.1 Flash — 快速/便宜，统一默认模型' },
+  { id: 'deepseek-flash', modelType: 'default', supportsImages: true, thinking: true, limitChars: 2621440, description: 'DeepSeek V4.1 Flash — 快速/便宜，统一默认模型' },
 ];
 
 describe('mergeWithHardcoded', () => {
