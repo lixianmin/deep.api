@@ -9,6 +9,7 @@ import { isBridgeRequest, type BridgeResponseMsg } from '../shared/protocol';
 import type { ChatCompletionChunk } from '../shared/api-types';
 import { createRegistry } from './providers/registry';
 import { onCatalogUpdate } from './models-sync';
+import { registerCatalogListener } from './register-catalog-listener';
 
 const STORAGE = chrome.storage.local;
 const DEEPSEEK_API_BASE = 'https://chat.deepseek.com/api/v0';
@@ -230,6 +231,10 @@ async function broadcastPanelState(): Promise<void> {
 
 chrome.runtime.onInstalled.addListener(() => { void refreshAuthAndLog(); });
 chrome.runtime.onStartup.addListener(() => { void refreshAuthAndLog(); });
+
+// 2026-09-10（feat/models-sync fix-r1）：spec §3.6 content script → SW catalog push.
+// chrome.runtime.onMessage 是另一条通道（独立于 bridge 的 port.onMessage）。
+registerCatalogListener();
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name === 'deepapi') {
