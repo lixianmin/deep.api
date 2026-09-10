@@ -1,7 +1,6 @@
 // popup.ts - 通过 port 与 SW 通信；只在 MV3 popup 内执行（chrome.* 在此文件中）
 import { formatAuthState, pickForensicTail, renderLogListHtml, renderModelListHtml, type PopupLogEntry } from './snippet';
 
-const port = chrome.runtime.connect({ name: 'deepapi-panel' });
 type LogEntry = PopupLogEntry;
 type PanelState = {
   providers?: Record<string, {
@@ -14,11 +13,31 @@ type PanelState = {
 };
 let state: PanelState = {};
 
-port.onMessage.addListener((m: any) => {
-  if (m?.kind === 'state') { state = m.payload; render(); }
-});
+// 2026-09-11（fix/review-r2）：port 断线恢复。旧实现只在加载时 connect 一次——SW 被回收/扩展
+// reload 后 port 死掉，send() 每 2s 抛一次未捕获异常，UI 停在最后一次 state 且所有按钮失效。
+// 现在：send 捕获异常 → 丢 port → 下一次调用自动重连（onDisconnect 也主动丢）。
+let port: chrome.runtime.Port | null = null;
+function connectPort(): chrome.runtime.Port {
+  if (port) return port;
+  const p = chrome.runtime.connect({ name: 'deepapi-panel' });
+  p.onMessage.addListener((m: any) => {
+    if (m?.kind === 'state') { state = m.payload; render(); }
+  });
+  p.onDisconnect.addListener(() => { if (port === p) port = null; });
+  port = p;
+  return p;
+}
+connectPort();
 
-function send(kind: string, payload: unknown = {}) { port.postMessage({ kind, payload }); }
+function send(kind: string, payload: unknown = {}) {
+  const msg = { kind, payload };
+  try {
+    connectPort().postMessage(msg);
+  } catch {
+    port = null;   // context invalidated：下次心跳/操作自动重连
+    try { connectPort().postMessage(msg); } catch { /* SW 不可用，等下一次 */ }
+  }
+}
 
 // 2026-09-11（fix/review-r1）：2s 心跳的 render() 不得无条件重写 DOM。
 // 旧实现每次都给 number input 回写 storage 值（用户正在输入时被吞字）、给日志列表重设 innerHTML

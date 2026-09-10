@@ -15,10 +15,14 @@ const bodyHtml = popupHtml.slice(popupHtml.indexOf('<body>') + '<body>'.length, 
 
 type StateMsg = (m: unknown) => void;
 let listener: StateMsg | undefined;
+let disconnectListener: (() => void) | undefined;
+let connectCalls = 0;
 const posted: Array<{ kind: string; payload?: unknown }> = [];
+let postMessageImpl: (m: { kind: string; payload?: unknown }) => void = (m) => { posted.push(m); };
 const port = {
   onMessage: { addListener: (fn: StateMsg) => { listener = fn; } },
-  postMessage: (m: { kind: string; payload?: unknown }) => { posted.push(m); },
+  onDisconnect: { addListener: (fn: () => void) => { disconnectListener = fn; } },
+  postMessage: (m: { kind: string; payload?: unknown }) => { postMessageImpl(m); },
 };
 
 const logEntry = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
@@ -29,13 +33,19 @@ async function boot(): Promise<void> {
   vi.resetModules();
   document.body.innerHTML = bodyHtml;
   listener = undefined;
+  disconnectListener = undefined;
+  connectCalls = 0;
   posted.length = 0;
+  postMessageImpl = (m) => { posted.push(m); };
   (globalThis as unknown as { chrome: unknown }).chrome = {
-    runtime: { connect: () => port, getURL: (p: string) => 'chrome-extension://test/' + p },
+    runtime: { connect: () => { connectCalls++; return port; }, getURL: (p: string) => 'chrome-extension://test/' + p },
     tabs: { create: vi.fn() },
   };
   (globalThis as unknown as { fetch: unknown }).fetch = vi.fn(async () => ({ json: async () => ({ version: '0.0.0-test' }) }));
-  await import('../../src/popup/popup');
+  // 2s 心跳用真 setInterval 会跨用例泄漏（旧模块实例的定时器继续跑，干扰 connect 计数）。
+  // 只在 import 期间把 setInterval 换成不启动的桩——模块顶层注册的心跳定时器不再真实运行。
+  const spy = vi.spyOn(globalThis, 'setInterval').mockImplementation((() => 1 as unknown as ReturnType<typeof setInterval>) as never);
+  try { await import('../../src/popup/popup'); } finally { spy.mockRestore(); }
 }
 
 const emit = (payload: Record<string, unknown>): void => { listener!({ kind: 'state', payload }); };
@@ -176,5 +186,30 @@ describe('popup review-r1: Tab 高度不棘轮（B6）', () => {
     emit({ providers: { deepseek: { poolSize: 2, ttlMinutes: 30, models: [] } }, log: [] });
     expect(home.style.minHeight).toBe('40px');
     expect(logs.style.minHeight).toBe('40px');
+  });
+});
+
+// 2026-09-11（fix/review-r2）：port 断线恢复（旧实现只 connect 一次，SW 回收后 UI 僵死）。
+describe('popup review-r2: port 断线重连', () => {
+  it('onDisconnect 后下一次 send 自动重连（不抛未捕获异常）', async () => {
+    await boot();
+    expect(connectCalls).toBe(1);
+    disconnectListener!();   // 模拟 SW 被回收 / 扩展 reload
+    el<HTMLButtonElement>('btn-resync-auth').click();
+    expect(connectCalls).toBe(2);
+    expect(posted.map((p) => p.kind)).toContain('panel.resyncAuth');
+  });
+
+  it('postMessage 抛「disconnected port」时重连一次并重发', async () => {
+    await boot();
+    let fails = 1;
+    postMessageImpl = (m) => {
+      if (fails-- > 0) throw new Error('Attempting to use a disconnected port object');
+      posted.push(m);
+    };
+    // 不触发 onDisconnect：模拟「port 实际已死但 disconnect 事件尚未派发」的窗口
+    el<HTMLButtonElement>('btn-resync-auth').click();
+    expect(connectCalls).toBe(2);
+    expect(posted.map((p) => p.kind)).toContain('panel.resyncAuth');
   });
 });
