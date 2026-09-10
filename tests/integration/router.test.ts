@@ -640,4 +640,36 @@ describe('DSML 工具调用归一化（fix/dsml-tool-parser）', () => {
     expect(asst.content).toContain('<tool_calls>');
     expect(asst.tool_calls[0].function.name).toBe('Read');
   });
+
+  // 2026-09-10（fix/dsml-tolerant-closes）：用户 v0.1.96 现场真实形态——开标签带命名空间、
+  // 闭标签不带（</parameter> / </invoke>），解析器完全接不住。这个用例固定住回归。
+  it('fail-to-pass: 闭标签省略命名空间的混合形态 → 同样归一化成标准 <tool_calls>', async () => {
+    const hybrid =
+      `<${T}tool_calls>\n` +
+      `<${T}invoke name="Read">\n` +
+      `<${T}parameter name="path" string="true">sketch.ino</parameter>\n` +
+      `</invoke>\n` +
+      `</${T}tool_calls>`;
+    const adapter = stubAdapter({
+      streamCompletion: async function* () {
+        yield { kind: 'message_id', id: 1 };
+        yield { kind: 'content_delta', content: hybrid };
+      },
+    });
+    const r = makeRouter(adapter);
+    const s = await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', '描述项目')], tools: TOOL, stream: true, conversation_id: 'dsml-hybrid' });
+    const contents: string[] = [];
+    const calls: any[] = [];
+    for await (const c of s as AsyncIterable<any>) {
+      const d = c.choices[0].delta;
+      if (typeof d.content === 'string') contents.push(d.content);
+      if (d.tool_calls) calls.push(...d.tool_calls);
+    }
+    const text = contents.join('');
+    expect(text).not.toMatch(/dsml/i);
+    expect(text).toContain('<tool_calls>');
+    expect(calls).toHaveLength(1);
+    expect(calls[0].function.name).toBe('Read');
+    expect(JSON.parse(calls[0].function.arguments)).toEqual({ path: 'sketch.ino' });
+  });
 });

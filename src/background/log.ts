@@ -25,9 +25,11 @@ export interface LogEntry {
   // 2026-09-09（fix/full-tool-prompt）：完整内容（复制 JSON 时拿到全部 user/assistant/tool 消息原文）
   messagesFull?: string;                                        // 本请求 messages 完整 JSON
   mirrorFull?: string;                                          // 本 thread mirror 完整 JSON
-  // 2026-09-09（fix/thread-persistence）：模型输出原文（前 200 字）——「文字+JSON 没触发工具」
+  // 2026-09-09（fix/thread-persistence）：模型输出原文（前 1200 字）——「文字+JSON 没触发工具」
   // 排查：finishReason=stop 时用户只能看到 UI 文本；replySample 直接给出 deep.api 收到的模型原文，
   // 一眼判断是「无标签 JSON」还是「标签在但解析失败」。
+  // 2026-09-10（fix/dsml-tolerant-closes）：200 → 1200。DSML 块（5 个工具调用）超过 200 字符，
+  // 截断处恰好落在闭合标签之前，只能看到开标签，无法判断是不是闭合标签缺命名空间。
   replySample?: string;
   // 2026-09-09（diag/reasoning-sample）：推理/思考原文（前 200 字）——spice 用户报 Pro 模型返空 content
   // 但 finishReason=stop。严重怀疑 Pro（model_type=expert）在 DeepSeek 网页 web API 上只返 reasoning 不返

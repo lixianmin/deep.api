@@ -171,3 +171,56 @@ describe('createDsmlStreamNormalizer：流式归一化（不泄漏 DSML，产出
     expect(feedAll(['a < b', ' c']).join('')).toBe('a < b c');
   });
 });
+
+// 2026-09-10（fix/dsml-tolerant-closes）：用户 v0.1.96 现场日志——模型吐的是**混合形态**：
+// 开标签带命名空间（<｜DSML｜invoke name="Read">、<｜DSML｜parameter ...>），
+// 但闭标签是普通的 </parameter> / </invoke>（没有 ｜DSML｜ 前缀）。
+// vLLM 的正则要求 </｜DSML｜invoke>，所以一条 invoke 都匹配不上 → 解析失败 → 流式路径
+// 判「没调工具」→ finishReason=stop + DSML 原样漏出。闭标签的命名空间必须可选。
+describe('现场混合形态：闭标签省略命名空间', () => {
+  const T = DSML_TOKEN;
+  const open = (tag: string, attrs = ''): string => `<${T}${tag}${attrs}>`;
+  const oneCall =
+    `${open('invoke', ' name="Read"')}\n` +
+    `${open('parameter', ' name="path" string="true"')}sketch.ino</parameter>\n` +
+    `</invoke>`;
+
+  it('parseDsmlToolCalls：块闭标签带命名空间 + 内层闭标签不带', () => {
+    const text = `${open('tool_calls')}\n${oneCall}\n</${T}tool_calls>`;
+    const r = parseDsmlToolCalls(text);
+    expect(r).not.toBeNull();
+    expect(r!.calls).toHaveLength(1);
+    expect(r!.calls[0]!.function.name).toBe('Read');
+    expect(JSON.parse(r!.calls[0]!.function.arguments)).toEqual({ path: 'sketch.ino' });
+  });
+
+  it('parseDsmlToolCalls：块闭标签也省略命名空间（</tool_calls>）', () => {
+    const text = `${open('tool_calls')}\n${oneCall}\n</tool_calls>`;
+    const r = parseDsmlToolCalls(text);
+    expect(r).not.toBeNull();
+    expect(r!.calls).toHaveLength(1);
+  });
+
+  it('parseDsmlToolCalls：块完全没有闭标签（模型直接停）', () => {
+    const r = parseDsmlToolCalls(`${open('tool_calls')}\n${oneCall}`);
+    expect(r).not.toBeNull();
+    expect(r!.calls).toHaveLength(1);
+  });
+
+  it('流式：闭标签省略命名空间 → content 归一化成标准 <tool_calls>，不泄漏 DSML', () => {
+    const n = createDsmlStreamNormalizer();
+    const out = [`<${T}tool_calls>\n`, `${oneCall}\n`, `</${T}tool_calls>`].map((d) => n.feed(d)).join('') + n.flush();
+    expect(out).not.toMatch(/dsml/i);
+    expect(out).toContain('<tool_calls>');
+    const calls = JSON.parse(out.slice(out.indexOf('['), out.lastIndexOf(']') + 1));
+    expect(calls[0].function.name).toBe('Read');
+    expect(JSON.parse(calls[0].function.arguments)).toEqual({ path: 'sketch.ino' });
+  });
+
+  it('流式：块未闭合也在 flush 时归一化（不再 fail-open 泄漏）', () => {
+    const n = createDsmlStreamNormalizer();
+    const out = n.feed(`<${T}tool_calls>\n${oneCall}`) + n.flush();
+    expect(out).not.toMatch(/dsml/i);
+    expect(out).toContain('<tool_calls>');
+  });
+});

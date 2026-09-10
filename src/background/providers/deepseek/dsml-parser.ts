@@ -27,17 +27,19 @@ export const DSML_TOKEN = '｜DSML｜';
 const NS = '[|｜]dsml[|｜]';
 
 function blockRe(): RegExp {
-  // 反引用 \1 保证起止包裹名一致（tool_calls 配 tool_calls）
-  return new RegExp(`<${NS}(tool_calls|function_calls)>([\\s\\S]*?)</${NS}\\1>`, 'gi');
+  // 反引用 \1 保证起止包裹名一致（tool_calls 配 tool_calls）。
+  // 2026-09-10（fix/dsml-tolerant-closes）：闭标签的命名空间**可选**——现场日志里模型开标签带
+  // ｜DSML｜、闭标签却是普通的 </tool_calls> / </invoke> / </parameter>。
+  return new RegExp(`<${NS}(tool_calls|function_calls)>([\\s\\S]*?)</(?:${NS})?\\1>`, 'gi');
 }
 function blockStartRe(): RegExp {
   return new RegExp(`<${NS}(tool_calls|function_calls)>`, 'i');
 }
 function invokeRe(): RegExp {
-  return new RegExp(`<${NS}invoke\\s+name="([^"]+)"\\s*>([\\s\\S]*?)</${NS}invoke>`, 'gi');
+  return new RegExp(`<${NS}invoke\\s+name="([^"]+)"\\s*>([\\s\\S]*?)</(?:${NS})?invoke>`, 'gi');
 }
 function paramRe(): RegExp {
-  return new RegExp(`<${NS}parameter\\s+name="([^"]+)"\\s+string="(true|false)"\\s*>([\\s\\S]*?)</${NS}parameter>`, 'gi');
+  return new RegExp(`<${NS}parameter\\s+name="([^"]+)"\\s+string="(true|false)"\\s*>([\\s\\S]*?)</(?:${NS})?parameter>`, 'gi');
 }
 
 export interface DsmlParseResult { calls: ToolCall[]; content: string }
@@ -49,7 +51,13 @@ export function parseDsmlToolCalls(text: string, tools: ToolDef[] = []): DsmlPar
   for (const m of text.matchAll(blockRe())) {
     spans.push({ start: m.index ?? 0, end: (m.index ?? 0) + m[0].length, body: m[2] ?? '' });
   }
-  if (!spans.length) return null;
+  if (!spans.length) {
+    // 2026-09-10（fix/dsml-tolerant-closes）：容错——只有起始标记、没有块闭标签
+    // （模型写完 invoke 就直接停/被截断）。起始标记之后全部当块体。
+    const m = blockStartRe().exec(text);
+    if (!m) return null;
+    spans.push({ start: m.index, end: text.length, body: text.slice(m.index + m[0].length) });
+  }
   const calls: ToolCall[] = [];
   for (const span of spans) calls.push(...parseInvokes(span.body, tools));
   if (!calls.length) return null;
@@ -99,7 +107,7 @@ export function createDsmlStreamNormalizer(tools: ToolDef[] = []): DsmlStreamNor
         }
         out += pending.slice(0, m.index);
         pending = pending.slice(m.index + m[0].length);
-        open = { startText: m[0], endRe: new RegExp(`</${NS}${m[1]}>`, 'i') };
+        open = { startText: m[0], endRe: new RegExp(`</(?:${NS})?${m[1]}>`, 'i') };
         blockBody = '';
         continue;
       }
@@ -109,7 +117,7 @@ export function createDsmlStreamNormalizer(tools: ToolDef[] = []): DsmlStreamNor
       pending = pending.slice(em.index + em[0].length);
       const normalized = normalizeBlock(blockBody, tools);
       // 解析失败 fail-open：原样吐出块内容（不静默丢），让上层走 repair 路径 + 日志可见
-      out += normalized ?? open.startText + blockBody + `</${DSML_TOKEN}tool_calls>`;
+      out += normalized ?? open.startText + blockBody + em[0];
       open = null;
       blockBody = '';
     }
@@ -117,10 +125,12 @@ export function createDsmlStreamNormalizer(tools: ToolDef[] = []): DsmlStreamNor
 
   function flush(): string {
     if (!open) { const t = pending; pending = ''; return t; }
-    // 未闭合块：fail-open，原样吐出
-    const t = open.startText + blockBody + pending;
+    // 2026-09-10（fix/dsml-tolerant-closes）：未闭合块先尝试归一化——模型常常写完 invoke
+    // 就直接结束（不带块闭标签），旧实现直接 fail-open 把 DSML 原文吐给了使用方。
+    const inner = blockBody + pending;
+    const startText = open.startText;
     open = null; blockBody = ''; pending = '';
-    return t;
+    return normalizeBlock(inner, tools) ?? startText + inner;
   }
 
   return { feed, flush };
