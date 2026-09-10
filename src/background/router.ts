@@ -103,7 +103,9 @@ export class Router {
             const filename = `img${imgIdx}.${(mime.split('/')[1] || 'png')}`;
             imgIdx++;
             const up = await provider.uploadFile(ctx, bytes, mime, filename);
-            await provider.pollFileReady(ctx, up.id, { maxAttempts: 10, intervalMs: 2000 });
+            // 2026-09-10（fix/vision-errors）：poll 上限 10×2s→5×1.5s（7.5s）。超时已不再抛错
+            // （adapter 内记录 + 继续），缩短只为改善“带图发送卡很久”的体验。
+            await provider.pollFileReady(ctx, up.id, { maxAttempts: 5, intervalMs: 1500 });
             refFileIds.push(up.id);
           }
         }

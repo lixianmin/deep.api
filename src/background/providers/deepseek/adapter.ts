@@ -138,23 +138,31 @@ export function createDeepSeekAdapter(deps: AdapterDeps): ProviderAdapter {
 
     // 2026-09-09（feat/vision-multimodal）：spike #2 现场 GET /api/v0/file/fetch_files?file_ids=...
     // （无 pow）。轮询直到 status ∈ ready 类 或 FAILED。默认 10×2s = 20s 超时。
+    // 2026-09-10（fix/vision-errors）：超时**不抛错**（非致命）——参考 llmweb2api，超时只
+    // 记录然后继续发 completion（带 ref_file_ids，服务端可能已处理完）。抛错会让整条带图
+    // 请求死在 completion 之前（现场：用户带图发送无任何响应）。单次 fetch 失败也不致命。
     async pollFileReady(ctx, fileId, options) {
       const maxAttempts = options?.maxAttempts ?? DEFAULT_POLL_MAX;
       const intervalMs = options?.intervalMs ?? DEFAULT_POLL_INTERVAL_MS;
       const url = `${FILE_FETCH_TARGET}?file_ids=${encodeURIComponent(fileId)}`;
       const READY = new Set(['processed', 'ready', 'done', 'available', 'success', 'SUCCESS', 'completed', 'finished', 'uploaded']);
       const FAIL = new Set(['CONTENT_EMPTY', 'PARSE_FAILED', 'FAILED', 'ERROR']);
-      if (!deps.fetchRaw) throw classifyErr(new Error('pollFileReady: deps.fetchRaw not implemented'));
+      if (!deps.fetchRaw) return;   // 无 fetchRaw → 不等（不阻塞主流程）
       for (let i = 0; i < maxAttempts; i++) {
         await new Promise((r) => setTimeout(r, intervalMs));
-        const resp = await deps.fetchRaw(url, baseHeaders(ctx.token), { method: 'GET' });
-        const r = (resp.status >= 400 ? null : await resp.json()) as any;
-        const files = r?.data?.biz_data?.files || r?.data?.files || [];
-        const status = files[0]?.status || '';
+        let status = '';
+        try {
+          const resp = await deps.fetchRaw(url, baseHeaders(ctx.token), { method: 'GET' });
+          const r = (resp.status >= 400 ? null : await resp.json()) as any;
+          const files = r?.data?.biz_data?.files || r?.data?.files || [];
+          status = files[0]?.status || '';
+        } catch {
+          continue;   // 单次网络抖动不算致命，继续轮询
+        }
         if (READY.has(status)) return;
         if (FAIL.has(status)) throw classifyErr(new Error(`File parse failed: ${fileId} status=${status}`));
       }
-      throw classifyErr(new Error(`pollFileReady timeout after ${maxAttempts} attempts (fileId=${fileId})`));
+      console.warn(`[deep.api] pollFileReady timeout after ${maxAttempts} attempts (fileId=${fileId}) — proceeding anyway`);
     },
 
     async *streamCompletion(ctx, req) {

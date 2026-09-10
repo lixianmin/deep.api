@@ -199,6 +199,7 @@ export function mountChat(pane: HTMLElement): () => void {
       const dec = new TextDecoder('utf-8');
       let buf = '';
       let content = '';
+      let streamErr: string | null = null;
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
@@ -212,10 +213,19 @@ export function mountChat(pane: HTMLElement): () => void {
           if (payload === '[DONE]') continue;
           try {
             const j = JSON.parse(payload);
+            // 2026-09-10（fix/vision-errors）：SSE error 帧（SW 把 BridgeError 转成 error 帧推回）
+            // 必须显示——否则带图失败时用户只看到空回复（现场：带图发送无任何响应）。
+            if (j.error) { streamErr = j.error.message ?? JSON.stringify(j.error); continue; }
             const d = j.choices?.[0]?.delta;
             if (d?.content) { content += d.content; asstEl.textContent = content; }
           } catch {}
         }
+      }
+      if (streamErr) {
+        // 失败：显示错误，**不清附件**（用户可修好后重发同一张图），不污染历史
+        asstEl.textContent = '[错误] ' + streamErr;
+        stream.scrollTop = stream.scrollHeight;
+        return;
       }
       history.push({ role: 'assistant', content });
       asstEl.textContent = content;

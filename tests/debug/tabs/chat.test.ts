@@ -321,3 +321,79 @@ describe('mountChat: model option 文本 = m.description (catalog label)', () =>
     expect(opt.value).toBe('deepseek-v4-flash');
   });
 });
+// 2026-09-10（fix/vision-errors）：现场——带图发送后 chat 无任何响应（空回复），
+// 但 SW 实际发了 SSE error 帧（kind:'error' → bridge 转成 data: {error:...}）。
+// 根因：chat.ts 只解析 choices[].delta，不认识 error 帧 → 错误被吞。
+// 修：解析 {error} 帧显示 "[错误] <message>"，且不清附件（用户可重试）。
+describe('mountChat: SSE error 帧显示（vision 失败可见）', () => {
+  function makeErrorStream(msg: string): ReadableStream<Uint8Array> {
+    return new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new TextEncoder().encode(
+          `data: ${JSON.stringify({ error: { message: msg, type: 'api_error', code: 'provider_unavailable' } })}\n\ndata: [DONE]\n\n`,
+        ));
+        c.close();
+      },
+    });
+  }
+
+  it('error 帧 → assistant 显示 [错误] 内容（不再静默空回复）', async () => {
+    (globalThis as any).deepApi.models.list = vi.fn().mockResolvedValue({
+      data: [{ id: 'deepseek-flash', description: 'DeepSeek V4.1 Flash' }],
+    });
+    (globalThis as any).deepApi.chat.completions.create = vi.fn().mockResolvedValue({
+      body: makeErrorStream('vision pipeline failed: Upload failed: 401 unauthorized'),
+    });
+    const pane = document.createElement('div');
+    mountChat(pane);
+    await new Promise(r => setTimeout(r, 10));
+    const input = pane.querySelector<HTMLTextAreaElement>('[data-chat-input]')!;
+    input.value = '看图';
+    pane.querySelector<HTMLButtonElement>('[data-chat-send]')!.click();
+    await new Promise(r => setTimeout(r, 30));
+    const msgs = Array.from(pane.querySelectorAll('[data-msg]'));
+    const last = msgs[msgs.length - 1] as HTMLElement;
+    expect(last.textContent).toMatch(/\[错误\]/);
+    expect(last.textContent).toMatch(/401|vision/);
+    // 错误时不应把空 assistant 推进历史（不污染后续上下文）
+    const stream = pane.querySelector('[data-chat-stream]')!;
+    expect(stream.textContent).not.toMatch(/^\s*$/);
+  });
+
+  it('error 帧 → 附件不清除（用户可修好后重发同一张图）', async () => {
+    (globalThis as any).deepApi.models.list = vi.fn().mockResolvedValue({
+      data: [{ id: 'deepseek-flash', description: 'DeepSeek V4.1 Flash' }],
+    });
+    (globalThis as any).deepApi.chat.completions.create = vi.fn().mockResolvedValue({
+      body: makeErrorStream('upload timeout'),
+    });
+    const origFileReader = (globalThis as any).FileReader;
+    (globalThis as any).FileReader = class {
+      onload: ((e: any) => void) | null = null;
+      result: string | null = null;
+      readAsDataURL(_blob: Blob) {
+        this.result = 'data:image/png;base64,AAA';
+        queueMicrotask(() => this.onload?.({ target: this } as never));
+      }
+    };
+    try {
+      const pane = document.createElement('div');
+      mountChat(pane);
+      await new Promise(r => setTimeout(r, 10));
+      const fileInput = pane.querySelector<HTMLInputElement>('[data-chat-file-input]')!;
+      Object.defineProperty(fileInput, 'files', { value: [new Blob([new Uint8Array([1])], { type: 'image/png' })], configurable: true });
+      fileInput.dispatchEvent(new Event('change'));
+      await new Promise(r => setTimeout(r, 10));
+      expect(pane.querySelectorAll('[data-chat-thumb]').length).toBe(1);
+      // 发送（失败）
+      const input = pane.querySelector<HTMLTextAreaElement>('[data-chat-input]')!;
+      input.value = '看图';
+      pane.querySelector<HTMLButtonElement>('[data-chat-send]')!.click();
+      await new Promise(r => setTimeout(r, 30));
+      // 附件仍在
+      expect(pane.querySelectorAll('[data-chat-thumb]').length).toBe(1);
+    } finally {
+      (globalThis as any).FileReader = origFileReader;
+    }
+  });
+});

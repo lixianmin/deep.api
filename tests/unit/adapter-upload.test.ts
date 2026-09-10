@@ -117,7 +117,10 @@ describe('deepseek adapter: uploadFile + pollFileReady', () => {
     expect(polls[0]!.init.method).toBe('GET');
   });
 
-  it('pollFileReady: 持续 WIP → 上限后超时抛错', async () => {
+  // 2026-09-10（fix/vision-errors）：现场——用户带图发送后服务器无任何响应，Debug 图片过一段时间消失。
+  // 根因：pollFileReady 超时直接抛错 → completion 根本没发生 → SW 发 error 帧 → chat.ts 不识别 error 帧 → 空回复。
+  // 修：超时不再抛错（参考 llmweb2api：只记录，继续发 completion 带 ref_file_ids，服务端可能已处理完）。
+  it('pollFileReady: 持续 WIP → 超时不再抛错（非致命，继续发 completion）', async () => {
     const deps = makeDeps((path) => {
       if (path.startsWith('/api/v0/file/fetch_files')) {
         return { jsonBody: { data: { biz_data: { files: [{ status: 'processing' }] } } } };
@@ -125,8 +128,21 @@ describe('deepseek adapter: uploadFile + pollFileReady', () => {
       throw new Error('unexpected: ' + path);
     });
     const a = createDeepSeekAdapter(deps);
-    await expect(a.pollFileReady!(ctx, 'file-abc-123', { maxAttempts: 3, intervalMs: 1 }))
-      .rejects.toThrow(/timeout/i);
+    await expect(a.pollFileReady!(ctx, 'file-abc-123', { maxAttempts: 3, intervalMs: 1 })).resolves.toBeUndefined();
+  });
+
+  it('pollFileReady: fetch_files 单次抛错也不致命 → 继续轮询，超时后 resolve', async () => {
+    let calls = 0;
+    const deps = makeDeps((path) => {
+      if (path.startsWith('/api/v0/file/fetch_files')) {
+        calls++;
+        if (calls === 1) throw new Error('network flake');
+        return { jsonBody: { data: { biz_data: { files: [{ status: 'processing' }] } } } };
+      }
+      throw new Error('unexpected: ' + path);
+    });
+    const a = createDeepSeekAdapter(deps);
+    await expect(a.pollFileReady!(ctx, 'file-abc-123', { maxAttempts: 2, intervalMs: 1 })).resolves.toBeUndefined();
   });
 
   it('pollFileReady: 服务端报 FAILED → 抛错', async () => {
