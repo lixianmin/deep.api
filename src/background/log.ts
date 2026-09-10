@@ -42,6 +42,11 @@ export interface LogEntry {
   sseBytes?: number;
   ssePaths?: string[];
   sseRaw?: string;
+  // 2026-09-10（diag/request-snapshot）：本次真正发给 chat.deepseek.com 的关键参数快照
+  // （model_type / thinking / search / reasoning_effort / tool_choice / tools 名单 / ref_file_ids 数 /
+  // prompt 长度）。动机：同一模型下 demo 场景返回标准 <tool_calls>，spice 请求返回 DSML——
+  // 两条路径共用 router.create()，差异只可能在输入侧；原日志只有 client messages，无法两边 diff。
+  requestFull?: string;
 }
 
 export class RingLog {

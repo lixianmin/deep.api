@@ -29,6 +29,9 @@ interface RunState {
   parentMessageId: number | string | null;
   repairDone: boolean;
   model: ResolvedModel;
+  // 2026-09-10（diag/request-snapshot）：renderTranscript 拼出的出站 prompt 长度（不含 toolCtx 前缀
+  // 之外的差异）——spice 的大 system prompt 与 demo 一句话请求的规模差直接可见。
+  promptLen?: number;
   // 2026-09-09（diag/pro-sse-paths）：SSE 调试统计。stream 末事件里推入，与 done() 一起入 log。
   sseBytes?: number;
   ssePaths?: string[];
@@ -177,6 +180,17 @@ export class Router {
       })()
       : undefined;
     const handle = await this.runCompletion(provider, resolved, messages, stringMessages, toolCtx, conversationId, ctx, overrides, refFileIds);
+    // 2026-09-10（diag/request-snapshot）：出站参数快照——两条路径共用本函数，差异只可能在输入侧
+    // （tools 集合 / overrides / prompt 长度）。记下来用户就能拿 demo 与 spice 两条日志直接 diff。
+    const requestFull = JSON.stringify({
+      modelType: resolved.modelType,
+      thinking: resolved.thinking,
+      overrides,
+      toolChoice: p.tool_choice ?? 'auto',
+      tools: ((p.tools as ToolDef[] | undefined) ?? []).map((t) => t.function?.name),
+      refFileIds: refFileIds.length,
+      promptLen: handle.run.promptLen,
+    });
     const diag = {
       cid: handle.convId, msgsLen: messages.length, action: handle.thread.kind ? (preDecide.action === 'incremental' ? 'incremental' as const : 'rebuild' as const) : undefined,
       threadFound, mirrorLen,
@@ -193,6 +207,7 @@ export class Router {
         ssePaths: extra?.ssePaths,
         sseRaw: extra?.sseRaw,
         firstDiffIdx,
+        requestFull,
         messagesFull: JSON.stringify(messages),
         mirrorFull: threadFound
           ? JSON.stringify(preDecide.action === 'incremental' ? preDecide.thread.mirror
@@ -257,7 +272,7 @@ export class Router {
       await this.d.mapper.fail(pid, convId);
       throw err('invalid_request_error', `transcript too long: ${prompt.length} > ${resolved.limitChars}（建议缩短历史或分批）`, 400);
     }
-    const run: RunState = { parentMessageId: null, repairDone: false, model: resolved };
+    const run: RunState = { parentMessageId: null, repairDone: false, model: resolved, promptLen: prompt.length };
     const req: ProviderCompletion = { session, prompt, model: { modelType: resolved.modelType, thinking: resolved.thinking }, overrides, requestId: ctx.requestId, ...(refFileIds.length ? { refFileIds } : {}) };
     const stream = this.runExclusiveStream(provider, ctx, req);
     return { stream, session, convId, thread, run };

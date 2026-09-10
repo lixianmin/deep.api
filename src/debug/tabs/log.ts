@@ -87,6 +87,7 @@ export function mountLog(pane: HTMLElement): () => void {
           <span style="margin-left:4px;">${paths.length ? paths.join(', ') : '(none)'}</span>
         </div>
         ${(l.sseRaw ?? '') ? `<div style="margin-left:8px;margin-top:2px;color:#888;max-width:900px;word-break:break-all;">raw: ${escapeHtml(l.sseRaw!.slice(0, 400))}</div>` : ''}
+        ${(l.requestFull ?? '') ? `<div style="margin-left:8px;margin-top:2px;color:#888;max-width:900px;word-break:break-all;">req: ${escapeHtml(l.requestFull!)}</div>` : ''}
       </div>`;
     }).join('');
     listEl.querySelectorAll<HTMLButtonElement>('[data-copy]').forEach(btn => {
