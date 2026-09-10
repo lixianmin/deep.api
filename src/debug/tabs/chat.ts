@@ -20,7 +20,7 @@ export function mountChat(pane: HTMLElement): () => void {
       <input type="file" data-chat-file-input accept="image/*" multiple style="display:none;">
       <button data-chat-upload title="仅 vision-exp 模型支持图片">📎图片</button>
       <label>model <select data-chat-model></select></label>
-      <label>thinking <select data-chat-thinking><option value="">(default)</option><option value="true">true</option><option value="false">false</option></select></label>
+      <label>thinking <input type="checkbox" data-chat-thinking checked></label>
       <label><input type="checkbox" data-chat-search>search</label>
       <span style="flex:1"></span>
       <button data-chat-send>发送</button>
@@ -31,7 +31,7 @@ export function mountChat(pane: HTMLElement): () => void {
   const input = pane.querySelector<HTMLTextAreaElement>('[data-chat-input]')!;
   const sendBtn = pane.querySelector<HTMLButtonElement>('[data-chat-send]')!;
   const modelSel = pane.querySelector<HTMLSelectElement>('[data-chat-model]')!;
-  const thinkingSel = pane.querySelector<HTMLSelectElement>('[data-chat-thinking]')!;
+  const thinkingCb = pane.querySelector<HTMLInputElement>('[data-chat-thinking]')!;
   const searchCb = pane.querySelector<HTMLInputElement>('[data-chat-search]')!;
   const uploadBtn = pane.querySelector<HTMLButtonElement>('[data-chat-upload]')!;
   const fileInput = pane.querySelector<HTMLInputElement>('[data-chat-file-input]')!;
@@ -159,9 +159,8 @@ export function mountChat(pane: HTMLElement): () => void {
 
   const baseOpts = (): any => {
     const o: any = {};
-    const t = thinkingSel.value;
-    if (t === 'true') o.thinking = true;
-    else if (t === 'false') o.thinking = false;
+    if (thinkingCb.checked) o.thinking = true;
+    else o.thinking = false;
     if (searchCb.checked) o.search = true;
     return o;
   };

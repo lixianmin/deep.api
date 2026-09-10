@@ -154,6 +154,30 @@ describe('mountChat: vision 图片上传', () => {
     expect(uploadBtn!.title).toMatch(/上传图片|点击/);
   });
 
+  it('thinking 控件是 checkbox（与 search 保持一致）', async () => {
+    (globalThis as any).deepApi.models.list = vi.fn().mockResolvedValue({
+      data: [{ id: 'deepseek-flash', description: 'DeepSeek V4.1 Flash' }],
+    });
+    const pane = document.createElement('div');
+    mountChat(pane);
+    await new Promise(r => setTimeout(r, 10));
+    const thinkingCb = pane.querySelector<HTMLInputElement>('[data-chat-thinking]');
+    expect(thinkingCb).toBeTruthy();
+    expect(thinkingCb!.type).toBe('checkbox');
+  });
+
+  it('search 控件是 checkbox（回归——确认与 thinking 一致）', async () => {
+    (globalThis as any).deepApi.models.list = vi.fn().mockResolvedValue({
+      data: [{ id: 'deepseek-flash', description: 'DeepSeek V4.1 Flash' }],
+    });
+    const pane = document.createElement('div');
+    mountChat(pane);
+    await new Promise(r => setTimeout(r, 10));
+    const searchCb = pane.querySelector<HTMLInputElement>('[data-chat-search]');
+    expect(searchCb).toBeTruthy();
+    expect(searchCb!.type).toBe('checkbox');
+  });
+
   it('选 deepseek-flash 模型后，上传按钮启用（回归——旧 vision-exp 名字不出现）', async () => {
     (globalThis as any).deepApi.models.list = vi.fn().mockResolvedValue({
       data: [
