@@ -1,5 +1,5 @@
 // popup.ts - 通过 port 与 SW 通信；只在 MV3 popup 内执行（chrome.* 在此文件中）
-import { formatAuthState } from './snippet';
+import { formatAuthState, pickForensic } from './snippet';
 
 const port = chrome.runtime.connect({ name: 'deepapi-panel' });
 type LogEntry = {
@@ -130,6 +130,23 @@ document.getElementById('btn-copy-log')!.addEventListener('click', () => {
   }).catch((e) => {
     console.error('[deep.api popup] 复制日志失败', e);
   });
+});
+
+// 2026-09-10（feat/log-b64-export）：只复制**最近一条**的取证字段。
+// 「复制」按钮把 200 条完整日志序列化（含 messagesFull / mirrorFull，可达 MB），贴给 AI 不现实；
+// 取证只需要模型原文与其 base64（DSML 标记会被粘贴链吃掉，base64 不会）。
+document.getElementById('btn-copy-forensic')!.addEventListener('click', () => {
+  const btn = document.getElementById('btn-copy-forensic') as HTMLButtonElement;
+  const orig = btn.textContent;
+  const flash = (msg: string): void => {
+    btn.textContent = msg;
+    setTimeout(() => { btn.textContent = orig ?? '复制取证'; }, 1500);
+  };
+  const last = (state.log ?? []).at(-1) as unknown as Record<string, unknown> | undefined;
+  if (!last) { flash('没有日志'); return; }
+  navigator.clipboard.writeText(JSON.stringify(pickForensic(last), null, 2))
+    .then(() => flash(`已复制取证 v${String(last.version ?? '?')}`))
+    .catch((e) => { console.error('[deep.api popup] 复制取证失败', e); });
 });
 
 // "Open Debug in new tab" 按钮：chrome-extension:// 协议代替 file://（Chrome 扩展开不了 file://）
