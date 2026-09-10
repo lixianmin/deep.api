@@ -31,7 +31,11 @@ function makeMockAdapter(opts: {
       yield { kind: 'content_delta', content: '看到了，这是电路图' };
       yield { kind: 'usage', inputTokens: 100, outputTokens: 50 };
     },
-    models: [],
+    models: [
+      { id: 'deepseek-v4-flash', provider: 'deepseek', description: 'deepseek-v4-flash' },
+      { id: 'deepseek-v4-pro', provider: 'deepseek', description: 'deepseek-v4-pro' },
+      { id: 'deepseek-v4-flash-vision-exp', provider: 'deepseek', description: 'deepseek-v4-flash-vision-exp' },
+    ],
     resolveModel(): ResolvedModel | null {
       return { modelId: 'deepseek-v4-flash-vision-exp', modelType: 'vision', thinking: true, limitChars: 100000 };
     },
@@ -43,7 +47,7 @@ function makeMockAdapter(opts: {
   } as ProviderAdapter & { streamCalls: ProviderCompletion[] };
 }
 
-function makeRouter(adapter: ProviderAdapter): Router {
+function makeRouter(adapter: ProviderAdapter, storageStub?: { get: (k: string) => Promise<unknown | undefined> }): Router {
   const now = vi.fn(() => 1000);
   const mapper = new SessionMapper(
     { createSession: async () => ({ webSessionId: 's1' }), deleteSession: async () => {}, now },
@@ -52,7 +56,7 @@ function makeRouter(adapter: ProviderAdapter): Router {
   const queue = new Queue({ timeoutMs: 60_000, now });
   return new Router({
     registry: { deepseek: adapter }, mapper, queue, now, log: new RingLog(20),
-    storage: { get: async () => undefined, set: async () => undefined },
+    storage: { get: storageStub?.get ?? (async () => undefined), set: async () => undefined },
     version: '0.0.0-test',
   });
 }
@@ -155,5 +159,38 @@ describe('router: vision multimodal 路由', () => {
     expect(uploadFile).toHaveBeenCalledTimes(2);
     expect(adapter.streamCalls[0]!.refFileIds).toEqual(['file-img0.png', 'file-img1.png']);
     expect(adapter.streamCalls[0]!.prompt).toBe('[image][image]');
+  });
+});
+
+// 2026-09-10（feat/models-sync）：router.models() 合并 catalog（Task 5）。
+// 验证：当 storage 有 modelsCatalog 且在 7 天 TTL 内，description 被替换为捕获的 label；
+//  storage 缺失 / 超时 → fall back 到 hardcoded description（= id）。
+describe('router.models(): merged catalog from storage', () => {
+  it('falls back to hardcoded descriptions when no catalog in storage', async () => {
+    const adapter = makeMockAdapter({});
+    const router = makeRouter(adapter, { get: async () => undefined });
+    const r = await router.models();
+    expect(r.data.map((m) => m.description)).toEqual([
+      'deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-v4-flash-vision-exp',
+    ]);
+  });
+
+  it('enriches description with captured label when catalog is fresh (within 7d TTL)', async () => {
+    const capturedAt = Date.now();
+    const adapter = makeMockAdapter({});
+    const router = makeRouter(adapter, {
+      get: async (k: string) => k === 'modelsCatalog' ? {
+        source: 'chat.deepseek.com', capturedAt,
+        models: [
+          { label: 'DeepSeek V4 Flash' },
+          { label: 'DeepSeek V4 Pro' },
+          { label: 'DeepSeek V4 Flash Vision Exp' },
+        ],
+      } : undefined,
+    });
+    const r = await router.models();
+    expect(r.data.map((m) => m.description)).toEqual([
+      'DeepSeek V4 Flash', 'DeepSeek V4 Pro', 'DeepSeek V4 Flash Vision Exp',
+    ]);
   });
 });

@@ -2,6 +2,7 @@ import { BridgeError } from '../shared/protocol';
 import type { ApiErrorCode, ChatCompletion, ChatCompletionChunk, Message, ModelInfo, ToolCall, ToolChoice, ToolDef } from '../shared/api-types';
 import type { ProviderAdapter, ProviderCompletion, ProviderContext, ProviderId, ProviderSession, ProviderStreamEvent, ResolvedModel } from './providers/adapter';
 import { extractImageRefs, renderMessageContent } from './vision-pipeline';
+import { labelToModelId } from '../content/models-sync';
 import { SessionMapper, type ThreadEntry } from './session-mapper';
 import { Queue, QueueTimeoutError } from './queue';
 import { renderTranscript, renderTail, limitCharsFor } from './transcript-renderer';
@@ -47,7 +48,19 @@ export class Router {
 
 
   async models(): Promise<{ object: 'list'; data: ModelInfo[] }> {
-    return { object: 'list', data: Object.values(this.d.registry).flatMap(p => p.models) };
+    const hardcoded = Object.values(this.d.registry).flatMap(p => p.models);
+    // 2026-09-10（feat/models-sync）：合并 chrome.storage.local 里的 modelsCatalog
+    // （Task 3 getModelsCatalog 写到 storage）——匹配 id 后用 catalog label 替换 description。
+    // catalog 缺失 / 超 7 天 TTL → fall back 到 hardcoded。
+    const catalog = await loadCatalogFromStorage(this.d.storage);
+    if (!catalog) return { object: 'list', data: hardcoded };
+    return {
+      object: 'list',
+      data: hardcoded.map((m) => {
+        const label = catalog.models.find((o) => labelToModelId(o.label) === m.id)?.label;
+        return { ...m, description: label ?? m.description };
+      }),
+    };
   }
 
   async create(token: string, rawParams: unknown): Promise<ChatCompletion | AsyncIterable<ChatCompletionChunk>> {
@@ -388,4 +401,20 @@ function mapErrStatic(e: unknown, registry: Record<ProviderId, ProviderAdapter>)
     if (a.isUnavailable(e)) return err('provider_unavailable', 'provider unavailable（网络/WAF/未登录）', 503);
   }
   return err('internal_error', (e as Error).message ?? 'unknown error', 500);
+}
+
+// 2026-09-10（feat/models-sync）：从 storage 读 catalog，带 7d TTL 验证。返 null 表示 fall back 到 hardcoded。
+interface CatalogShape { capturedAt: number; models: { label: string; value?: string }[] }
+const CATALOG_TTL_MS = 7 * 24 * 3600 * 1000;
+async function loadCatalogFromStorage(
+  storage: RouterDeps['storage'],
+): Promise<CatalogShape | null> {
+  try {
+    const raw = await storage.get('modelsCatalog');
+    if (!raw || typeof raw !== 'object') return null;
+    const r = raw as Partial<CatalogShape>;
+    if (typeof r.capturedAt !== 'number' || !Array.isArray(r.models)) return null;
+    if (Date.now() - r.capturedAt > CATALOG_TTL_MS) return null;
+    return r as CatalogShape;
+  } catch { return null; }
 }

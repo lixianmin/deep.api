@@ -8,6 +8,7 @@ import { PowSolver, instantiateDeepSeekWasm, type WasmInstance } from './provide
 import { isBridgeRequest, type BridgeResponseMsg } from '../shared/protocol';
 import type { ChatCompletionChunk } from '../shared/api-types';
 import { createRegistry } from './providers/registry';
+import { onCatalogUpdate } from './models-sync';
 
 const STORAGE = chrome.storage.local;
 const DEEPSEEK_API_BASE = 'https://chat.deepseek.com/api/v0';
@@ -274,6 +275,14 @@ chrome.runtime.onConnect.addListener((port) => {
         if (!token) {
           const { error, status } = { error: { error: { message: '未登录 chat.deepseek.com，请先在浏览器中登录', type: 'api_error', code: 'provider_unavailable' } }, status: 503 };
           safePost({ __deepApi: { id: env.id, kind: 'error', error } } as unknown as BridgeResponseMsg);
+          return;
+        }
+        // 2026-09-10（feat/models-sync）：content script 推 catalog 到 SW（Task 2 / Task 5）。
+        // 不走 Router，直接调 onCatalogUpdate 写 chrome.storage.local；router.models() 自己读。
+        if (env.method === 'models-catalog:update') {
+          const params = env.params as { models?: { label: string; value?: string }[] };
+          if (Array.isArray(params?.models)) onCatalogUpdate(params.models);
+          safePost({ __deepApi: { id: env.id, kind: 'done' } } as unknown as BridgeResponseMsg);
           return;
         }
         if (env.method === 'chat.completions.create') {
