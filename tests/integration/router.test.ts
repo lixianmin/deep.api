@@ -6,6 +6,7 @@ import { RingLog } from '../../src/background/log';
 import type { ProviderAdapter, ProviderCompletion, ProviderContext, ProviderSession, ProviderStreamEvent } from '../../src/background/providers/adapter';
 import type { Message } from '../../src/shared/api-types';
 import { resolveModel as clientResolveModel } from '../../src/background/providers/deepseek/client';
+import { DSML_TOKEN } from '../../src/background/providers/deepseek/dsml-parser';
 
 const MODELS = [
   { id: 'deepseek-v4-flash', provider: 'deepseek', description: 'v4-flash' },
@@ -586,5 +587,57 @@ describe('持久化钩子（fix/thread-persistence + fix/persist-debounce）', (
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// 2026-09-10（fix/dsml-tool-parser）：DeepSeek V4 原生工具协议 DSML（<｜DSML｜tool_calls>…）。
+// 修复前：tool-pipeline 里的 DSML 正则写的是小写 <｜dsml｜tool_calls> + 错误结束标签 <｜dsml｜>，
+// 永远匹配不上真货 → hasToolTags=false → 流式路径判定「模型没调工具」→ DSML 原样透传给 spice、
+// finish_reason 记成 stop。修复后：归一化器把 DSML 块重写成标准 <tool_calls> JSON，
+// 并按既有路径产出结构化 tool_calls。
+describe('DSML 工具调用归一化（fix/dsml-tool-parser）', () => {
+  const T = DSML_TOKEN;
+  const TOOL = [{ type: 'function' as const, function: { name: 'Read', description: 'read', parameters: { type: 'object', properties: { path: { type: 'string' }, limit: { type: 'number' } } } } }];
+  // vLLM docstring 形态：块 + invoke + string="true"/string="false" 参数
+  const DELTAS = [
+    '好的我读一下\n',
+    `<${T}tool_calls>\n`,
+    `<${T}invoke name="Read">\n`,
+    `<${T}parameter name="path" string="true">sketch.ino</${T}parameter>\n`,
+    `<${T}parameter name="limit" string="false">200</${T}parameter>\n`,
+    `</${T}invoke>\n`,
+    `</${T}tool_calls>`,
+  ];
+
+  it('fail-to-pass: 流式 DSML → content 是标准 <tool_calls>（不含 DSML），tool_calls 结构化产出', async () => {
+    const adapter = stubAdapter({
+      streamCompletion: async function* () {
+        yield { kind: 'message_id', id: 1 };
+        for (const d of DELTAS) yield { kind: 'content_delta', content: d };
+      },
+    });
+    const r = makeRouter(adapter);
+    const s = await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', '描述项目')], tools: TOOL, stream: true, conversation_id: 'dsml-cid' });
+    const contents: string[] = [];
+    const calls: any[] = [];
+    for await (const c of s as AsyncIterable<any>) {
+      const d = c.choices[0].delta;
+      if (typeof d.content === 'string') contents.push(d.content);
+      if (d.tool_calls) calls.push(...d.tool_calls);
+    }
+    const text = contents.join('');
+    expect(text).toContain('好的我读一下');
+    expect(text).toContain('<tool_calls>');
+    expect(text).toContain('</tool_calls>');
+    expect(text).not.toMatch(/dsml/i);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].function.name).toBe('Read');
+    expect(JSON.parse(calls[0].function.arguments)).toEqual({ path: 'sketch.ino', limit: 200 });
+    // mirror 存的就是发给客户端的文本（v0.1.91 一致性决策）→ 下轮 spice 回灌可 incremental
+    const thread = (r as any).d.mapper.threads.get('deepseek:dsml-cid');
+    const asst = thread.mirror[thread.mirror.length - 1]!;
+    expect(asst.content).not.toMatch(/dsml/i);
+    expect(asst.content).toContain('<tool_calls>');
+    expect(asst.tool_calls[0].function.name).toBe('Read');
   });
 });

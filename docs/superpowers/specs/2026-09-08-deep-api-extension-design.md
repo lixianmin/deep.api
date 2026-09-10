@@ -117,8 +117,9 @@ interface ThreadState {
 
 - **注入**：`tools` 非空且 `tool_choice !== 'none'` 时，向 prompt 追加三段（格式规范 / 工具定义 / 调用指令），用标签对包裹结果（识别 `tool_call_begin/end`、`tool_calls`、`tool_call` 三组标签，容错匹配，跳过代码块）。
 - **解析**：取标签内 JSON 数组/对象 → 结构校验（名字、参数、id）。
+- **DSML 归一化**（2026-09-10 补）：DeepSeek V4 的**原生**工具协议是 DSML（DeepSeek Markup Language）：`<｜DSML｜tool_calls>` 包裹、`<｜DSML｜invoke name="X">` 单调用、`<｜DSML｜parameter name="K" string="true|false">V</｜DSML｜parameter>` 参数（全角 ｜ U+FF5C、大写 DSML；`string="true"` 是字面字符串，`"false"` 按 JSON/schema 类型解释）。模型在长上下文下会从 prompt 教的 `<tool_calls>` 回退到它；网页 web API 无法禁用（官方服务端用 guided decoding 强制，网页端没这个钩子）。实现为 **vLLM `DeepSeekV32ToolParser`/`DeepSeekV4ToolParser` 的 TS 移植**（Apache-2.0，`src/background/providers/deepseek/dsml-parser.ts`）：非流式提取 + 流式归一化（块外逐段透传、只扣 `partial_tag_overlap` 的尾巴；块内缓冲到结束标记后**重写成标准 `<tool_calls>[…]</tool_calls>` 文本**）。
 - **三层修复**：① 文本层（转义反斜杠、剥离围栏）② 结构层（补引号/去尾逗号）③ 模型兜底（对同一线程追加"请修复 JSON"重问 1 次，再失败 → 400 `tool_parse_error`）。
-- **流式**：内容增量照常推送；工具调用在终止分块前以**完整 tool_calls 数组**发出（`finish_reason: 'tool_calls'`），不做参数增量流（v2 再考虑）。
+- **流式**：内容增量照常推送，但带 `tools` 时先过 DSML 归一化器（见上）——使用方收到的 content 里只有标准 `<tool_calls>` 文本，不会看到 DSML；工具调用在终止分块前以**完整 tool_calls 数组**发出（`finish_reason: 'tool_calls'`），不做参数增量流（v2 再考虑）。
 - 非流式：`message.tool_calls` 返回。
 - `tool_choice: 'function'` → 指令限定调用该函数；`parallel_tool_calls` 忽略（文档注明）。
 - 工具结果为 `role: 'tool'` 的消息在下一轮转录中作为工具结果文本块呈现。

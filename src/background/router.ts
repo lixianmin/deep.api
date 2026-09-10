@@ -8,6 +8,7 @@ import { Queue, QueueTimeoutError } from './queue';
 import { renderTranscript, renderTail, limitCharsFor } from './transcript-renderer';
 import { eventToChunks, finalChunk, toAggregate, toolCallDeltaChunks, type StreamAggregate, type StreamContext } from './chunk-encoder';
 import { buildToolPrompt, parseToolCalls, hasToolTags, type ToolContext } from './tool-pipeline';
+import { createDsmlStreamNormalizer } from './providers/deepseek/dsml-parser';
 import type { RingLog } from './log';
 
 export interface RouterDeps {
@@ -331,7 +332,7 @@ export class Router {
   private async finalize(provider: ProviderAdapter, handle: { session: ProviderSession; convId: string; thread: ThreadEntry; run: RunState }, messages: Message[], agg: StreamAggregate, ctx: ProviderContext, toolCtx: ToolContext): Promise<void> {
     let toolCalls: ToolCall[] = [];
     if (toolCtx.promptSuffix !== '' && !handle.run.repairDone) {
-      const parsed = parseToolCalls(agg.content);
+      const parsed = parseToolCalls(agg.content, toolCtx.tools);
       if (parsed) {
         toolCalls = parsed.calls; agg.content = parsed.remainder; agg.finishReason = 'tool_calls';
       } else if (!hasToolTags(agg.content)) {
@@ -350,7 +351,7 @@ export class Router {
         let buf = '';
         try {
           for await (const ev of provider.streamCompletion(ctx, repairReq)) if (ev.kind === 'content_delta') buf += ev.content;
-          const p2 = parseToolCalls(buf);
+          const p2 = parseToolCalls(buf, toolCtx.tools);
           if (p2) { toolCalls = p2.calls; agg.content = p2.remainder; agg.finishReason = 'tool_calls'; }
           else { await this.d.mapper.fail(provider.id, handle.convId); throw err('invalid_request_error', 'tool call parse failed after repair retry', 400); }
         } catch (e) {
@@ -375,8 +376,21 @@ export class Router {
     const self = this;
     const gen = (async function* () {
       try {
+        // 2026-09-10（fix/dsml-tool-parser）：带 tools 时 content 增量先过 DSML 归一化器。
+        // DeepSeek V4 的原生工具协议是 DSML（<｜DSML｜tool_calls> / <｜DSML｜invoke name="X">）；
+        // 直接透传使用方（spice）按标准 <tool_calls> 解析不了。归一化器在块外逐段透传
+        // （只扣住可能是起始标记前缀的尾巴），块内缓冲到结束标记后重写成标准 <tool_calls> JSON。
+        const dsml = toolCtx.promptSuffix !== '' ? createDsmlStreamNormalizer(toolCtx.tools) : null;
         // 队列锁已在 runCompletion 内的 runExclusiveStream 持有，此处直接消费 handle.stream 即可。
         for await (const ev of handle.stream) {
+          if (dsml && ev.kind === 'content_delta') {
+            const text = dsml.feed(ev.content);
+            if (text) {
+              agg.content += text;
+              for (const c of eventToChunks({ ...ev, content: text }, cctx)) yield c;
+            }
+            continue;
+          }
           for (const c of eventToChunks(ev, cctx)) yield c;
           if (ev.kind === 'content_delta') agg.content += ev.content;
           if (ev.kind === 'think_delta') agg.reasoning += ev.content;
@@ -391,12 +405,19 @@ export class Router {
             handle.run.sseRaw = ev.rawSample;
           }
         }
+        if (dsml) {
+          const tail = dsml.flush();
+          if (tail) {
+            agg.content += tail;
+            for (const c of eventToChunks({ kind: 'content_delta', content: tail }, cctx)) yield c;
+          }
+        }
         // 2026-09-09（fix/mirror-content）：SSE content delta 发出的原始完整文本（含 <tool_calls> 标签），
         // 与 spice 端 asst.content 保持一致——parseToolCalls 剥标签后的 remainder 只用于
         // 非流式聚合返回（toAggregate）与 toolCalls 提取，不再写进 mirror。
         const sentRawContent = agg.content;
         if (toolCtx.promptSuffix !== '' && !handle.run.repairDone) {
-          const parsed = parseToolCalls(agg.content);
+          const parsed = parseToolCalls(agg.content, toolCtx.tools);
           if (parsed) {
             agg.toolCalls = parsed.calls; agg.content = parsed.remainder; agg.finishReason = 'tool_calls';
             // OpenAI SSE 兼容：每个 tool_call 拆为独立 chunk，带 index，让消费者可按 index 增量拼接

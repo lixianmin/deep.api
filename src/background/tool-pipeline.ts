@@ -1,4 +1,5 @@
 import type { ToolChoice, ToolDef, ToolCall } from '../shared/api-types';
+import { parseDsmlToolCalls, hasDsmlToolTags } from './providers/deepseek/dsml-parser';
 
 /** ds-free-api 默认工具标签范集（spec §4.4）。含 DeepSeek Vision（deepseek-v4-flash-vision-exp）
  *  的 DSML 包裹——Vision 不听 prompt 里教的 <tool_calls>，自带 DSML 格式（DeepSeek Markup
@@ -8,10 +9,11 @@ export const TOOL_TAGS = {
   ends: ['<|tool_call_end|>', '</tool_calls>', '</tool_call>', '<｜｜DSML｜｜>'] as const,
 };
 
-export interface ToolContext { promptSuffix: string }
+/** tools 透传给调用方：DSML 解析需要工具 schema 才能把 `string="false"` 参数转成正确类型。 */
+export interface ToolContext { promptSuffix: string; tools: ToolDef[] }
 
 export function buildToolPrompt(tools: ToolDef[], toolChoice: ToolChoice): ToolContext {
-  if (!tools?.length || toolChoice === 'none') return { promptSuffix: '' };
+  if (!tools?.length || toolChoice === 'none') return { promptSuffix: '', tools: [] };
   const defs = tools.map(t => `- ${t.function.name}${t.function.description ? `: ${t.function.description}` : ''}\n  参数 JSON Schema: ${JSON.stringify(t.function.parameters ?? {})}`).join('\n');
   const formatBlock = `### 格式规范
 将工具调用输出为 JSON 数组，包裹在 <tool_calls>…</tool_calls> 内，每个元素形如：
@@ -26,12 +28,14 @@ export function buildToolPrompt(tools: ToolDef[], toolChoice: ToolChoice): ToolC
         ? `仅可调用工具 ${toolChoice.function.name}。`
         : '按需调用。';
   const instructionBlock = `### 调用指令\n${instruction}`;
-  return { promptSuffix: `\n\n${formatBlock}\n\n${defsBlock}\n\n${instructionBlock}\n` };
+  return { promptSuffix: `\n\n${formatBlock}\n\n${defsBlock}\n\n${instructionBlock}\n`, tools };
 }
 
 /** 内容中是否存在"可能为工具调用"的标签块（用于区分"模型未调用工具"与"调用了但 JSON 解析失败"）。
  *  相比朴素 findBlocks，额外要求块内 JSON 至少能 coerce 出一个 ToolCall，避免纯文本提及 tool_calls 误判。 */
 export function hasToolTags(content: string): boolean {
+  // DSML（DeepSeek V4 原生协议）：包裹标记几乎不可能出现在普通散文里，直接认标记。
+  if (hasDsmlToolTags(content)) return true;
   const blocks = findBlocks(content);
   if (!blocks.length) return false;
   for (const b of blocks) {
@@ -55,11 +59,17 @@ export function hasToolTags(content: string): boolean {
   return false;
 }
 
-/** Parse tool-call blocks. Returns null if no tag found or irrecoverable. */
-export function parseToolCalls(content: string): { calls: ToolCall[]; remainder: string } | null {
+/** Parse tool-call blocks. Returns null if no tag found or irrecoverable.
+ *  `tools` 仅在 DSML 分支需要（按 schema 决定 `string="false"` 参数的类型）。 */
+export function parseToolCalls(content: string, tools: ToolDef[] = []): { calls: ToolCall[]; remainder: string } | null {
   if (!content) return null;
   const blocks = findBlocks(content);
   if (blocks.length) return parseBlocks(content, blocks);
+  // 2026-09-10（fix/dsml-tool-parser）：DeepSeek V4 原生工具协议是 DSML
+  // （<｜DSML｜tool_calls> / <｜DSML｜invoke name="X">）——vLLM parser 的 TS 移植，
+  // 见 providers/deepseek/dsml-parser.ts。优先于下面的代码块/裸 JSON 兜底（那两个形状更宽松）。
+  const dsml = parseDsmlToolCalls(content, tools);
+  if (dsml) return { calls: dsml.calls, remainder: dsml.content };
   // 无标签块 → fallback：模型可能用代码块包裹工具调用 JSON（本地实测 2026-09）
   const fence = findCodeFenceBlocks(content);
   if (fence.length) {
