@@ -20,6 +20,11 @@
  *      权威实现都把它当字面量写死（vLLM 的 regex、llama.cpp build_grammar），但 v0.1.97 现场
  *      replySample 整段没有 ｜DSML｜——沿用「必须带命名空间」等于链式失败：
  *      hasDsmlToolTags=false → hasToolTags=false → router 判「模型没调工具」→ 静默 stop。
+ *   4. 2026-09-10（fix/dsml-bar-run）：命名空间两侧的竖线放宽成 **1 个或多个**，容忍其后的空白，
+ *      并额外接受包裹名 `calls`。依据是 v0.1.100 现场 `rawB64`（经 base64 字节级对齐）：
+ *      两侧各 2 个 ｜、DSML 与标签名之间多一个空格、包裹名是 `calls`（`tool_` 整段不在）。
+ *      网页 API 没有 guided decoding（官方服务端有），模型是在自己学的分布上复现这个特殊标记，
+ *      所以形态会持续漂移——因此**检测判据刻意宽于解析判据**，解析不出的仍走 repair/400，绝不静默透传。
  */
 
 import type { ToolCall, ToolDef } from '../../../shared/api-types';
@@ -27,24 +32,39 @@ import type { ToolCall, ToolDef } from '../../../shared/api-types';
 /** 规范 token（全角 ｜ U+FF5C，大写 DSML）。匹配时放宽（见文件头偏差说明）。 */
 export const DSML_TOKEN = '｜DSML｜';
 
-/** 命名空间**必需**片段：`[|｜]dsml[|｜]`，配合 `i` 标志同时容忍大小写与 ASCII 竖线。 */
-const NS_REQUIRED = '[|｜]dsml[|｜]';
-/** 命名空间**可选**（现场字节里它经常整段不在，见文件头偏差 3）。 */
-const NS = `(?:${NS_REQUIRED})?`;
+/**
+ * 命名空间里的竖线串：**1 个或多个**全角 ｜ 或 ASCII |。
+ * 2026-09-10（fix/dsml-bar-run）：现场 rawB64 经 base64 字节级对齐后，两侧各是 **2 个**（不是 1 个）。
+ */
+const BARS = '[|｜]+';
+/** 命名空间片段（可选）+ 其后的空白。现场：`<` + 两竖线 + DSML + 两竖线 + **空格** + 标签名。 */
+const NS = `(?:${BARS}DSML${BARS})?\\s*`;
+/**
+ * 工具调用包裹标签名。`calls` 是现场实测形态——`tool_` 整段不在（原因未知，见文件头偏差 4）；
+ * 不写成通配是因为 `calls` 这类词可能在普通散文里出现，宽松判定留在检测层（见 dsmlMarkerRe）。
+ * 保留**捕获组**：blockStartRe 靠 m[1] 拿包裹名去拼闭标签正则；blockRe 靠 \1 做反引用。
+ */
+const BLOCK_TAG = '(tool_calls|function_calls|calls)';
 
 function blockRe(): RegExp {
-  // 反引用 \1 保证起止包裹名一致（tool_calls 配 tool_calls）。
+  // 反引用 \1 保证起止包裹名一致（calls 配 calls）。
   // 2026-09-10（fix/dsml-tolerant-closes）：闭标签的命名空间**可选**——现场日志里模型开标签带
   // ｜DSML｜、闭标签却是普通的 </tool_calls> / </invoke> / </parameter>。
-  // 2026-09-10（fix/dsml-namespace-optional）：开标签的命名空间同样可选——现场 replySample 整段没有 ｜DSML｜。
-  return new RegExp(`<${NS}(tool_calls|function_calls)>([\\s\\S]*?)</${NS}\\1>`, 'gi');
+  // 2026-09-10（fix/dsml-namespace-optional）：开标签的命名空间同样可选。
+  // 2026-09-10（fix/dsml-bar-run）：竖线个数放宽成 1+，并容忍其后的空白。
+  return new RegExp(`<${NS}${BLOCK_TAG}>([\\s\\S]*?)</${NS}\\1>`, 'gi');
 }
 function blockStartRe(): RegExp {
-  return new RegExp(`<${NS}(tool_calls|function_calls)>`, 'i');
+  return new RegExp(`<${NS}${BLOCK_TAG}>`, 'i');
 }
-/** 只认带命名空间的块起始（用来区分「确定是 DSML」与「正文恰好提到 <tool_calls>」）。 */
-function namespacedBlockStartRe(): RegExp {
-  return new RegExp(`<${NS_REQUIRED}(tool_calls|function_calls)>`, 'i');
+/**
+ * DSML 命名空间标记本体：`<` + 1+ 竖线 + DSML + 1+ 竖线。**只用于检测**（解析走上面的严格正则）。
+ * 检测必须宽于解析：现场字节的竖线个数、其后空白乃至标签名都会漂移，检测一旦漏掉，
+ * DSML 就会被当普通散文静默透传（v0.1.100 现场就是这么漏的）。
+ * `call` + `s` 这类普通英文词不会出现 `<` + 竖线 + `DSML` 的组合，所以不会误判。
+ */
+function dsmlMarkerRe(): RegExp {
+  return new RegExp(`<${BARS}DSML${BARS}`, 'i');
 }
 function invokeRe(): RegExp {
   return new RegExp(`<${NS}invoke\\s+name="([^"]+)"\\s*>([\\s\\S]*?)</${NS}invoke>`, 'gi');
@@ -52,9 +72,13 @@ function invokeRe(): RegExp {
 function paramRe(): RegExp {
   return new RegExp(`<${NS}parameter\\s+name="([^"]+)"\\s+string="(true|false)"\\s*>([\\s\\S]*?)</${NS}parameter>`, 'gi');
 }
-/** invoke/parameter 标记（命名空间可选）。普通散文里不会出现，用来区分「块体是工具标记」与「正文提到 <tool_calls>」。 */
+/** 无命名空间的裸工具标记（`<invoke name=` / `<parameter name=`），命名空间可选。 */
 function invokeMarkRe(): RegExp {
   return new RegExp(`<${NS}(?:invoke|parameter)\\s+name=`, 'i');
+}
+/** 文本是否含「工具调用」形状的标记（DSML 命名空间 或 裸 invoke/parameter）。 */
+function isToolMarkup(text: string): boolean {
+  return dsmlMarkerRe().test(text) || invokeMarkRe().test(text);
 }
 
 export interface DsmlParseResult { calls: ToolCall[]; content: string }
@@ -85,12 +109,10 @@ export function parseDsmlToolCalls(text: string, tools: ToolDef[] = []): DsmlPar
 }
 
 /** 文本里是否存在 DSML 工具调用标记（给 hasToolTags 用：区分「没调工具」与「调了但解析失败」）。
- *  2026-09-10（fix/dsml-namespace-optional）：不能只认块起始——命名空间被剥离后，裸 `<tool_calls>`
- *  与正文里单纯提到它的句子无法区分（那会误触发 repair）。改为「带命名空间的块起始」或
- *  「invoke/parameter 标记」二者其一——后两者不会出现在普通散文里。 */
+ *  判据必须**宽于解析**：现场字节的竖线个数、其后空白、乃至标签名都会漂移（见文件头偏差 3/4）。
+ *  检测一旦漏掉，DSML 就被当普通散文静默透传——v0.1.100 现场正是如此。 */
 export function hasDsmlToolTags(text: string): boolean {
-  if (!text) return false;
-  return namespacedBlockStartRe().test(text) || invokeMarkRe().test(text);
+  return !!text && isToolMarkup(text);
 }
 
 export interface DsmlStreamNormalizer {
@@ -113,19 +135,14 @@ export interface DsmlStreamNormalizer {
  * `<tool_calls>`，原样透传（否则会把普通散文吞掉，并误触发一次 repair）。
  */
 export function createDsmlStreamNormalizer(tools: ToolDef[] = []): DsmlStreamNormalizer {
-  // 裸起始标记也要扣住尾巴：命名空间被剥离时 <tool_calls> 可能正好被 delta 切断。
-  const startTokens = [
-    `<${DSML_TOKEN}tool_calls>`, `<${DSML_TOKEN}function_calls>`,
-    '<tool_calls>', '<function_calls>',
-  ];
   const unparsed: string[] = [];
   let pending = '';
-  let open: { startText: string; endRe: RegExp; namespaced: boolean } | null = null;
+  let open: { startText: string; endRe: RegExp } | null = null;
   let blockBody = '';
 
   /** 块无法归一化时：是工具标记 → 扣进 unparsed；只是正文提到 <tool_calls> → 原样透传。 */
-  function discardOrPassThrough(raw: string, namespaced: boolean): string {
-    if (namespaced || invokeMarkRe().test(raw)) { unparsed.push(raw); return ''; }
+  function discardOrPassThrough(raw: string): string {
+    if (isToolMarkup(raw)) { unparsed.push(raw); return ''; }
     return raw;
   }
 
@@ -137,14 +154,14 @@ export function createDsmlStreamNormalizer(tools: ToolDef[] = []): DsmlStreamNor
         const m = blockStartRe().exec(pending);
         if (!m) {
           // 扣住「可能是起始标记前缀」的尾巴，避免标记被 delta 切断时泄漏半个标签
-          const hold = maxOverlap(pending, startTokens);
+          const hold = partialMarkerHold(pending);
           out += pending.slice(0, pending.length - hold);
           pending = pending.slice(pending.length - hold);
           return out;
         }
         out += pending.slice(0, m.index);
         pending = pending.slice(m.index + m[0].length);
-        open = { startText: m[0], endRe: new RegExp(`</${NS}${m[1]}>`, 'i'), namespaced: namespacedBlockStartRe().test(m[0]) };
+        open = { startText: m[0], endRe: new RegExp(`</${NS}${m[1]}>`, 'i') };
         blockBody = '';
         continue;
       }
@@ -154,7 +171,7 @@ export function createDsmlStreamNormalizer(tools: ToolDef[] = []): DsmlStreamNor
       pending = pending.slice(em.index + em[0].length);
       const raw = open.startText + blockBody + em[0];
       const normalized = normalizeBlock(blockBody, tools);
-      out += normalized ?? discardOrPassThrough(raw, open.namespaced);
+      out += normalized ?? discardOrPassThrough(raw);
       open = null;
       blockBody = '';
     }
@@ -165,34 +182,31 @@ export function createDsmlStreamNormalizer(tools: ToolDef[] = []): DsmlStreamNor
     // 2026-09-10（fix/dsml-tolerant-closes）：未闭合块先尝试归一化——模型常常写完 invoke
     // 就直接结束（不带块闭标签）。归一化仍失败时按 fail-closed 处理，不再原样吐出。
     const inner = blockBody + pending;
-    const { startText, namespaced } = open;
+    const startText = open.startText;
     open = null; blockBody = ''; pending = '';
-    return normalizeBlock(inner, tools) ?? discardOrPassThrough(startText + inner, namespaced);
+    return normalizeBlock(inner, tools) ?? discardOrPassThrough(startText + inner);
   }
 
   return { feed, flush, unparsed };
 }
 
-/** text 后缀与任一 token 前缀的最长匹配长度（容忍大小写/竖线漂移，长度按原串计）。 */
-function maxOverlap(text: string, tokens: string[]): number {
-  const tail = unify(text.slice(-MAX_TOKEN_LEN));
-  let max = 0;
-  for (const token of tokens) {
-    const t = unify(token);
-    for (let k = Math.min(t.length - 1, tail.length); k > max; k--) {
-      if (tail.endsWith(t.slice(0, k))) { max = k; break; }
-    }
-  }
-  return max;
+/**
+ * 扣住「可能是起始标记前缀」的尾巴长度（返回 0 = 不需要扣）。
+ * 2026-09-10（fix/dsml-bar-run）：不再用固定 token 表做前缀比对——现场竖线个数、其后空白、
+ * 乃至标签名都会漂移，固定表必然漏。改成结构判定：从最后一个 `<` 起若只会出现
+ * 竖线/空白/DSML/小写字母与下划线，就判为「可能是标记前缀」并扣住。
+ * 只影响**延迟**，不会丢字：判错了下一段就补发出去。
+ */
+function partialMarkerHold(pending: string): number {
+  const lt = pending.lastIndexOf('<');
+  if (lt === -1) return 0;
+  const tail = pending.slice(lt);
+  if (tail.length > MAX_MARKER_LEN) return 0;   // 超长肯定不是标记前缀，不无限扣
+  return /^<[|｜\sDSMLa-z_]*$/i.test(tail) ? tail.length : 0;
 }
 
-/** 最长 token 长度（`</｜DSML｜function_calls>` 共 24 字符），用于限制前缀比较的窗口。 */
-const MAX_TOKEN_LEN = 24;
-
-/** 小写化 + ASCII | 归一到全角 ｜（仅用于比较，不会写回输出）。 */
-function unify(s: string): string {
-  return s.replace(/\|/g, '｜').toLowerCase();
-}
+/** 起始标记的长度上限（`<` + 竖线 + `DSML` + 竖线 + 空格 + `function_calls` 约 27），限制前缀比较窗口。 */
+const MAX_MARKER_LEN = 32;
 
 /** vLLM `utils.partial_tag_overlap`：tag 的最长前缀 === text 的后缀的长度，完整匹配返回 0。 */
 export function partialTagOverlap(text: string, tag: string): number {

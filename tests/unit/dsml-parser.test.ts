@@ -340,3 +340,60 @@ describe('归一化失败必须 fail-closed（fix/dsml-no-silent-leak）', () =>
     expect(n.unparsed).toEqual([]);    // 不误触发 repair
   });
 });
+
+// 2026-09-10（fix/dsml-bar-run）：v0.1.100 现场 rawB64 —— **经 base64 字节级对齐过**的真实 wire。
+// 与 canonical 的差别（全部实测）：命名空间两侧各 2 个全角竖线（不是 1 个）；DSML 与标签名之间多一个空格；
+// 包裹名是 `calls`（`tool_` 整段不在）。四个正则全部落空 → hasDsmlToolTags=false → hasToolTags=false
+// → router 判「模型没调工具」→ 原文当正文透传 + finishReason=stop。v0.1.98/0.1.99 的容错都没盖住这个形态。
+//
+// fixture 以 base64 内嵌：DSML 标记的字面量在本仓库的协作链路（聊天/终端/工具解析）上会被吃掉，
+// 只有 base64 能保证测试比对的是**真实字节**，而不是被腐蚀过的转写。
+const FIELD_WIRE_B64 =
+  'PO+9nO+9nERTTUzvvZzvvZwgY2FsbHM+CjzvvZzvvZxEU01M772c772cIGludm9rZSBuYW1lPSJSZWFkIj4KPO+9nO+9nERTTUzvvZzvvZwgcGFyYW1ldGVyIG5hbWU9InBhdGgiIHN0cmluZz0idHJ1ZSI+c2tldGNoLmlubzwv772c772cRFNNTO+9nO+9nCBwYXJhbWV0ZXI+Cjwv772c772cRFNNTO+9nO+9nCBpbnZva2U+Cjwv772c772cRFNNTO+9nO+9nCBjYWxscz4=';
+const decodeB64 = (b: string): string => Buffer.from(b, 'base64').toString('utf8');
+
+describe('现场字节形态：竖线数漂移 + 标签名缺前缀（fix/dsml-bar-run）', () => {
+  const WIRE = decodeB64(FIELD_WIRE_B64);
+  const B = '｜';
+  const TAG = 'DSML';
+
+  it('fixture 自证：24 个全角竖线，起始是「小于号 竖线 竖线 DSML 竖线 竖线 空格」', () => {
+    expect([...WIRE].filter((c) => c === B)).toHaveLength(24);
+    expect(WIRE.startsWith(`<${B}${B}${TAG}${B}${B} `)).toBe(true);
+    expect(WIRE).toContain(`</${B}${B}${TAG}${B}${B} calls>`);
+  });
+
+  it('hasDsmlToolTags：必须认成工具标记（否则 router 走静默 stop 分支）', () => {
+    expect(hasDsmlToolTags(WIRE)).toBe(true);
+  });
+
+  it('parseDsmlToolCalls：解析出 1 个调用 + path=sketch.ino', () => {
+    const r = parseDsmlToolCalls(WIRE);
+    expect(r).not.toBeNull();
+    expect(r!.calls).toHaveLength(1);
+    expect(r!.calls[0]!.function.name).toBe('Read');
+    expect(JSON.parse(r!.calls[0]!.function.arguments)).toEqual({ path: 'sketch.ino' });
+  });
+
+  it('流式：逐字符喂入不泄漏任何标记字节，产出标准 JSON', () => {
+    const n = createDsmlStreamNormalizer(READ_TOOLS);
+    let out = '';
+    for (const ch of WIRE) out += n.feed(ch);
+    out += n.flush();
+    expect(out).not.toContain(B);
+    expect(out).not.toContain(TAG);
+    expect(out).not.toContain('parameter');
+    expect(out).toContain('<tool_calls>');
+    expect(n.unparsed).toEqual([]);
+    const calls = JSON.parse(out.slice(out.indexOf('['), out.lastIndexOf(']') + 1));
+    expect(calls[0].function.name).toBe('Read');
+  });
+
+  it('回归：canonical（1 竖线/侧、tool_calls）仍然解析', () => {
+    const T = DSML_TOKEN;
+    const canon = `<${T}tool_calls>\n<${T}invoke name="Read">\n<${T}parameter name="path" string="true">sketch.ino</${T}parameter>\n</${T}invoke>\n</${T}tool_calls>`;
+    const r = parseDsmlToolCalls(canon);
+    expect(r).not.toBeNull();
+    expect(r!.calls).toHaveLength(1);
+  });
+});
