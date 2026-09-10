@@ -4,6 +4,7 @@ import {
   parseDsmlToolCalls,
   createDsmlStreamNormalizer,
   partialTagOverlap,
+  hasDsmlToolTags,
 } from '../../src/background/providers/deepseek/dsml-parser';
 import type { ToolDef } from '../../src/shared/api-types';
 
@@ -158,9 +159,12 @@ describe('createDsmlStreamNormalizer：流式归一化（不泄漏 DSML，产出
     expect(text).toContain('</tool_calls>');
   });
 
-  it('未闭合块 fail-open：不吞掉已有文本', () => {
+  it('未闭合块 fail-closed：块外前置文本照常透传', () => {
     const out = feedAll(['前缀\n' + start + `<${T}invoke name="Read">`]);
-    expect(out.join('')).toContain('前缀');
+    const text = out.join('');
+    expect(text).toContain('前缀');
+    // 2026-09-10（fix/dsml-no-silent-leak）：块内标记不再原样吐给使用方（旧行为 fail-open 泄漏）
+    expect(text).not.toContain('name="');
   });
 
   it('普通文本逐段即时透传，不因等标记而整体扣住', () => {
@@ -222,5 +226,117 @@ describe('现场混合形态：闭标签省略命名空间', () => {
     const out = n.feed(`<${T}tool_calls>\n${oneCall}`) + n.flush();
     expect(out).not.toMatch(/dsml/i);
     expect(out).toContain('<tool_calls>');
+  });
+});
+
+// 2026-09-10（fix/dsml-namespace-optional）：用户 v0.1.97 现场 replySample——模型吐出的 DSML 块
+// **命名空间被整体剥离**，只剩裸标签（同期 reasoningSample = "…Let me read the project files."）：
+//   <tool_calls> / <invoke …> / <parameter …>sketch.ino</parameter>
+// 三个 invoke 依次读 sketch.ino / diagram.json / libraries.txt。
+// 旧实现三处正则都要求 ｜DSML｜（U+FF5C）在场，于是链式失败：
+//   hasDsmlToolTags=false → parseDsmlToolCalls=null → hasToolTags=false
+//   → router 判「模型没调工具，合法 stop」→ 原文当正文发给 spice + finishReason=stop（不 repair）。
+// 权威实现（vLLM DeepSeekV32ToolParser 的 parameter/invoke 正则；llama.cpp
+// common/parsers/deepseek.cpp 的 build_grammar）都把命名空间当字面量写死，但现场字节证明
+// 它在传输里不可靠 → 命名空间必须整体可选。
+describe('现场字节形态：命名空间被整体剥离（fix/dsml-namespace-optional）', () => {
+  const READ = 'Read';
+  const TAGS = ['tool_calls', 'invoke', 'parameter'] as const;
+  /** 命名空间片段（传空串 = 现场裸形态）。 */
+  const ns = (useNs: string): string => (useNs ? `${useNs}` : '');
+  /** 组装 <invoke name=…>；工具名走变量，避免把名字写成字面量。 */
+  const invoke = (useNs: string, name: string, path: string): string =>
+    `<${ns(useNs)}${TAGS[1]} name="${name}">\n` +
+    `<${ns(useNs)}${TAGS[2]} name="path" string="true">${path}</${ns(useNs)}${TAGS[2]}>\n` +
+    `</${ns(useNs)}${TAGS[1]}>`;
+  const block = (useNs: string, paths: string[]): string =>
+    `<${ns(useNs)}${TAGS[0]}>\n` +
+    paths.map((p) => invoke(useNs, READ, p)).join('\n') +
+    `\n</${ns(useNs)}${TAGS[0]}>`;
+
+  const PATHS = ['sketch.ino', 'diagram.json', 'libraries.txt'];
+  const FIELD = block('', PATHS);       // 现场形态：命名空间被剥离
+  const CANONICAL = block(T, PATHS);    // 规范形态：回归保护
+
+  it('规范形态（带命名空间）仍照旧解析——回归保护', () => {
+    const r = parseDsmlToolCalls(CANONICAL);
+    expect(r).not.toBeNull();
+    expect(r!.calls).toHaveLength(3);
+  });
+
+  it('裸形态：三个 invoke 全部解析出来，块体全部剥掉', () => {
+    const r = parseDsmlToolCalls(FIELD);
+    expect(r).not.toBeNull();
+    expect(r!.calls.map((c) => c.function.name)).toEqual([READ, READ, READ]);
+    expect(r!.calls.map((c) => (JSON.parse(c.function.arguments) as { path: string }).path)).toEqual(PATHS);
+    expect(r!.content).toBe('');
+  });
+
+  it('hasDsmlToolTags：裸形态必须算工具标记（否则 router 走静默 stop 分支）', () => {
+    expect(hasDsmlToolTags(FIELD)).toBe(true);
+    expect(hasDsmlToolTags(CANONICAL)).toBe(true);
+  });
+
+  it('不误判：我们自己的归一化产物（纯 JSON 块）不算 DSML 标记', () => {
+    const normalized = `<tool_calls>\n[{"id":"c1","type":"function","function":{"name":"Read","arguments":"{}"}}]\n</tool_calls>`;
+    expect(hasDsmlToolTags(normalized)).toBe(false);
+  });
+
+  it('不误判：正文里单纯提到 <tool_calls> 不算工具标记', () => {
+    expect(hasDsmlToolTags('模型的输出需要包在 <tool_calls> 里')).toBe(false);
+  });
+
+  it('流式：裸形态逐字符喂入不泄漏标记，输出标准 <tool_calls> JSON', () => {
+    const n = createDsmlStreamNormalizer(READ_TOOLS);
+    let out = '';
+    for (const ch of FIELD) out += n.feed(ch);
+    out += n.flush();
+    expect(out).not.toContain(` name="`);
+    expect(out).not.toContain(T);
+    expect(out).toContain('<tool_calls>');
+    const json = out.slice(out.indexOf('['), out.lastIndexOf(']') + 1);
+    const calls = JSON.parse(json) as Array<{ function: { name: string } }>;
+    expect(calls).toHaveLength(3);
+    expect(n.unparsed).toEqual([]);
+  });
+});
+
+// 2026-09-10（fix/dsml-no-silent-leak）：归一化失败不再 fail-open。
+// 旧行为把解析不出的块原样吐给使用方（下游收到一段带标记的「文本回答」），且 router 流式路径
+// 根本没有 repair 分支——只剩「静默 stop」。现改为 fail-closed：块扣住不吐，原文交 router
+// 作 repair 输入；router 层 repair 一次，仍失败则 400（对齐非流式 finalize 的语义）。
+describe('归一化失败必须 fail-closed（fix/dsml-no-silent-leak）', () => {
+  const READ = 'Read';
+  // 有工具标记但结构残缺（缺 </invoke>）→ 归一化必然失败，且不可能是普通散文
+  const BROKEN = `<tool_calls>\n<invoke name="${READ}">\n<parameter name="path" string="true">broken.ino</parameter>\n</tool_calls>`;
+
+  it('解析不出的工具标记块：feed/flush 不吐原文，原文落进 unparsed 供 repair 用', () => {
+    const n = createDsmlStreamNormalizer();
+    const out = n.feed(BROKEN) + n.flush();
+    expect(out).not.toContain('broken.ino');
+    expect(n.unparsed.join('')).toContain('broken.ino');
+  });
+
+  it('块外正文照常逐段透传，只有块本身被扣住', () => {
+    const n = createDsmlStreamNormalizer();
+    const out = n.feed('我读一下\n') + n.feed(BROKEN) + n.feed('\n读完了') + n.flush();
+    expect(out).toContain('我读一下');
+    expect(out).toContain('读完了');
+    expect(out).not.toContain('broken.ino');
+  });
+
+  it('带命名空间的块即使块体是垃圾也不透传（确定是 DSML）', () => {
+    const n = createDsmlStreamNormalizer();
+    const out = n.feed(`<${T}tool_calls>\n垃圾内容\n</${T}tool_calls>`) + n.flush();
+    expect(out).not.toContain('垃圾内容');
+    expect(n.unparsed.join('')).toContain('垃圾内容');
+  });
+
+  it('例外：无命名空间且块体无工具标记 → 判为正文提到 <tool_calls>，原样透传', () => {
+    const prose = '格式是 <tool_calls> 里放 JSON 数组';
+    const n = createDsmlStreamNormalizer();
+    const out = n.feed(prose) + n.flush();
+    expect(out).toContain(prose);      // 不吞散文
+    expect(n.unparsed).toEqual([]);    // 不误触发 repair
   });
 });

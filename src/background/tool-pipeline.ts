@@ -64,7 +64,13 @@ export function hasToolTags(content: string): boolean {
 export function parseToolCalls(content: string, tools: ToolDef[] = []): { calls: ToolCall[]; remainder: string } | null {
   if (!content) return null;
   const blocks = findBlocks(content);
-  if (blocks.length) return parseBlocks(content, blocks);
+  // 2026-09-10（fix/dsml-namespace-optional）：findBlocks 会匹配上裸 `<tool_calls>`（命名空间被剥离
+  // 的现场形态），但块体是 invoke 标记而非 JSON → parseBlocks 返回 null。原先 `return parseBlocks(...)`
+  // 直接返回 null，永远走不到下面的 DSML 分支。改为 parseBlocks 失败时继续 fall through。
+  if (blocks.length) {
+    const tagged = parseBlocks(content, blocks);
+    if (tagged) return tagged;
+  }
   // 2026-09-10（fix/dsml-tool-parser）：DeepSeek V4 原生工具协议是 DSML
   // （<｜DSML｜tool_calls> / <｜DSML｜invoke name="X">）——vLLM parser 的 TS 移植，
   // 见 providers/deepseek/dsml-parser.ts。优先于下面的代码块/裸 JSON 兜底（那两个形状更宽松）。

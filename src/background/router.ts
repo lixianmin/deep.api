@@ -341,24 +341,15 @@ export class Router {
       } else {
         // 模型兜底：同一会话追加修复指令重问 1 次（spec §4.4 第 3 层）；该轮不入镜像，
         // 下一轮客户端消息将因镜像前缀不匹配而重建——安全降级（spec §4.3）
-        handle.run.repairDone = true;
-        const repairReq: ProviderCompletion = {
-          session: { ...handle.session, parentMessageId: handle.run.parentMessageId ?? handle.session.parentMessageId },
-          prompt: `${REPAIR_INSTRUCTION}\n\n${agg.content}`,
-          model: { modelType: handle.run.model.modelType, thinking: handle.run.model.thinking },
-          requestId: `${ctx.requestId}-repair`,
-        };
-        let buf = '';
-        try {
-          for await (const ev of provider.streamCompletion(ctx, repairReq)) if (ev.kind === 'content_delta') buf += ev.content;
-          const p2 = parseToolCalls(buf, toolCtx.tools);
-          if (p2) { toolCalls = p2.calls; agg.content = p2.remainder; agg.finishReason = 'tool_calls'; }
-          else { await this.d.mapper.fail(provider.id, handle.convId); throw err('invalid_request_error', 'tool call parse failed after repair retry', 400); }
-        } catch (e) {
-          if (e instanceof BridgeError) { await this.d.mapper.fail(provider.id, handle.convId); throw e; }
+        let p2: { calls: ToolCall[]; remainder: string } | null = null;
+        try { p2 = await this.repairToolCalls(provider, ctx, handle, agg.content, toolCtx); }
+        catch (e) {
           await this.d.mapper.fail(provider.id, handle.convId);
+          if (e instanceof BridgeError) throw e;
           throw err('invalid_request_error', 'tool call parse failed', 400);
         }
+        if (p2) { toolCalls = p2.calls; agg.content = p2.remainder; agg.finishReason = 'tool_calls'; }
+        else { await this.d.mapper.fail(provider.id, handle.convId); throw err('invalid_request_error', 'tool call parse failed after repair retry', 400); }
       }
     }
     // mirror 必须含 assistant 回复：下一轮 client 传 [..., user 新问题] 时，
@@ -368,6 +359,29 @@ export class Router {
     this.d.mapper.commit(provider.id, handle.convId, mirrorMessages, handle.session.webSessionId, handle.run.parentMessageId ?? handle.session.parentMessageId, handle.run.model.modelType);
     agg.toolCalls = toolCalls;
     agg.finishReason = agg.finishReason ?? 'stop';
+  }
+
+  /**
+   * spec §4.4 第 3 层兜底：同一会话追加修复指令重问 1 次；解析不出返回 null。
+   * 直调 provider.streamCompletion 而不走 runExclusiveStream——两个调用点（finalize / encodeStream）
+   * 都在 provider 流已耗尽之后，此时队列锁已释放，再 acquire 会自锁（60s 超时 → 429）。
+   * 2026-09-10（fix/dsml-no-silent-leak）：从 finalize 内联块抽出，流式路径共用同一套 repair。
+   */
+  private async repairToolCalls(
+    provider: ProviderAdapter, ctx: ProviderContext,
+    handle: { session: ProviderSession; convId: string; run: RunState },
+    raw: string, toolCtx: ToolContext,
+  ): Promise<{ calls: ToolCall[]; remainder: string } | null> {
+    handle.run.repairDone = true;   // 先置位：repair 自身失败时不重复重问
+    const repairReq: ProviderCompletion = {
+      session: { ...handle.session, parentMessageId: handle.run.parentMessageId ?? handle.session.parentMessageId },
+      prompt: `${REPAIR_INSTRUCTION}\n\n${raw}`,
+      model: { modelType: handle.run.model.modelType, thinking: handle.run.model.thinking },
+      requestId: `${ctx.requestId}-repair`,
+    };
+    let buf = '';
+    for await (const ev of provider.streamCompletion(ctx, repairReq)) if (ev.kind === 'content_delta') buf += ev.content;
+    return parseToolCalls(buf, toolCtx.tools);
   }
 
   private encodeStream(provider: ProviderAdapter, handle: { stream: AsyncIterable<ProviderStreamEvent>; session: ProviderSession; convId: string; thread: ThreadEntry; run: RunState }, ctx: ProviderContext, model: string, started: number, messages: Message[], toolCtx: ToolContext, done: (ok: boolean, ms: number, error?: string, extra?: { finishReason?: string; parentMessageId?: string | number | null; replySample?: string; reasoningSample?: string; sseBytes?: number; ssePaths?: string[]; sseRaw?: string }) => void): AsyncIterable<ChatCompletionChunk> & { cancel(): Promise<void> } {
@@ -416,15 +430,31 @@ export class Router {
         // 与 spice 端 asst.content 保持一致——parseToolCalls 剥标签后的 remainder 只用于
         // 非流式聚合返回（toAggregate）与 toolCalls 提取，不再写进 mirror。
         const sentRawContent = agg.content;
+        // 2026-09-10（fix/dsml-no-silent-leak）：归一化器扣下的块不计入 agg.content（它已 fail-closed），
+        // 所以「有工具标记」的判据必须把 unparsed 一起算——否则扣下的块会被静默丢弃并判成 stop。
+        const heldBack = dsml?.unparsed ?? [];
         if (toolCtx.promptSuffix !== '' && !handle.run.repairDone) {
           const parsed = parseToolCalls(agg.content, toolCtx.tools);
           if (parsed) {
             agg.toolCalls = parsed.calls; agg.content = parsed.remainder; agg.finishReason = 'tool_calls';
             // OpenAI SSE 兼容：每个 tool_call 拆为独立 chunk，带 index，让消费者可按 index 增量拼接
             for (const tc of toolCallDeltaChunks(cctx, parsed.calls)) yield tc;
-          } else if (!hasToolTags(agg.content)) {
+          } else if (heldBack.length === 0 && !hasToolTags(agg.content)) {
             // 模型未输出工具标签：合法（tool_choice:auto 可不调用），正常 stop
             agg.finishReason = agg.finishReason ?? 'stop';
+          } else {
+            // 工具标记在但解析不出 → 对齐 finalize()：repair 一次，仍失败则 400。
+            // 旧实现没有这个分支：DSML 原文被当正文透传 + finish_reason=stop，下游看不到任何异常。
+            let p2: { calls: ToolCall[]; remainder: string } | null = null;
+            try { p2 = await self.repairToolCalls(provider, ctx, handle, [sentRawContent, ...heldBack].filter(Boolean).join('\n'), toolCtx); }
+            catch (e) { await self.d.mapper.fail(provider.id, handle.convId); throw e; }
+            if (p2) {
+              agg.toolCalls = p2.calls; agg.content = p2.remainder; agg.finishReason = 'tool_calls';
+              for (const tc of toolCallDeltaChunks(cctx, p2.calls)) yield tc;
+            } else {
+              await self.d.mapper.fail(provider.id, handle.convId);
+              throw err('invalid_request_error', 'tool call parse failed after repair retry', 400);
+            }
           }
         }
         yield finalChunk(cctx, agg.finishReason ?? 'stop', agg.usage);

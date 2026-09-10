@@ -673,3 +673,99 @@ describe('DSML 工具调用归一化（fix/dsml-tool-parser）', () => {
     expect(JSON.parse(calls[0].function.arguments)).toEqual({ path: 'sketch.ino' });
   });
 });
+
+// 2026-09-10（fix/dsml-namespace-optional + fix/dsml-no-silent-leak）：用户 v0.1.97 现场 replySample
+// ——DSML 块的命名空间被整体剥离，只剩裸标签。两个缺陷叠在一起：
+//   ① 识别依赖 ｜DSML｜ → hasDsmlToolTags=false → 判「模型没调工具」→ 静默 stop；
+//   ② 归一化失败时 fail-open 把块原文当正文发给下游，而流式路径没有 repair。
+// 本用例锁两层：裸形态必须直接解析；解析不出时必须 repair（而不是静默透传）。
+describe('流式：命名空间被剥离的 DSML（现场 replySample 形态）', () => {
+  const READ = 'Read';
+  const TOOL = [{ type: 'function' as const, function: { name: READ, description: 'read', parameters: { type: 'object', properties: { path: { type: 'string' } } } } }];
+  const bare = (tag: string, attrs = ''): string => `<${tag}${attrs}>`;
+  /** 现场形态：三个字段全部不带命名空间（sketch.ino / diagram.json / libraries.txt 各一 invoke）。 */
+  const FIELD =
+    `${bare('tool_calls')}\n` +
+    `${bare('invoke', ` name="${READ}"`)}\n` +
+    `${bare('parameter', ' name="path" string="true"')}sketch.ino</parameter>\n` +
+    `</invoke>\n` +
+    `${bare('invoke', ` name="${READ}"`)}\n` +
+    `${bare('parameter', ' name="path" string="true"')}diagram.json</parameter>\n` +
+    `</invoke>\n` +
+    `</tool_calls>`;
+  /** 有 invoke 标记但结构残缺（`</invoke>` 缺失）→ 归一化必然失败，用来驱动 repair 分支。 */
+  const BROKEN =
+    `${bare('tool_calls')}\n` +
+    `${bare('invoke', ` name="${READ}"`)}\n` +
+    `${bare('parameter', ' name="path" string="true"')}broken.ino</parameter>\n` +
+    `</tool_calls>`;
+  const REPAIRED = `<tool_calls>[{"id":"c1","type":"function","function":{"name":"${READ}","arguments":"{\\"path\\":\\"sketch.ino\\"}"}}]</tool_calls>`;
+
+  interface Drained { content: string; names: string[]; finish: string | null; error?: string }
+  async function drain(iterable: AsyncIterable<unknown>): Promise<Drained> {
+    const out: Drained = { content: '', names: [], finish: null };
+    try {
+      for await (const c of iterable as AsyncIterable<any>) {
+        const d = c?.choices?.[0]?.delta ?? {};
+        if (typeof d.content === 'string') out.content += d.content;
+        for (const tc of d.tool_calls ?? []) if (tc?.function?.name) out.names.push(tc.function.name);
+        const fr = c?.choices?.[0]?.finish_reason;
+        if (fr) out.finish = fr;
+      }
+    } catch (e) { out.error = (e as Error).message; }
+    return out;
+  }
+
+  /** 第 1 次 streamCompletion 返 first，repair 重问（第 2 次）返 second。calls() 读调用次数。 */
+  function adapter(first: string, second: string) {
+    let n = 0;
+    const a = stubAdapter({
+      streamCompletion: async function* () {
+        n += 1;
+        yield { kind: 'message_id', id: 1 };
+        yield { kind: 'content_delta', content: n === 1 ? first : second };
+      },
+    });
+    return { a, calls: () => n };
+  }
+
+  it('fail-to-pass：裸形态直接解析成 tool_calls，content 不含裸标记，且不触发 repair', async () => {
+    const { a, calls } = adapter(FIELD, REPAIRED);
+    const r = makeRouter(a);
+    const s = await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', '描述项目')], tools: TOOL, stream: true, conversation_id: 'bare-cid' });
+    const res = await drain(s as AsyncIterable<unknown>);
+    expect(res.error).toBeUndefined();
+    expect(res.content).not.toContain(` name="`);
+    expect(res.content).toContain('<tool_calls>');
+    expect(res.names).toEqual([READ, READ]);
+    expect(res.finish).toBe('tool_calls');
+    expect(calls()).toBe(1);   // 一次调用就解析成功，没走 repair
+    const asst = (r as any).d.mapper.threads.get('deepseek:bare-cid').mirror.at(-1)!;
+    expect(asst.content).not.toContain(` name="`);
+    expect(asst.tool_calls).toHaveLength(2);
+  });
+
+  it('fail-to-pass：归一化失败 → repair 一次成功，仍产出 tool_calls 且不泄漏原文', async () => {
+    const { a, calls } = adapter(BROKEN, REPAIRED);
+    const r = makeRouter(a);
+    const s = await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', '描述项目')], tools: TOOL, stream: true, conversation_id: 'repair-ok-cid' });
+    const res = await drain(s as AsyncIterable<unknown>);
+    expect(res.error).toBeUndefined();
+    expect(res.content).not.toContain('broken.ino');   // 解析不出的块绝不透传给下游
+    expect(res.names).toEqual([READ]);
+    expect(res.finish).toBe('tool_calls');
+    expect(calls()).toBe(2);                           // 恰好 repair 一次
+  });
+
+  it('fail-to-pass：repair 仍失败 → 抛 400（对齐非流式 finalize），不静默透传原文', async () => {
+    const { a, calls } = adapter(BROKEN, '我还是不会');
+    const r = makeRouter(a);
+    const s = await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', '描述项目')], tools: TOOL, stream: true, conversation_id: 'repair-fail-cid' });
+    const res = await drain(s as AsyncIterable<unknown>);
+    expect(res.error).toBeTruthy();
+    expect(res.error).toContain('tool call parse failed');
+    expect(res.content).not.toContain('broken.ino');
+    expect(res.finish).toBeNull();
+    expect(calls()).toBe(2);
+  });
+});

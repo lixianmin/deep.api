@@ -16,6 +16,10 @@
  *   1. 命名空间匹配放宽为「大小写不敏感 + 全角 ｜ 与 ASCII | 等价」——现场见过小写漂移形态。
  *   2. 非流式的 `content` 保留块外全部文本（本仓库 remainder 语义），不采用 vLLM 的
  *      「截断到第一个块」语义，避免丢掉块后的正文。
+ *   3. 2026-09-10（fix/dsml-namespace-optional）：**命名空间整体可选**（开/闭标签都是）。
+ *      权威实现都把它当字面量写死（vLLM 的 regex、llama.cpp build_grammar），但 v0.1.97 现场
+ *      replySample 整段没有 ｜DSML｜——沿用「必须带命名空间」等于链式失败：
+ *      hasDsmlToolTags=false → hasToolTags=false → router 判「模型没调工具」→ 静默 stop。
  */
 
 import type { ToolCall, ToolDef } from '../../../shared/api-types';
@@ -23,23 +27,34 @@ import type { ToolCall, ToolDef } from '../../../shared/api-types';
 /** 规范 token（全角 ｜ U+FF5C，大写 DSML）。匹配时放宽（见文件头偏差说明）。 */
 export const DSML_TOKEN = '｜DSML｜';
 
-/** 命名空间正则片段：`[|｜]dsml[|｜]`，配合 `i` 标志同时容忍大小写与 ASCII 竖线。 */
-const NS = '[|｜]dsml[|｜]';
+/** 命名空间**必需**片段：`[|｜]dsml[|｜]`，配合 `i` 标志同时容忍大小写与 ASCII 竖线。 */
+const NS_REQUIRED = '[|｜]dsml[|｜]';
+/** 命名空间**可选**（现场字节里它经常整段不在，见文件头偏差 3）。 */
+const NS = `(?:${NS_REQUIRED})?`;
 
 function blockRe(): RegExp {
   // 反引用 \1 保证起止包裹名一致（tool_calls 配 tool_calls）。
   // 2026-09-10（fix/dsml-tolerant-closes）：闭标签的命名空间**可选**——现场日志里模型开标签带
   // ｜DSML｜、闭标签却是普通的 </tool_calls> / </invoke> / </parameter>。
-  return new RegExp(`<${NS}(tool_calls|function_calls)>([\\s\\S]*?)</(?:${NS})?\\1>`, 'gi');
+  // 2026-09-10（fix/dsml-namespace-optional）：开标签的命名空间同样可选——现场 replySample 整段没有 ｜DSML｜。
+  return new RegExp(`<${NS}(tool_calls|function_calls)>([\\s\\S]*?)</${NS}\\1>`, 'gi');
 }
 function blockStartRe(): RegExp {
   return new RegExp(`<${NS}(tool_calls|function_calls)>`, 'i');
 }
+/** 只认带命名空间的块起始（用来区分「确定是 DSML」与「正文恰好提到 <tool_calls>」）。 */
+function namespacedBlockStartRe(): RegExp {
+  return new RegExp(`<${NS_REQUIRED}(tool_calls|function_calls)>`, 'i');
+}
 function invokeRe(): RegExp {
-  return new RegExp(`<${NS}invoke\\s+name="([^"]+)"\\s*>([\\s\\S]*?)</(?:${NS})?invoke>`, 'gi');
+  return new RegExp(`<${NS}invoke\\s+name="([^"]+)"\\s*>([\\s\\S]*?)</${NS}invoke>`, 'gi');
 }
 function paramRe(): RegExp {
-  return new RegExp(`<${NS}parameter\\s+name="([^"]+)"\\s+string="(true|false)"\\s*>([\\s\\S]*?)</(?:${NS})?parameter>`, 'gi');
+  return new RegExp(`<${NS}parameter\\s+name="([^"]+)"\\s+string="(true|false)"\\s*>([\\s\\S]*?)</${NS}parameter>`, 'gi');
+}
+/** invoke/parameter 标记（命名空间可选）。普通散文里不会出现，用来区分「块体是工具标记」与「正文提到 <tool_calls>」。 */
+function invokeMarkRe(): RegExp {
+  return new RegExp(`<${NS}(?:invoke|parameter)\\s+name=`, 'i');
 }
 
 export interface DsmlParseResult { calls: ToolCall[]; content: string }
@@ -69,28 +84,50 @@ export function parseDsmlToolCalls(text: string, tools: ToolDef[] = []): DsmlPar
   return { calls, content };
 }
 
-/** 文本里是否存在 DSML 工具调用包裹（给 hasToolTags 用：区分「没调工具」与「调了但解析失败」）。 */
+/** 文本里是否存在 DSML 工具调用标记（给 hasToolTags 用：区分「没调工具」与「调了但解析失败」）。
+ *  2026-09-10（fix/dsml-namespace-optional）：不能只认块起始——命名空间被剥离后，裸 `<tool_calls>`
+ *  与正文里单纯提到它的句子无法区分（那会误触发 repair）。改为「带命名空间的块起始」或
+ *  「invoke/parameter 标记」二者其一——后两者不会出现在普通散文里。 */
 export function hasDsmlToolTags(text: string): boolean {
-  return !!text && blockStartRe().test(text);
+  if (!text) return false;
+  return namespacedBlockStartRe().test(text) || invokeMarkRe().test(text);
 }
 
 export interface DsmlStreamNormalizer {
   /** 送入一个内容增量，返回可安全发给客户端的文本（DSML 已在内部被缓冲）。 */
   feed(delta: string): string;
-  /** 流结束：吐出残留文本（未闭合块 fail-open 原样吐出，不吞内容）。 */
+  /** 流结束：吐出残留文本（未闭合的**工具标记**块按 fail-closed 处理，不进输出）。 */
   flush(): string;
+  /** 归一化失败的工具标记块原文（**绝不透传**给使用方；router 拿它作 repair 输入）。 */
+  unparsed: string[];
 }
 
 /**
  * 流式归一化器：块外文本逐段即时透传（只扣住可能是起始标记前缀的尾巴），
  * 块内文本缓冲到结束标记，然后整块重写成标准 `<tool_calls>[…]</tool_calls>` JSON ——
  * 使用方（spice）按标准格式解析，永远看不到 DSML。
+ *
+ * 2026-09-10（fix/dsml-no-silent-leak）：解析不出的块不再 fail-open 原样吐出，改为扣进
+ * `unparsed`（旧行为把 DSML 原文当正文发给下游，而流式路径没有 repair → 静默 stop）。
+ * 唯一例外：块**无命名空间且块体里没有任何 invoke/parameter 标记** → 判为正文里恰好提到
+ * `<tool_calls>`，原样透传（否则会把普通散文吞掉，并误触发一次 repair）。
  */
 export function createDsmlStreamNormalizer(tools: ToolDef[] = []): DsmlStreamNormalizer {
-  const startTokens = [`<${DSML_TOKEN}tool_calls>`, `<${DSML_TOKEN}function_calls>`];
+  // 裸起始标记也要扣住尾巴：命名空间被剥离时 <tool_calls> 可能正好被 delta 切断。
+  const startTokens = [
+    `<${DSML_TOKEN}tool_calls>`, `<${DSML_TOKEN}function_calls>`,
+    '<tool_calls>', '<function_calls>',
+  ];
+  const unparsed: string[] = [];
   let pending = '';
-  let open: { startText: string; endRe: RegExp } | null = null;
+  let open: { startText: string; endRe: RegExp; namespaced: boolean } | null = null;
   let blockBody = '';
+
+  /** 块无法归一化时：是工具标记 → 扣进 unparsed；只是正文提到 <tool_calls> → 原样透传。 */
+  function discardOrPassThrough(raw: string, namespaced: boolean): string {
+    if (namespaced || invokeMarkRe().test(raw)) { unparsed.push(raw); return ''; }
+    return raw;
+  }
 
   function feed(delta: string): string {
     let out = '';
@@ -107,7 +144,7 @@ export function createDsmlStreamNormalizer(tools: ToolDef[] = []): DsmlStreamNor
         }
         out += pending.slice(0, m.index);
         pending = pending.slice(m.index + m[0].length);
-        open = { startText: m[0], endRe: new RegExp(`</(?:${NS})?${m[1]}>`, 'i') };
+        open = { startText: m[0], endRe: new RegExp(`</${NS}${m[1]}>`, 'i'), namespaced: namespacedBlockStartRe().test(m[0]) };
         blockBody = '';
         continue;
       }
@@ -115,9 +152,9 @@ export function createDsmlStreamNormalizer(tools: ToolDef[] = []): DsmlStreamNor
       if (!em) { blockBody += pending; pending = ''; return out; }
       blockBody += pending.slice(0, em.index);
       pending = pending.slice(em.index + em[0].length);
+      const raw = open.startText + blockBody + em[0];
       const normalized = normalizeBlock(blockBody, tools);
-      // 解析失败 fail-open：原样吐出块内容（不静默丢），让上层走 repair 路径 + 日志可见
-      out += normalized ?? open.startText + blockBody + em[0];
+      out += normalized ?? discardOrPassThrough(raw, open.namespaced);
       open = null;
       blockBody = '';
     }
@@ -126,14 +163,14 @@ export function createDsmlStreamNormalizer(tools: ToolDef[] = []): DsmlStreamNor
   function flush(): string {
     if (!open) { const t = pending; pending = ''; return t; }
     // 2026-09-10（fix/dsml-tolerant-closes）：未闭合块先尝试归一化——模型常常写完 invoke
-    // 就直接结束（不带块闭标签），旧实现直接 fail-open 把 DSML 原文吐给了使用方。
+    // 就直接结束（不带块闭标签）。归一化仍失败时按 fail-closed 处理，不再原样吐出。
     const inner = blockBody + pending;
-    const startText = open.startText;
+    const { startText, namespaced } = open;
     open = null; blockBody = ''; pending = '';
-    return normalizeBlock(inner, tools) ?? startText + inner;
+    return normalizeBlock(inner, tools) ?? discardOrPassThrough(startText + inner, namespaced);
   }
 
-  return { feed, flush };
+  return { feed, flush, unparsed };
 }
 
 /** text 后缀与任一 token 前缀的最长匹配长度（容忍大小写/竖线漂移，长度按原串计）。 */

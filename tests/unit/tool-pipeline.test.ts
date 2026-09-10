@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildToolPrompt, parseToolCalls, TOOL_TAGS } from '../../src/background/tool-pipeline';
+import { buildToolPrompt, parseToolCalls, TOOL_TAGS, hasToolTags } from '../../src/background/tool-pipeline';
 import type { ToolDef } from '../../src/shared/api-types';
 
 describe('buildToolPrompt', () => {
@@ -124,6 +124,33 @@ describe('parseToolCalls', () => {
     const r = parseToolCalls(text);
     expect(r).not.toBeNull();
     expect(r!.calls[0]!.function.name).toBe('f');
+  });
+
+  // 2026-09-10（fix/dsml-namespace-optional）：现场 replySample 里 DSML 命名空间被整体剥离。
+  // parseToolCalls 的 findBlocks 能匹配上裸 <tool_calls>，但块体是 invoke 标记而非 JSON
+  // → 原有三层 fallback 全失败 → 返回 null；hasToolTags 也判 false → router 走
+  // 「模型没调工具，合法 stop」分支（不 repair、原文透传）。DSML 分支必须接住裸形态。
+  describe('命名空间被剥离的 DSML（现场 replySample 形态）', () => {
+    const READ = 'Read';
+    const bare = (tag: string, attrs = ''): string => `<${tag}${attrs}>`;
+    const FIELD =
+      `${bare('tool_calls')}\n` +
+      `${bare('invoke', ` name="${READ}"`)}\n` +
+      `${bare('parameter', ' name="path" string="true"')}sketch.ino</parameter>\n` +
+      `</invoke>\n` +
+      `</tool_calls>`;
+
+    it('hasToolTags 认裸形态（否则静默 stop，不 repair）', () => {
+      expect(hasToolTags(FIELD)).toBe(true);
+    });
+
+    it('parseToolCalls 解析裸形态，remainder 为空', () => {
+      const r = parseToolCalls(FIELD);
+      expect(r).not.toBeNull();
+      expect(r!.calls[0]!.function.name).toBe(READ);
+      expect(JSON.parse(r!.calls[0]!.function.arguments)).toEqual({ path: 'sketch.ino' });
+      expect(r!.remainder).toBe('');
+    });
   });
 
 });
