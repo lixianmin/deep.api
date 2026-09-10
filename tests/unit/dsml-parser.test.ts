@@ -397,3 +397,73 @@ describe('现场字节形态：竖线数漂移 + 标签名缺前缀（fix/dsml-b
     expect(r!.calls).toHaveLength(1);
   });
 });
+
+// 2026-09-11（fix/review-r1）：全量审查发现的两处「静默丢调用」缺陷回归用例。
+// 原则（文件头偏差 4 + spec §4.4）：检测宽于解析，但解析必须严；解析不出就交给 repair/400，
+// 绝不静默丢参/丢调用，也绝不把 DSML 原文当正文透传。
+describe('dsml-parser review-r1 fixes', () => {
+  it('parameter 缺 string 属性 → 按 schema 解析，不静默丢参', () => {
+    const res = parseDsmlToolCalls(
+      `<${T}calls><${T}invoke name="Read"><${T}parameter name="path">a.txt</${T}parameter></${T}invoke></${T}calls>`,
+      READ_TOOLS,
+    );
+    expect(res).not.toBeNull();
+    expect(JSON.parse(res!.calls[0]!.function.arguments)).toEqual({ path: 'a.txt' });
+  });
+
+  it('parameter 缺 string 属性 + number schema → 转型为数字', () => {
+    const res = parseDsmlToolCalls(
+      `<${T}calls><${T}invoke name="Read"><${T}parameter name="path">a</${T}parameter><${T}parameter name="limit">10</${T}parameter></${T}invoke></${T}calls>`,
+      READ_TOOLS,
+    );
+    expect(res).not.toBeNull();
+    expect(JSON.parse(res!.calls[0]!.function.arguments)).toEqual({ path: 'a', limit: 10 });
+  });
+
+  it('未闭合的 parameter 标记 → 整体判失败（走 repair，不静默发 {}）', () => {
+    const res = parseDsmlToolCalls(
+      `<${T}calls><${T}invoke name="Read"><${T}parameter name="path">a.txt</${T}parameter><${T}parameter name="limit">10</${T}invoke></${T}calls>`,
+      READ_TOOLS,
+    );
+    expect(res).toBeNull();
+  });
+
+  it('已闭合块 + 截断块混型 → 整体判失败（不丢第二个调用，也不把 DSML 原文留在 content）', () => {
+    const text = `<${T}tool_calls><${T}invoke name="Read"><${T}parameter name="path" string="true">a</${T}parameter></${T}invoke></${T}tool_calls>`
+      + `\n<${T}tool_calls><${T}invoke name="Read"><${T}parameter name="path" string="true">b</${T}parameter>`;
+    const res = parseDsmlToolCalls(text, READ_TOOLS);
+    expect(res).toBeNull();
+  });
+
+  it('正文提到裸 <tool_calls>（无 invoke/parameter 标记）→ 不吞正文、不误判为截断块', () => {
+    const res = parseDsmlToolCalls('我会用 <tool_calls> 标签输出调用。', READ_TOOLS);
+    expect(res).toBeNull();
+  });
+
+  it('正常闭合块仍然解析成功（回归保护）', () => {
+    const res = parseDsmlToolCalls(
+      `<${T}tool_calls><${T}invoke name="Read"><${T}parameter name="path" string="true">a</${T}parameter></${T}invoke></${T}tool_calls>`,
+      READ_TOOLS,
+    );
+    expect(res).not.toBeNull();
+    expect(res!.calls).toHaveLength(1);
+    expect(JSON.parse(res!.calls[0]!.function.arguments)).toEqual({ path: 'a' });
+  });
+});
+
+// 2026-09-11（fix/review-r2 N4）：截断块与闭合块混型时的 span 重叠回归。
+describe('dsml-parser review-r2 fixes', () => {
+  it('N4: 截断块（calls）在闭合块（tool_calls）之前 → 整体 fail-closed，不重复下发调用', () => {
+    const text = `<${T}calls><${T}invoke name="Read"><${T}parameter name="path" string="true">a</${T}parameter></${T}invoke>`
+      + `<${T}tool_calls><${T}invoke name="Read"><${T}parameter name="path" string="true">b</${T}parameter></${T}invoke></${T}tool_calls>`;
+    expect(parseDsmlToolCalls(text, READ_TOOLS)).toBeNull();
+  });
+
+  it('N4b: 正文提到裸 <tool_calls> 后再出现真正闭合块 → 正常解析（不重复、不吞正文）', () => {
+    const text = `我会用 <tool_calls> 标签。\n<${T}tool_calls><${T}invoke name="Read"><${T}parameter name="path" string="true">a</${T}parameter></${T}invoke></${T}tool_calls>`;
+    const res = parseDsmlToolCalls(text, READ_TOOLS);
+    expect(res).not.toBeNull();
+    expect(res!.calls).toHaveLength(1);
+    expect(JSON.parse(res!.calls[0]!.function.arguments)).toEqual({ path: 'a' });
+  });
+});

@@ -1,4 +1,5 @@
 import { getPanelApi } from './panel-api';
+import { escapeHtml } from './log';
 import type { LogEntry } from '../../background/log';
 
 export function mountSse(pane: HTMLElement): () => void {
@@ -22,13 +23,19 @@ export function mountSse(pane: HTMLElement): () => void {
   const render = (): void => {
     const groups = groupBy(allLogs);
     groupsEl.innerHTML = [...groups.entries()].map(([ws, entries]) => {
-      const start = new Date(entries[0]!.at).toLocaleTimeString();
+      // 2026-09-11（fix/review-r1）：entries 来自倒序排序后的 allLogs → entries[0] 是**最新**一条。
+      // 旧实现把 entries[0].at 标成起始时间，语义写反；改为取组内最早（末尾）→ 最新。
+      const oldestAt = entries[entries.length - 1]!.at;
+      const newestAt = entries[0]!.at;
+      const range = oldestAt === newestAt
+        ? new Date(oldestAt).toLocaleTimeString()
+        : `${new Date(oldestAt).toLocaleTimeString()}–${new Date(newestAt).toLocaleTimeString()}`;
       const sample = (entries[0]!.replySample ?? '').slice(0, 200);
       return `
         <details data-group style="margin:4px 0;border:1px solid #ddd;padding:4px;">
-          <summary><b>${ws.slice(0, 16)}…</b> @${start} (${entries.length} entries) — ${sample}</summary>
+          <summary><b>${escapeHtml(ws.slice(0, 16))}…</b> @${range} (${entries.length} entries) — ${escapeHtml(sample)}</summary>
           <div style="margin-left:16px;">
-            ${entries.map(e => `<div style="padding:2px;font-family:ui-monospace,monospace;font-size:11px;">${new Date(e.at).toLocaleTimeString()} ${(e.replySample ?? '').slice(0, 120)}</div>`).join('')}
+            ${entries.map(e => `<div style="padding:2px;font-family:ui-monospace,monospace;font-size:11px;">${new Date(e.at).toLocaleTimeString()} ${escapeHtml((e.replySample ?? '').slice(0, 120))}</div>`).join('')}
           </div>
         </details>
       `;
@@ -37,9 +44,14 @@ export function mountSse(pane: HTMLElement): () => void {
 
   let allLogs: LogEntry[] = [];
   const refresh = async (): Promise<void> => {
-    allLogs = await getPanelApi().listLogs();
-    allLogs.sort((a, b) => b.at - a.at);
-    render();
+    // 2026-09-11（fix/review-r1）：失败不再静默（旧实现 void refresh() 吞掉 reject → tab 永久空白无提示）
+    try {
+      allLogs = await getPanelApi().listLogs();
+      allLogs.sort((a, b) => b.at - a.at);
+      render();
+    } catch (e) {
+      groupsEl.innerHTML = `<p style="color:#a00;">加载失败：${escapeHtml(e instanceof Error ? e.message : String(e))}</p>`;
+    }
   };
   refreshBtn.addEventListener('click', () => { void refresh(); });
   const timer = setInterval(() => { void refresh(); }, 30_000);

@@ -1,5 +1,6 @@
 // src/demo/tabs/scenarios.ts
 import type { LogEntry } from '../../background/log';
+import { escapeHtml } from './log';
 
 export interface ScenarioResult { name: string; ok: boolean; ms: number; error?: string; output?: string; }
 
@@ -194,7 +195,8 @@ export function mountScenarios(pane: HTMLElement): () => void {
   // 加载模型列表（optional chain 防御：shim 在 chrome-extension:// 加载时正常装上；
   // 但外部网页（如 example.com）由 bridge-main 注入 deepApi。任何场景下都可工作）。
   (window as any).deepApi?.models?.list?.()?.then((r: any) => {
-    modelSel.innerHTML = (r.data as any[]).map(m => `<option value="${m.id}">${m.id}</option>`).join('');
+    // 2026-09-11（fix/review-r2）：m.id 来自 catalog（页面 DOM 文本）→ 转义。
+    modelSel.innerHTML = (r.data as any[]).map(m => `<option value="${escapeHtml(String(m.id))}">${escapeHtml(String(m.id))}</option>`).join('');
   }).catch(() => {});
 
   // 单行渲染：<tr><td colspan=4><details><summary>...</summary><pre>...</pre></details></td></tr>
@@ -213,7 +215,7 @@ export function mountScenarios(pane: HTMLElement): () => void {
       `<span style="display:inline-block;width:35%;vertical-align:top;">${r.name}</span>` +
       `<span style="display:inline-block;width:10%;text-align:center;vertical-align:top;">${r.ok ? '✓' : '✗'}</span>` +
       `<span style="display:inline-block;width:15%;vertical-align:top;">${r.ms}ms</span>` +
-      `<span style="display:inline-block;vertical-align:top;">${r.error ?? ''}</span>`;
+      `<span style="display:inline-block;vertical-align:top;">${escapeHtml(r.error ?? '')}</span>`;
     det.appendChild(sum);
     const detail = r.output ?? r.error;
     if (detail) {

@@ -135,3 +135,41 @@ describe('mountLog', () => {
     } finally { unmount(); }
   });
 });
+
+// 2026-09-11（fix/review-r1）：失败原因被 replySample 吃掉 + 字段未转义（HTML 注入）。
+describe('mountLog review-r1', () => {
+  const feed = async (pane: HTMLElement, log: unknown[]): Promise<void> => {
+    portListeners.msg!({ kind: 'state', payload: { log } });
+    await new Promise(r => setTimeout(r, 10));
+  };
+
+  it('ok:false 且同时有 replySample 时，error 仍渲染出来', async () => {
+    const pane = document.createElement('div');
+    const unmount = mountLog(pane);
+    try {
+      await feed(pane, [{ at: 1, provider: 'p', model: 'm', ok: false, ms: 5, error: 'tool call parse failed', replySample: '<tool_calls>[1,2]' }]);
+      expect(pane.textContent).toContain('tool call parse failed');
+      // reply 只放 replySample（不再回退成 error 的重复展示）
+      expect(pane.textContent).toContain('<tool_calls>[1,2]');
+    } finally { unmount(); }
+  });
+
+  it('replySample 里的 HTML 被转义（模型输出不可注入 DOM）', async () => {
+    const pane = document.createElement('div');
+    const unmount = mountLog(pane);
+    try {
+      await feed(pane, [{ at: 1, provider: 'p', model: 'm', ok: true, ms: 5, replySample: '<img src=x onerror=alert(1)>' }]);
+      expect(pane.querySelector('img')).toBeNull();
+      expect(pane.textContent).toContain('<img src=x onerror=alert(1)>');
+    } finally { unmount(); }
+  });
+
+  it('cid / provider / model 里的 HTML 被转义（调用方可控字段）', async () => {
+    const pane = document.createElement('div');
+    const unmount = mountLog(pane);
+    try {
+      await feed(pane, [{ at: 1, provider: '<img src=x>', model: '<img src=y>', ok: true, ms: 5, cid: '<img src=z>' }]);
+      expect(pane.querySelector('img')).toBeNull();
+    } finally { unmount(); }
+  });
+});

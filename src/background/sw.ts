@@ -65,12 +65,25 @@ function probeHeaders(token: string): Record<string, string> {
 let cached: { router: Router; log: RingLog; mapper: SessionMapper } | null = null;
 const panelPorts = new Set<chrome.runtime.Port>();   // 当前打开的 popup 面板 port
 
+/** 2026-09-11（fix/review-r1）：SessionMapper 的 deleteSession 真实现。
+ *  旧注入是 `async () => {}`，mapper.fail() / TTL 过期 / LRU 淘汰承诺的 best-effort deleteSession
+ *  在生产全是 no-op，DeepSeek 网页侧残留会话越堆越多（spec §4.3 要求保持网页侧干净）。 */
+async function deleteDeepSeekSession(webSessionId: string): Promise<void> {
+  try {
+    const t = await loadCachedToken();
+    if (!t || !webSessionId) return;
+    await fetch(`${DEEPSEEK_API_BASE}/chat_session/delete`, {
+      method: 'POST', headers: probeHeaders(t), body: JSON.stringify({ chat_session_id: webSessionId }),
+    });
+  } catch { /* best-effort：SW 随时可能被回收，删除失败不阻塞后续流程（spec §4.3） */ }
+}
+
 async function build(): Promise<{ router: Router; log: RingLog; mapper: SessionMapper }> {
   if (cached) return cached;
   const log = new RingLog(500);   // 2026-09-09（feat/debug-dashboard）调到 500：debug 页日志 tab 看更多决策现场
   const cfg = await getProviderConfig('deepseek');
   const mapper = new SessionMapper(
-    { createSession: async () => ({ webSessionId: '' }), deleteSession: async () => {}, now: () => Date.now() },
+    { createSession: async () => ({ webSessionId: '' }), deleteSession: deleteDeepSeekSession, now: () => Date.now() },
     { poolSize: cfg.poolSize, ttlMs: cfg.ttlMinutes * 60_000 },
   );
   // 2026-09-09（fix/thread-persistence）：threads 走数据层（chrome.storage.local），不依赖进程内存。
@@ -89,12 +102,14 @@ async function build(): Promise<{ router: Router; log: RingLog; mapper: SessionM
   // 周期性 sweep（每 60s）由 commit 路径 setTimeout 触发，详见 evictExpired 调用点。
   await mapper.evictExpired('deepseek');
   let wasmInst: Promise<WasmInstance> | null = null;
-  async function getWasm(): Promise<WasmInstance> {
-    if (!wasmInst) wasmInst = (async () => {
-      const r = await fetch(WASM_URL, { credentials: 'include' });
-      const buf = await r.arrayBuffer();
-      return instantiateDeepSeekWasm(new Uint8Array(buf));
-    })();
+  /** 2026-09-11（fix/review-r1）：接收 PowSolver.fetchBytes 已下载的字节，避免同一 wasm 下载两遍；
+   *  实例化失败不落缓存（一次 CDN 抖动不再让整个 SW 生命周期的 PoW 全挂）。 */
+  function getWasm(bytes: Uint8Array): Promise<WasmInstance> {
+    if (!wasmInst) {
+      const p = instantiateDeepSeekWasm(bytes);
+      wasmInst = p;
+      p.catch(() => { if (wasmInst === p) wasmInst = null; });
+    }
     return wasmInst;
   }
   const deps: AdapterDeps = {
@@ -167,7 +182,7 @@ async function build(): Promise<{ router: Router; log: RingLog; mapper: SessionM
   const router = new Router({
     registry: createRegistry(adapter),
     mapper,
-    queue: new Queue({ timeoutMs: 60_000 }),
+    queue: new Queue({ timeoutMs: 60_000, concurrency: cfg.poolSize }),
     storage: { get: async (k) => (await STORAGE.get(k as unknown as string))?.[k as unknown as string], set: async (k, v) => { await STORAGE.set({ [k]: v }); } },
     log,
     now: () => Date.now(),
@@ -261,6 +276,10 @@ chrome.runtime.onConnect.addListener((port) => {
         return false;
       }
     };
+    // 2026-09-11（fix/review-r1）：在途流句柄表——env.id（create 的页面侧 id）→ 可取消的流。
+    // 旧实现 cancel 分支完全忽略 params.requestId 且从不调用 router 的 stopStream（编码流的
+    // cancel() 是唯一调用点），取消等于没取消：DeepSeek 侧继续生成、mirror 继续 commit。
+    const inflightStreams = new Map<number, { aborted: boolean; cancel: () => Promise<void> }>();
     port.onMessage.addListener(async (msg: unknown) => {
       if (!isBridgeRequest(msg)) return;
       const env = (msg as { __deepApi: { id: number; method: string; params: unknown } }).__deepApi;
@@ -283,8 +302,10 @@ chrome.runtime.onConnect.addListener((port) => {
         return;
       }
 
-      const { router } = await build();
+      // 2026-09-11（fix/review-r1）：build() 移进 try——旧代码在 try 之外 await build()，
+      // storage 读失败/构建异常会让整个监听器 reject（unhandledrejection），调用方永远等不到回包。
       try {
+        const { router } = await build();
         const token = await loadCachedToken();
         if (!token) {
           const { error, status } = { error: { error: { message: '未登录 chat.deepseek.com，请先在浏览器中登录', type: 'api_error', code: 'provider_unavailable' } }, status: 503 };
@@ -302,11 +323,20 @@ chrome.runtime.onConnect.addListener((port) => {
             const params = env.params as { stream?: boolean };
             const resp = await router.create(token, env.params as unknown);
             if (params.stream) {
-              const iter = resp as AsyncIterable<ChatCompletionChunk>;
-              for await (const chunk of iter) {
-                if (!safePost({ __deepApi: { id: env.id, kind: 'chunk', chunk } } as unknown as BridgeResponseMsg)) break;
+              const handle = resp as AsyncIterable<ChatCompletionChunk> & { cancel?: () => Promise<void> };
+              const entry = { aborted: false, cancel: async () => { try { await handle.cancel?.(); } catch { /* best effort */ } } };
+              inflightStreams.set(env.id, entry);
+              try {
+                for await (const chunk of handle) {
+                  // 被 cancel 后停止推送并破坏生成器：IteratorClose 会触发 router 的 finally
+                  // （队列锁释放 + provider 流关闭 + 未 commit 的线程销毁）。
+                  if (entry.aborted) break;
+                  if (!safePost({ __deepApi: { id: env.id, kind: 'chunk', chunk } } as unknown as BridgeResponseMsg)) break;
+                }
+                safePost({ __deepApi: { id: env.id, kind: 'done' } } as unknown as BridgeResponseMsg);
+              } finally {
+                inflightStreams.delete(env.id);
               }
-              safePost({ __deepApi: { id: env.id, kind: 'done' } } as unknown as BridgeResponseMsg);
             } else {
               safePost({ __deepApi: { id: env.id, kind: 'result', value: resp } } as unknown as BridgeResponseMsg);
             }
@@ -318,6 +348,13 @@ chrome.runtime.onConnect.addListener((port) => {
             safePost({ __deepApi: { id: env.id, kind: 'error', error: be.error } } as unknown as BridgeResponseMsg);
           }
         } else if (env.method === 'chat.completions.cancel') {
+          // 2026-09-11（fix/review-r1）：按 params.requestId 找出对应的在途流，标记中止并触发
+          // router 的 cancel()（→ provider.stopStream best-effort）。回执发给 cancel 自己的 id。
+          const requestId = (env.params as { requestId?: unknown } | undefined)?.requestId;
+          if (typeof requestId === 'number') {
+            const target = inflightStreams.get(requestId);
+            if (target) { target.aborted = true; void target.cancel(); }
+          }
           safePost({ __deepApi: { id: env.id, kind: 'done' } } as unknown as BridgeResponseMsg);
         } else if (env.method === 'models.list') {
           const models = await router.models();
@@ -353,6 +390,8 @@ chrome.runtime.onConnect.addListener((port) => {
       }
     };
     port.onMessage.addListener(async (msg: any) => {
+      // 2026-09-11（fix/review-r1）：build() 移进 try；构建失败不得让 handler reject 后无任何回包。
+      try {
       const { router, log } = await build();
       if (msg?.kind === 'panel.getState') {
         const provCfg = await getProviderConfig('deepseek');
@@ -389,9 +428,23 @@ chrome.runtime.onConnect.addListener((port) => {
         await refreshAuthAndLog();
         await broadcastPanelState();
       } else if (msg?.kind === 'panel.setPool') {
-        await setProviderConfig('deepseek', { poolSize: msg.payload.poolSize });
+        // 2026-09-11（fix/review-r1）：夹取到 spec §8.2 的 1–5；面板清空输入框时 Number('')=0 会被
+        // 当成合法值写进 storage——poolSize=0 会让 register() 的 LRU 淘汰把刚建的会话也删掉。
+        // 另外实时应用到运行中的实例：旧实现只写 storage，已缓存的 mapper/queue 仍用旧值。
+        const raw = Number(msg.payload?.poolSize);
+        if (Number.isFinite(raw)) {
+          const poolSize = Math.min(5, Math.max(1, Math.floor(raw)));
+          await setProviderConfig('deepseek', { poolSize });
+          router.setPoolSize(poolSize);
+        }
       } else if (msg?.kind === 'panel.setTtl') {
-        await setProviderConfig('deepseek', { ttlMinutes: msg.payload.ttlMinutes });
+        // 夹取到 1–1440 分钟；ttlMinutes=0 会让每轮请求前就清光所有 thread（每次都 rebuild）。
+        const raw = Number(msg.payload?.ttlMinutes);
+        if (Number.isFinite(raw)) {
+          const ttlMinutes = Math.min(1440, Math.max(1, Math.floor(raw)));
+          await setProviderConfig('deepseek', { ttlMinutes });
+          router.setTtlMinutes(ttlMinutes);
+        }
       } else if (msg?.kind === 'panel.listLogs') {
         safePostPanel({ kind: 'state', payload: { log: log.list() } });
       } else if (msg?.kind === 'panel.listThreads') {
@@ -399,6 +452,10 @@ chrome.runtime.onConnect.addListener((port) => {
         safePostPanel({ kind: 'state', payload: { threads: mapper.listThreads() } });
       } else if (msg?.kind === 'ping') {
         safePostPanel({ kind: 'pong' });
+      }
+      } catch (e) {
+        console.warn('[deep.api sw] panel message failed:', msg?.kind, e);
+        safePostPanel({ kind: 'error', payload: { message: e instanceof Error ? e.message : String(e) } });
       }
     });
   }

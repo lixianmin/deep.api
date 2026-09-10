@@ -1,4 +1,4 @@
-import type { ProviderAdapter, ProviderCompletion, ProviderContext, ProviderSession, UploadFileResult, PollFileReadyOptions } from '../adapter';
+import type { ProviderAdapter, ProviderCompletion, ProviderContext, ProviderSession, UploadFileResult, PollFileReadyOptions, PollFileReadyResult } from '../adapter';
 import { completionPayload, baseHeaders, classify, MODELS, resolveModel } from './client';
 import { getAuthStatus, DEEPSEEK_LOGIN_PAGE, DEEPSEEK_COOKIE_NAMES } from './auth';
 import { completionEvents } from './sse-patch';
@@ -15,8 +15,12 @@ export interface AdapterDeps {
 }
 
 const NO_PROGRESS_MS = 600_000;   // 10 分钟无进度断流（spec §4.5）
-const FILE_UPLOAD_TARGET = '/api/v0/file/upload_file';
-const FILE_FETCH_TARGET = '/api/v0/file/fetch_files';
+const FILE_UPLOAD_TARGET = '/api/v0/file/upload_file';   // pow target_path（绝对路径形式，服务端约定）
+/** 2026-09-11（fix/review-r1）：poll 走 deps.fetchRaw，其契约与 uploadFile 一致——只接收相对路径
+ *  （sw.ts 会拼 DEEPSEEK_API_BASE）。旧值 '/api/v0/file/fetch_files' 会拼成
+ *  'https://chat.deepseek.com/api/v0/api/v0/file/fetch_files' → 404/SPA HTML → 轮询永远不成功，
+ *  每张图白等 7.5s 且 FAILED 分支生产不可达（memory 架构决策 #4）。 */
+const FILE_FETCH_PATH = '/file/fetch_files';
 const DEFAULT_POLL_MAX = 10;
 const DEFAULT_POLL_INTERVAL_MS = 2000;
 
@@ -138,16 +142,18 @@ export function createDeepSeekAdapter(deps: AdapterDeps): ProviderAdapter {
 
     // 2026-09-09（feat/vision-multimodal）：spike #2 现场 GET /api/v0/file/fetch_files?file_ids=...
     // （无 pow）。轮询直到 status ∈ ready 类 或 FAILED。默认 10×2s = 20s 超时。
-    // 2026-09-10（fix/vision-errors）：超时**不抛错**（非致命）——参考 llmweb2api，超时只
-    // 记录然后继续发 completion（带 ref_file_ids，服务端可能已处理完）。抛错会让整条带图
-    // 请求死在 completion 之前（现场：用户带图发送无任何响应）。单次 fetch 失败也不致命。
+    // 2026-09-11（fix/vision-poll-timeout 定稿）：超时**不抛错**、返回 {ready:false} 让 router
+    // 记 warning 后继续发 completion——与参考实现 llmweb2api（client.ts pollFileReady 超时只 log
+    // 后返回）一致；spec §3.3 旧写的 408 与参考不符，已同步修订。文件 FAILED 类仍显式抛错。
+    // 注：曾把窗口缩到 5×1.5s 是为了绕开 poll URL 双前缀 bug（每次必超时）的体验，bug 已修（C5），
+    // 窗口恢复参考实现口径。
     async pollFileReady(ctx, fileId, options) {
       const maxAttempts = options?.maxAttempts ?? DEFAULT_POLL_MAX;
       const intervalMs = options?.intervalMs ?? DEFAULT_POLL_INTERVAL_MS;
-      const url = `${FILE_FETCH_TARGET}?file_ids=${encodeURIComponent(fileId)}`;
+      const url = `${FILE_FETCH_PATH}?file_ids=${encodeURIComponent(fileId)}`;
       const READY = new Set(['processed', 'ready', 'done', 'available', 'success', 'SUCCESS', 'completed', 'finished', 'uploaded']);
       const FAIL = new Set(['CONTENT_EMPTY', 'PARSE_FAILED', 'FAILED', 'ERROR']);
-      if (!deps.fetchRaw) return;   // 无 fetchRaw → 不等（不阻塞主流程）
+      if (!deps.fetchRaw) return { ready: true };   // 无 fetchRaw → 不等（不阻塞主流程）
       for (let i = 0; i < maxAttempts; i++) {
         await new Promise((r) => setTimeout(r, intervalMs));
         let status = '';
@@ -159,10 +165,11 @@ export function createDeepSeekAdapter(deps: AdapterDeps): ProviderAdapter {
         } catch {
           continue;   // 单次网络抖动不算致命，继续轮询
         }
-        if (READY.has(status)) return;
+        if (READY.has(status)) return { ready: true };
         if (FAIL.has(status)) throw classifyErr(new Error(`File parse failed: ${fileId} status=${status}`));
       }
       console.warn(`[deep.api] pollFileReady timeout after ${maxAttempts} attempts (fileId=${fileId}) — proceeding anyway`);
+      return { ready: false };
     },
 
     async *streamCompletion(ctx, req) {

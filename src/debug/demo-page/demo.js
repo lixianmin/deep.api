@@ -5,12 +5,47 @@
 // 模拟 window.deepApi。Chat / Scenarios tab 直接调 window.deepApi.chat.completions.create 即可。
 if (!window.deepApi && typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.connect) {
   const pending = new Map();
-  const port = chrome.runtime.connect({ name: 'deepapi' });
   let seq = 0;
   const sseChunkFrame = (c) => 'data: ' + JSON.stringify(c) + '\n\n';
   const sseErrorFrame = (err) => 'data: ' + JSON.stringify({ error: err.error || { message: 'unknown', code: 'internal_error' } }) + '\n\n';
 
-  port.onMessage.addListener((env) => {
+  // 2026-09-11（fix/review-r1）：port 断线恢复。旧实现只在加载时 connect 一次、没有 onDisconnect
+  // 也没有保活——扩展 reload / SW 回收后 port 死掉，之后每次调用都失败且页面里没有任何重连入口。
+  // 现在：断线时结算所有在飞请求（非流式 reject、流式推 error+[DONE]，避免调用方永久挂起），
+  // 下一次 send 或 20s 保活 ping 会自动重连。
+  let port = null;
+  let dead = false;
+
+  function failPending(err) {
+    for (const [, p] of pending) {
+      p.settled = true;
+      if (p.isStream) {
+        p.queue.push(sseErrorFrame({ error: { message: err.message, code: 'provider_unavailable' } }));
+        p.queue.push('data: [DONE]\n\n');
+        const w = p._wake; p._wake = null; if (w) w();
+      } else {
+        try { p._reject && p._reject(err); } catch (e) { /* 已满足的 promise，忽略 */ }
+      }
+    }
+    pending.clear();
+  }
+
+  function openPort() {
+    port = chrome.runtime.connect({ name: 'deepapi' });
+    dead = false;
+    port.onMessage.addListener(onMessage);
+    port.onDisconnect.addListener(() => {
+      dead = true;
+      failPending(new Error('deepapi port disconnected（扩展可能已重载，稍后重试）'));
+    });
+  }
+
+  function ensurePort() {
+    if (dead || !port) openPort();
+    return port;
+  }
+
+  const onMessage = (env) => {
     if (!env || !env.__deepApi) return;
     const e = env.__deepApi;
     const p = pending.get(e.id);
@@ -47,14 +82,25 @@ if (!window.deepApi && typeof chrome !== 'undefined' && chrome.runtime && chrome
         p._reject && p._reject(new Error((e.error && e.error.error && e.error.error.message) || 'bridge error'));
       }
     }
-  });
+  };
+
+  openPort();
+  // 保活：流活跃期间维持 SW（20s ping，与 bridge-relay 同范式）。
+  // 测试环境（node vm）可能没提供 setInterval → 跳过，避免 ReferenceError。
+  if (typeof setInterval === 'function') {
+    const keepalive = setInterval(() => {
+      try { ensurePort().postMessage({ __deepApi: { kind: 'ping' } }); }
+      catch (e) { dead = true; }
+    }, 20_000);
+    if (keepalive && typeof keepalive.unref === 'function') keepalive.unref();
+  }
 
   const send = (params) => {
     const id = ++seq;
     const isStream = !!params.stream;
     const p = { isStream, queue: [], settled: false };
     pending.set(id, p);
-    port.postMessage({ __deepApi: { id, method: 'chat.completions.create', params } });
+    ensurePort().postMessage({ __deepApi: { id, method: 'chat.completions.create', params } });
     if (isStream) {
       // OpenAI SDK 期望 Response-like 对象：body 是 ReadableStream<Uint8Array>。
       // 每个 chunk 含一个或多个 SSE 帧（'data: {...}\n\n' 或 'data: [DONE]\n\n'）。
@@ -84,7 +130,7 @@ if (!window.deepApi && typeof chrome !== 'undefined' && chrome.runtime && chrome
     const id = ++seq;
     const p = { isStream: false, queue: [], settled: false };
     pending.set(id, p);
-    port.postMessage({ __deepApi: { id, method, params } });
+    ensurePort().postMessage({ __deepApi: { id, method, params } });
     return new Promise((res, rej) => { p._resolve = res; p._reject = rej; });
   };
 

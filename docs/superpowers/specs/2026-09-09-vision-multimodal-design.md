@@ -80,10 +80,10 @@
 ### 3.3 错误语义
 
 - `image_url.url` 不是 data URL 也不是 http(s) URL → 400
-- file upload 失败 → 400 `invalid_request_error`（透传 deepSeek 服务端错误码）
-- pollFileReady 超时（默认 30s）→ 408
-- vision 临时 session 失败 → 500
-- **不静默降级**：失败必须显式报
+- file upload 失败 / 文件解析 FAILED（CONTENT_EMPTY / PARSE_FAILED / FAILED / ERROR）→ 400 `invalid_request_error`（透传 deepSeek 服务端错误码）
+- 可重试类错误（HTTP 401 登录过期 / 429 限流 / WAF 202 / 网络 TypeError）→ 按统一错误模型映射（503 / 429）
+- pollFileReady 超时（默认 10×2s = 20s）→ **不报错，继续发 completion**（带 `ref_file_ids`），在请求日志写 warning（`LogEntry.warnings`，debug 日志 tab 可见）
+- **2026-09-11 修订依据**：参考实现 llmweb2api（`client.ts` pollFileReady）超时只 log 后返回、不抛错；旧版 spec 写的「超时 → 408」与参考不符（且 408 不在 §10 错误模型表里）。该行为与「不静默降级」的关系是：失败（上传被拒/解析 FAILED）仍显式报 400/5xx；轮询超时是**未确认就绪**而非确定失败，按参考实现继续，但必须在日志里可见。
 
 ---
 
@@ -102,7 +102,7 @@ vision-pipeline.run(message, token):
      a. data URL → 解码 base64 → bytes + mime
      b. http(s) URL → fetch 下载 → bytes + mime
      c. uploadFile(token, filename, bytes, mime) → file_id
-     d. pollFileReady(token, file_id) // 默认 10×2s = 20s，超时报错
+     d. pollFileReady(token, file_id) // 默认 10×2s = 20s；超时不报错（见 §3.3），返回 {ready:false} 由 router 记 warning
   3. 重写 messages:
      - text 块保留
      - image_url 块替换为 `[image]` 占位符（参考 llmweb2api `renderMessageBlock`）

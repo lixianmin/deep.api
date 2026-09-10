@@ -58,3 +58,18 @@ describe('mountRouting', () => {
     } finally { unmount(); }
   });
 });
+// 2026-09-11（fix/review-r1）：thread 字段（conversationId 来自调用方）直插 innerHTML → HTML 注入。
+describe('mountRouting review-r1', () => {
+  it('conversationId / webSessionId 里的 HTML 被转义', async () => {
+    const pane = document.createElement('div');
+    const unmount = mountRouting(pane);
+    try {
+      portListeners.msg!({ kind: 'state', payload: { threads: [{
+        conversationId: '<img src=c>', kind: 'auto', mirrorLen: 1, webSessionId: '<img src=w>',
+        parentMessageId: null, lastUsedAt: 100, busy: false,
+      }] } });
+      await new Promise(r => setTimeout(r, 10));
+      expect(pane.querySelector('img')).toBeNull();
+    } finally { unmount(); }
+  });
+});

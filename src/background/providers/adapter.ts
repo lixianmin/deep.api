@@ -13,6 +13,10 @@ export interface UploadFileResult {
   status: string;
 }
 export interface PollFileReadyOptions { maxAttempts?: number; intervalMs?: number }
+/** 2026-09-11（fix/vision-poll-timeout）：轮询结果回执——`ready: false` = 超时未确认就绪（非致命，
+ *  调用方继续发 completion 但要记 warning 日志）；文件解析失败（FAILED 类）仍直接抛错。
+ *  依据：参考实现 llmweb2api pollFileReady 超时只 log 后返回；spec 旧写的 408 与参考不符，已同步修订。 */
+export interface PollFileReadyResult { ready: boolean }
 /** 调用方可覆盖的模型层开关；undefined 表示沿用 ResolvedModel/LIMITS 默认。 */
 export interface CompletionOverrides {
   /** 覆盖 thinking_enabled；null/false 显式关闭，true 开启。undefined 沿用默认。 */
@@ -48,7 +52,7 @@ export interface ProviderAdapter {
   // + /file/fetch_files 逆向（用户 DevTools curl 验证）。adapter 提供 file upload + poll ready；
   // 详见 docs/superpowers/specs/2026-09-09-vision-multimodal-design.md §4。
   uploadFile?(ctx: ProviderContext, bytes: Uint8Array, mime: string, filename: string): Promise<UploadFileResult>;
-  pollFileReady?(ctx: ProviderContext, fileId: string, options?: PollFileReadyOptions): Promise<void>;
+  pollFileReady?(ctx: ProviderContext, fileId: string, options?: PollFileReadyOptions): Promise<PollFileReadyResult>;
   streamCompletion(ctx: ProviderContext, req: ProviderCompletion): AsyncIterable<ProviderStreamEvent>;
   readonly models: ModelInfo[];
   resolveModel(modelId: string): ResolvedModel | null;

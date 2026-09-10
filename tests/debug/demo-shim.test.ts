@@ -164,3 +164,45 @@ describe('chrome-extension:// shim (stream mode returns Response)', () => {
     expect(errorPayload.message).toBe('未登录');
   });
 });
+// 2026-09-11（fix/review-r1）：shim 的 deepapi port 断线后无恢复路径——每次调用都失败，
+// 页面里没有重连入口（对比 bridge-relay 的 onDisconnect 重连 + 保活）。
+describe('demo shim review-r1: port 断线恢复', () => {
+  it('port 断开 → 在飞请求 reject（不挂死）；下一次调用自动重连', async () => {
+    const listeners: Array<(m: ShimMsg) => void> = [];
+    let disconnectCb: (() => void) | null = null;
+    const ports: any[] = [];
+    const makePort = (): any => {
+      const p: any = {
+        onMessage: { addListener: (fn: any) => { listeners.push(fn); } },
+        onDisconnect: { addListener: (fn: any) => { disconnectCb = fn; } },
+        postMessage: () => {},
+        __listeners: listeners,
+      };
+      ports.push(p);
+      return p;
+    };
+    const localWin: any = new Proxy({ addEventListener: () => {}, removeEventListener: () => {}, location: { hash: '' } }, { get: (t, p) => (p in t ? (t as any)[p] : undefined) });
+    const localCtx = vm.createContext({
+      TextEncoder, TextDecoder, ReadableStream, Response, Request, Blob, atob, btoa, fetch,
+      setTimeout, clearTimeout, setInterval, clearInterval, queueMicrotask, Promise,
+      chrome: { runtime: { connect: () => makePort() } },
+      window: localWin,
+      document: stubDoc,
+      console: { log: () => {}, error: () => {}, warn: () => {} },
+    });
+    vm.runInContext(demoJs, localCtx);
+    const api: any = localWin.deepApi;
+    expect(api).toBeTruthy();
+    expect(ports.length).toBe(1);
+
+    const inflight = api.models.list();
+    const rejected = expect(inflight).rejects.toThrow(/disconnect/i);
+    expect(typeof disconnectCb).toBe('function');
+    disconnectCb!();
+    await rejected;
+
+    // 断线后的下一次调用必须重新 connect，而不是复用死 port（旧实现永久失败）
+    void api.models.list().catch(() => undefined);
+    expect(ports.length).toBe(2);
+  });
+});

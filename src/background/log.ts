@@ -56,6 +56,9 @@ export interface LogEntry {
   // prompt 长度）。动机：同一模型下 demo 场景返回标准 <tool_calls>，spice 请求返回 DSML——
   // 两条路径共用 router.create()，差异只可能在输入侧；原日志只有 client messages，无法两边 diff。
   requestFull?: string;
+  // 2026-09-11（fix/vision-poll-timeout）：非致命警告（如「图片轮询超时未确认就绪，已继续发送」）。
+  // 继续发 completion 是刻意设计（对齐参考实现 llmweb2api），但操作员必须在日志里看到这个事实。
+  warnings?: string[];
 }
 
 /**

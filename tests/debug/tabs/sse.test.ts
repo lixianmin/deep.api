@@ -49,3 +49,35 @@ describe('mountSse', () => {
     } finally { unmount(); }
   });
 });
+// 2026-09-11（fix/review-r1）：分组标题时间取自倒序数组首元素（最新），应取组内最早。
+describe('mountSse review-r1', () => {
+  it('分组标题按「最早 → 最新」标时间', async () => {
+    const pane = document.createElement('div');
+    const unmount = mountSse(pane);
+    try {
+      portListeners.msg!({ kind: 'state', payload: { log: [
+        { at: 1_000, provider: 'p', model: 'm', ok: true, ms: 1, webSessionId: 'wsT', replySample: 'old' },
+        { at: 62_000, provider: 'p', model: 'm', ok: true, ms: 1, webSessionId: 'wsT', replySample: 'new' },
+      ] } });
+      await new Promise(r => setTimeout(r, 10));
+      const summary = pane.querySelector('summary')!.textContent ?? '';
+      const oldest = new Date(1_000).toLocaleTimeString();
+      const newest = new Date(62_000).toLocaleTimeString();
+      expect(summary).toContain(oldest);
+      expect(summary).toContain(newest);
+      expect(summary.indexOf(oldest)).toBeLessThan(summary.indexOf(newest));
+    } finally { unmount(); }
+  });
+
+  it('webSessionId / replySample 里的 HTML 被转义', async () => {
+    const pane = document.createElement('div');
+    const unmount = mountSse(pane);
+    try {
+      portListeners.msg!({ kind: 'state', payload: { log: [
+        { at: 1, provider: 'p', model: 'm', ok: true, ms: 1, webSessionId: '<img src=w>', replySample: '<img src=r>' },
+      ] } });
+      await new Promise(r => setTimeout(r, 10));
+      expect(pane.querySelector('img')).toBeNull();
+    } finally { unmount(); }
+  });
+});

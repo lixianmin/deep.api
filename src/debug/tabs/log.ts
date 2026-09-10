@@ -1,7 +1,11 @@
 import { getPanelApi } from './panel-api';
 import type { LogEntry } from '../../background/log';
 
-const escapeHtml = (s: string): string => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+/** HTML 转义（本文件所有直插 innerHTML 的字段都要过它）。
+ *  2026-09-11（fix/review-r1）：日志字段（cid/provider/model/replySample 等）部分来自调用方与模型
+ *  输出（conv_id 由页面传入、replySample 是模型原文）——不转义 = 任何被访问的网页都能往 chrome-extension://
+ *  源里注入 HTML。原本只对 sseRaw/requestFull 转义，其余漏了。sse.ts / routing.ts 也从这里导入复用。 */
+export const escapeHtml = (s: string): string => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 
 const ACTIONS = ['rebuild', 'incremental', 'error', 'undefined'] as const;
 
@@ -53,7 +57,10 @@ export function mountLog(pane: HTMLElement): () => void {
     listEl.innerHTML = rows.map((l, i) => {
       const t = new Date(l.at).toLocaleTimeString();
       const reason = (l.reasoningSample ?? '').slice(0, 100);
-      const reply = (l.replySample ?? l.error ?? '').slice(0, 100);
+      // 2026-09-11（fix/review-r1）：reply 只取 replySample。旧实现 `replySample ?? error` 让
+      // 「失败且同时有模型输出」的请求（DSML 解析 400 / 工具修复失败现场必中）永远看不到 error，
+      // 而这正是最需要看失败原因的场景。error 改为单独一块（下面）。
+      const reply = (l.replySample ?? '').slice(0, 100);
       // 2026-09-09（diag/pro-sse-paths）：bytes/paths 列——判 Pro 场景 B-1/B-2/B-3
       const bytes = l.sseBytes ?? 0;
       const paths = l.ssePaths ?? [];
@@ -64,27 +71,29 @@ export function mountLog(pane: HTMLElement): () => void {
       return `<div data-row style="padding:4px;border-bottom:1px solid #eee;font-family:ui-monospace,monospace;font-size:11px;">
         <div>
           <span style="color:#888;">${t}</span>
-          <span style="margin-left:8px;">${l.provider}</span>
-          <span style="margin-left:8px;">${l.model}</span>
+          <span style="margin-left:8px;">${escapeHtml(l.provider)}</span>
+          <span style="margin-left:8px;">${escapeHtml(l.model)}</span>
           <span style="margin-left:8px;color:${l.ok ? '#0a0' : '#a00'};">${l.ok ? 'ok' : 'err'}</span>
           <span style="margin-left:8px;">${l.ms}ms</span>
-          <span style="margin-left:8px;">${l.action ?? ''}</span>
-          <span style="margin-left:8px;color:#666;">${l.cid ?? ''}</span>
+          <span style="margin-left:8px;">${escapeHtml(l.action ?? '')}</span>
+          <span style="margin-left:8px;color:#666;">${escapeHtml(l.cid ?? '')}</span>
           <button data-copy="${i}" style="float:right;">复制完整 JSON</button>
         </div>
+        ${l.error ? `<div style="margin-left:8px;margin-top:2px;"><span style="color:#888;">error:</span><span style="margin-left:4px;color:#a00;">${escapeHtml(l.error)}</span></div>` : ''}
+        ${(l.warnings ?? []).map((w) => `<div style="margin-left:8px;margin-top:2px;"><span style="color:#888;">warn:</span><span style="margin-left:4px;color:#a60;">${escapeHtml(w)}</span></div>`).join('')}
         <div style="margin-left:8px;margin-top:2px;">
           <span style="color:#888;">reply:</span>
-          <span style="margin-left:4px;">${reply || '(空)'}</span>
+          <span style="margin-left:4px;">${escapeHtml(reply) || '(空)'}</span>
         </div>
         <div style="margin-left:8px;margin-top:2px;${reasonStyle}">
           <span style="color:#888;">💭reason:</span>
-          <span style="margin-left:4px;">${reason || '(空)'}</span>
+          <span style="margin-left:4px;">${escapeHtml(reason) || '(空)'}</span>
         </div>
         <div style="margin-left:8px;margin-top:2px;${bytesStyle}">
           <span style="color:#888;">sse:</span>
           <span style="margin-left:4px;">${bytes}B</span>
           <span style="margin-left:8px;color:#888;">paths:</span>
-          <span style="margin-left:4px;">${paths.length ? paths.join(', ') : '(none)'}</span>
+          <span style="margin-left:4px;">${escapeHtml(paths.length ? paths.join(', ') : '(none)')}</span>
         </div>
         ${(l.sseRaw ?? '') ? `<div style="margin-left:8px;margin-top:2px;color:#888;max-width:900px;word-break:break-all;">raw: ${escapeHtml(l.sseRaw!.slice(0, 400))}</div>` : ''}
         ${(l.requestFull ?? '') ? `<div style="margin-left:8px;margin-top:2px;color:#888;max-width:900px;word-break:break-all;">req: ${escapeHtml(l.requestFull!)}</div>` : ''}
@@ -99,9 +108,14 @@ export function mountLog(pane: HTMLElement): () => void {
   };
 
   const refresh = async (): Promise<void> => {
-    allLogs = await getPanelApi().listLogs();
-    allLogs.sort((a, b) => b.at - a.at);
-    render();
+    // 2026-09-11（fix/review-r1）：失败不再静默（旧实现 void refresh() 吞掉 reject → tab 永久空白无提示）
+    try {
+      allLogs = await getPanelApi().listLogs();
+      allLogs.sort((a, b) => b.at - a.at);
+      render();
+    } catch (e) {
+      listEl.innerHTML = `<div style="color:#a00;padding:4px;">加载失败：${escapeHtml(e instanceof Error ? e.message : String(e))}</div>`;
+    }
   };
   refreshBtn.addEventListener('click', () => { void refresh(); });
   searchEl.addEventListener('input', render);

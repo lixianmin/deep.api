@@ -79,8 +79,14 @@ const POLL_INTERVAL_MS = 1000;
 const POLL_MAX_TRIES = 15;
 const CLICK_SETTLE_MS = 200;
 const RETRY_DELAY_MS = 3000;
+/** 2026-09-11（fix/review-r1 A5）：用户点击触发的最小间隔——连点不再排队派生多条 capture 链。 */
+const CLICK_THROTTLE_MS = 1000;
 
-export interface StartOptions { pollIntervalMs?: number; pollMaxTries?: number; clickSettleMs?: number; retryDelayMs?: number }
+export interface StartOptions {
+  pollIntervalMs?: number; pollMaxTries?: number; clickSettleMs?: number; retryDelayMs?: number;
+  /** 测试可注入 click 触发器开关。缺省 = 发布语义（测试模式下不注册）。 */
+  clickListener?: boolean;
+}
 
 function findTrigger(): HTMLElement | null {
   for (const sel of TRIGGER_SELECTOR_CANDIDATES) {
@@ -90,21 +96,19 @@ function findTrigger(): HTMLElement | null {
   return null;
 }
 
-/** 打开下拉 → 等渲染 → 抽 options → 关闭 → 推 SW。失败一律静默。 */
-async function captureOnce(): Promise<boolean> {
-  const trigger = findTrigger();
-  if (!trigger) return false;
-  try { trigger.click(); } catch { /* ignore */ }
-  await new Promise((r) => setTimeout(r, CLICK_SETTLE_MS));
-  const opts = await extractModelOptions();
-  // 关闭下拉：Escape 键（Ant Design / ARIA combobox 通用）
+/** 关闭下拉：优先 Escape 键。
+ *  2026-09-11（fix/review-r1 A5）：旧实现 `document.body.click()` 会冒泡到本文件自己注册的
+ *  document 捕获监听器 → 每次 capture 都派生新 poll（指数级点击/消息风暴）。*/
+function closeDropdown(): void {
   try {
     (document.activeElement as HTMLElement | null)?.blur?.();
-    document.body.click();
+    // 2026-09-11（fix/review-r2）：派发目标必须在页面 React 树内——body 是 root 容器的**祖先**，
+    // React 17+ 在 root 容器上委托事件，body 上派发的 keydown 不会向下传到容器里的 handler，
+    // 旧实现（activeElement ?? body）在常见情形（activeElement=body）关不掉下拉。
+    const listbox = document.querySelector('[role="listbox"]') as HTMLElement | null;
+    const target = listbox ?? findTrigger() ?? (document.activeElement as HTMLElement | null);
+    target?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   } catch { /* ignore */ }
-  if (opts.length === 0) return false;
-  sendCatalogUpdate(opts);
-  return true;
 }
 
 function isTargetHost(): boolean {
@@ -117,7 +121,7 @@ function isTargetHost(): boolean {
 function start(): void {
   if (!isTargetHost()) return;
   // 2026-09-14（fix/models-v4-retired）：允许测试走快路径。默认不快——发布不需快。
-  const opts: Required<StartOptions> = {
+  const opts: Required<Omit<StartOptions, 'clickListener'>> = {
     pollIntervalMs: POLL_INTERVAL_MS,
     pollMaxTries: POLL_MAX_TRIES,
     clickSettleMs: CLICK_SETTLE_MS,
@@ -127,21 +131,31 @@ function start(): void {
 }
 
 /** 2026-09-14（fix/models-v4-retired）：start() 的可定制版本——测试可传 fast interval/tries。
- *  若 trigger 不在，重试 RETRY_DELAY_MS 后再 captureOnce 一次。 */
+ *  若 trigger 不在，重试 RETRY_DELAY_MS 后再 captureOnceSettle 一次。 */
 export function startWith(opts: StartOptions): void {
   if (!isTargetHost()) return;
   const interval = opts.pollIntervalMs ?? POLL_INTERVAL_MS;
   const maxTries = opts.pollMaxTries ?? POLL_MAX_TRIES;
   const settle = opts.clickSettleMs ?? CLICK_SETTLE_MS;
   const retryDelay = opts.retryDelayMs ?? RETRY_DELAY_MS;
+  let inFlight = false;
+  let lastPollAt = 0;
 
   const pollOnce = async (): Promise<boolean> => {
-    for (let i = 0; i < maxTries; i++) {
-      if (await captureOnceSettle(settle)) return true;
-      await new Promise((r) => setTimeout(r, interval));
+    // 2026-09-11（fix/review-r1 A5）：in-flight 门闩——上一次 capture 链未结束就不再派生新的，
+    // 防止同一刻多个触发源（user click + 已排队的重试）把轮询并发化。
+    if (inFlight) return false;
+    inFlight = true;
+    try {
+      for (let i = 0; i < maxTries; i++) {
+        if (await captureOnceSettle(settle)) return true;
+        await new Promise((r) => setTimeout(r, interval));
+      }
+      await new Promise((r) => setTimeout(r, retryDelay));
+      return await captureOnceSettle(settle);
+    } finally {
+      inFlight = false;
     }
-    await new Promise((r) => setTimeout(r, retryDelay));
-    return await captureOnceSettle(settle);
   };
 
   if (document.readyState === 'loading') {
@@ -150,10 +164,19 @@ export function startWith(opts: StartOptions): void {
     void pollOnce();
   }
 
-  // 2026-09-14（fix/models-v4-retired）：click listener 仅在生产模式注册（避免测试污染）。
-  // 测试在 beforeEach 重置 document 时不会清旧 listener，导致 stale poll 阻塞后续测试。
-  if ((globalThis as { __MODELS_SYNC_TEST?: boolean }).__MODELS_SYNC_TEST !== true) {
-    document.addEventListener('click', () => {
+  // 2026-09-14（fix/models-v4-retired）：click listener 仅在生产模式注册（避开测试污染）。
+  // 2026-09-11（fix/review-r1 A5）：三重防护防自触发风暴——
+  //   (1) 忽略 isTrusted=false：脚本自己合成的 trigger.click()/body.click() 不再入队；
+  //   (2) 节流 CLICK_THROTTLE_MS：连点只保留首次；
+  //   (3) pollOnce 的 in-flight 门闩：上一条链未完就不开新链。
+  const registerClickListener = opts.clickListener
+    ?? ((globalThis as { __MODELS_SYNC_TEST?: boolean }).__MODELS_SYNC_TEST !== true);
+  if (registerClickListener) {
+    document.addEventListener('click', (ev) => {
+      if (!ev.isTrusted) return;
+      const now = Date.now();
+      if (now - lastPollAt < CLICK_THROTTLE_MS) return;
+      lastPollAt = now;
       setTimeout(() => { void pollOnce(); }, settle);
     }, true);
   }
@@ -165,10 +188,7 @@ async function captureOnceSettle(settleMs: number): Promise<boolean> {
   try { trigger.click(); } catch { /* ignore */ }
   await new Promise((r) => setTimeout(r, settleMs));
   const opts = await extractModelOptions();
-  try {
-    (document.activeElement as HTMLElement | null)?.blur?.();
-    document.body.click();
-  } catch { /* ignore */ }
+  closeDropdown();
   if (opts.length === 0) return false;
   sendCatalogUpdate(opts);
   return true;

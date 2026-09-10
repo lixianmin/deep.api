@@ -520,3 +520,74 @@ describe('mountChat: 发送后图片显示在消息气泡（fix/image-in-bubble�
     }
   });
 });
+
+// 2026-09-11（fix/review-r1）：右键菜单用 DOM 序号反查 history 导致错位/RangeError。
+describe('mountChat review-r1: 右键菜单与 history 对应', () => {
+  const sseWith = (body: string) => new ReadableStream<Uint8Array>({
+    start(c) { c.enqueue(new TextEncoder().encode(body)); c.close(); },
+  });
+
+  const sendOnce = async (): Promise<HTMLElement> => {
+    const pane = document.createElement('div');
+    mountChat(pane);
+    const stream = pane.querySelector('[data-chat-stream]')!;
+    (pane.querySelector('[data-chat-input]') as HTMLTextAreaElement).value = 'hi';
+    pane.querySelector<HTMLButtonElement>('[data-chat-send]')!.click();
+    await new Promise(r => setTimeout(r, 30));
+    return stream as HTMLElement;
+  };
+
+  it('失败占位气泡（无 history 项）右键 → 「从此处重发」禁用且不抛错', async () => {
+    (globalThis as any).deepApi.chat.completions.create = vi.fn().mockResolvedValue({
+      body: sseWith('data: {"error":{"message":"boom","code":"provider_unavailable"}}\n\ndata: [DONE]\n\n'),
+    });
+    const stream = await sendOnce();
+    const asst = stream.children[1] as HTMLElement;
+    expect(asst.textContent).toContain('[错误]');
+
+    const errors: unknown[] = [];
+    const onError = (e: Event): void => { errors.push((e as ErrorEvent).error ?? e); };
+    window.addEventListener('error', onError);
+    try {
+      asst.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
+      const menu = document.querySelector('[data-msg-menu]')!;
+      expect(menu).toBeTruthy();
+      const replay = menu.querySelector<HTMLButtonElement>('[data-menu-item="replay-from-here"]')!;
+      // 修复前：菜单项可用 → 点击时 history.indexOf = -1 → history.length = -1 抛 RangeError
+      expect(replay.disabled).toBe(true);
+      replay.click();
+    } finally {
+      window.removeEventListener('error', onError);
+    }
+    expect(errors).toEqual([]);
+  });
+
+  it('正常 assistant 气泡（有 history 项）→ 「从此处重发」可用', async () => {
+    (globalThis as any).deepApi.chat.completions.create = vi.fn().mockResolvedValue({
+      body: sseWith('data: {"choices":[{"delta":{"content":"reply"}}]}\n\ndata: [DONE]\n\n'),
+    });
+    const stream = await sendOnce();
+    const asst = stream.children[1] as HTMLElement;
+    asst.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
+    const replay = document.querySelector<HTMLButtonElement>('[data-msg-menu] [data-menu-item="replay-from-here"]')!;
+    expect(replay.disabled).toBe(false);
+  });
+
+  it('失败后右键 user 气泡复制 → 输出该 user 消息（不错位到历史之外）', async () => {
+    (globalThis as any).deepApi.chat.completions.create = vi.fn().mockResolvedValue({
+      body: sseWith('data: {"error":{"message":"boom","code":"provider_unavailable"}}\n\ndata: [DONE]\n\n'),
+    });
+    const stream = await sendOnce();
+    let captured = '';
+    const orig = (navigator as any).clipboard;
+    (navigator as any).clipboard = { writeText: (s: string) => { captured = s; } };
+    try {
+      const userEl = stream.children[0] as HTMLElement;
+      userEl.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
+      document.querySelector<HTMLButtonElement>('[data-msg-menu] [data-menu-item="copy-messages"]')!.click();
+      const parsed = JSON.parse(captured);
+      expect(parsed).toHaveLength(1);
+      expect(parsed[0]).toEqual({ role: 'user', content: 'hi' });
+    } finally { (navigator as any).clipboard = orig; }
+  });
+});

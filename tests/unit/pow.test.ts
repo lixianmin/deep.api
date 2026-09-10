@@ -74,3 +74,35 @@ describe('PowSolver', () => {
     await expect(solver.solve({ algorithm: 'DeepSeekHashV1', challenge: 'c', difficulty: 1, target_path: 'x', salt: 's', expire_at: 1 }, { token: 't', requestId: 'r' })).rejects.toThrow(PowFailedError);
   });
 });
+
+// 2026-09-11（fix/review-r1）：wasm 缓存层一次瞬时失败必须能自愈，且一次 solve 只下载一次。
+describe('PowSolver review-r1 fixes', () => {
+  const challenge = { algorithm: 'DeepSeekHashV1', challenge: 'abc', difficulty: 3, target_path: '/api/v0/chat/completion', salt: 's1', expire_at: 1700000000, signature: 'sig123' };
+
+  it('instantiate 首次失败后不污染缓存，第二次调用可成功', async () => {
+    let calls = 0;
+    const solver = new PowSolver({
+      fetchJson: async () => challenge,
+      fetchBytes: async () => new Uint8Array([0]),
+      instantiate: async () => { calls++; if (calls === 1) throw new Error('cdn hiccup'); return fakeWasm(42); },
+      wasmUrl: WASM_URL,
+    });
+    await expect(solver.solve(challenge, { token: 't', requestId: 'r1' })).rejects.toThrow(PowFailedError);
+    const header = await solver.solve(challenge, { token: 't', requestId: 'r2' });
+    expect(JSON.parse(atob(header)).answer).toBe(42);
+    expect(calls).toBe(2);
+  });
+
+  it('缓存命中时不再重复下载 wasm', async () => {
+    let downloads = 0;
+    const solver = new PowSolver({
+      fetchJson: async () => challenge,
+      fetchBytes: async () => { downloads++; return new Uint8Array([0]); },
+      instantiate: async () => fakeWasm(42),
+      wasmUrl: WASM_URL,
+    });
+    await solver.solve(challenge, { token: 't', requestId: 'r1' });
+    await solver.solve(challenge, { token: 't', requestId: 'r2' });
+    expect(downloads).toBe(1);
+  });
+});

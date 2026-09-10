@@ -70,7 +70,10 @@ function invokeRe(): RegExp {
   return new RegExp(`<${NS}invoke\\s+name="([^"]+)"\\s*>([\\s\\S]*?)</${NS}invoke>`, 'gi');
 }
 function paramRe(): RegExp {
-  return new RegExp(`<${NS}parameter\\s+name="([^"]+)"\\s+string="(true|false)"\\s*>([\\s\\S]*?)</${NS}parameter>`, 'gi');
+  // 2026-09-11（fix/review-r1）：string 属性放宽为可选——现场形态持续漂移，缺属性时旧正则整段
+  // 匹配不到，parameter 被静默丢弃（调用以 {} 发出，下游锁目录/文件）。缺省按 "false"（schema 驱动）：
+  // 声明为 string 的 schema 行为等价于 string="true"，声明为 number/int 的能转成正确类型。
+  return new RegExp(`<${NS}parameter\\s+name="([^"]+)"(?:\\s+string="(true|false)")?\\s*>([\\s\\S]*?)</${NS}parameter>`, 'gi');
 }
 /** 无命名空间的裸工具标记（`<invoke name=` / `<parameter name=`），命名空间可选。 */
 function invokeMarkRe(): RegExp {
@@ -90,15 +93,40 @@ export function parseDsmlToolCalls(text: string, tools: ToolDef[] = []): DsmlPar
   for (const m of text.matchAll(blockRe())) {
     spans.push({ start: m.index ?? 0, end: (m.index ?? 0) + m[0].length, body: m[2] ?? '' });
   }
+  // 2026-09-11（fix/review-r1）：除已闭合块外，还要收拢「未闭合的工具块」——否则
+  // 「闭合块 A + 截断块 B」会静默返回 calls=[A] 且 remainder 里残留 B 的 DSML 原文
+  // （丢调用 + 把标记透传给下游，违反 spec §4.4「解析不出就 repair/400，绝不静默透传」）。
+  // 判据用 isToolMarkup：正文里恰好提到裸 <tool_calls> 不算工具块，不吞正文。
+  for (const m of text.matchAll(new RegExp(blockStartRe().source, 'gi'))) {
+    const start = m.index ?? 0;
+    if (spans.some((s) => start >= s.start && start < s.end)) continue;
+    // 2026-09-11（fix/review-r2 N4）：候选起点在某个已闭合 span **之前** 时，不能追加
+    // [start, text.length) 的截断 span——两者会重叠，同一个 invoke 被解析两次（工具调用重复下发）。
+    // 只看「该起点到下一个 span 起点」这一段：段内含工具标记 = 真截断块 → 整体 fail-closed
+    // （交给 repair）；段内只是散文（正文提到裸 <tool_calls>）→ 跳过，不吞正文。
+    const nextStart = spans.filter((s) => s.start > start).reduce((min, s) => Math.min(min, s.start), text.length);
+    if (nextStart !== text.length) {
+      if (isToolMarkup(text.slice(start, nextStart))) return null;
+      continue;
+    }
+    const rest = text.slice(start);
+    if (!isToolMarkup(rest)) continue;
+    spans.push({ start, end: text.length, body: rest.slice(m[0].length) });
+  }
+  spans.sort((a, b) => a.start - b.start);
   if (!spans.length) {
-    // 2026-09-10（fix/dsml-tolerant-closes）：容错——只有起始标记、没有块闭标签
-    // （模型写完 invoke 就直接停/被截断）。起始标记之后全部当块体。
+    // 容错：只有起始标记、没有块闭标签（模型写完 invoke 就直接停/被截断），但必须真的是工具标记。
     const m = blockStartRe().exec(text);
-    if (!m) return null;
+    if (!m || !isToolMarkup(text.slice(m.index))) return null;
     spans.push({ start: m.index, end: text.length, body: text.slice(m.index + m[0].length) });
   }
   const calls: ToolCall[] = [];
-  for (const span of spans) calls.push(...parseInvokes(span.body, tools));
+  for (const span of spans) {
+    const parsed = parseInvokes(span.body, tools);
+    // 任一 span 解析不出 → 整体判失败（部分成功会静默丢调用；交给上层 repair/400）
+    if (parsed === null) return null;
+    calls.push(...parsed);
+  }
   if (!calls.length) return null;
   // remainder：剥掉所有块、保留块外文本（本仓库语义，见文件头偏差 2）
   let content = '';
@@ -217,12 +245,17 @@ export function partialTagOverlap(text: string, tag: string): number {
 
 // ——— internal ———
 
-/** 把一个 DSML 块体解析成结构化调用；没有可解析 invoke 时返回 null。 */
-function parseInvokes(body: string, tools: ToolDef[]): ToolCall[] {
+/** 把一个 DSML 块体解析成结构化调用；返回 null 表示块体里有无法完整解析的 invoke/parameter 标记。
+ *  2026-09-11（fix/review-r1）：不再静默丢调用——开标记数量与成功解析数量必须一致。 */
+function parseInvokes(body: string, tools: ToolDef[]): ToolCall[] | null {
+  const matches = [...body.matchAll(invokeRe())];
+  const loose = [...body.matchAll(new RegExp(`<${NS}invoke\\b`, 'gi'))].length;
+  if (loose !== matches.length) return null;
   const calls: ToolCall[] = [];
-  for (const m of body.matchAll(invokeRe())) {
+  for (const m of matches) {
     const name = m[1] ?? '';
     const params = parseParamDict(m[2] ?? '');
+    if (params === null) return null;
     calls.push({
       id: newToolCallId(),
       type: 'function',
@@ -235,17 +268,21 @@ function parseInvokes(body: string, tools: ToolDef[]): ToolCall[] {
 /** 整块重写成标准 `<tool_calls>` 文本；解析不出调用时返回 null。 */
 function normalizeBlock(body: string, tools: ToolDef[]): string | null {
   const calls = parseInvokes(body, tools);
-  if (!calls.length) return null;
+  if (!calls || !calls.length) return null;
   return `<tool_calls>\n${JSON.stringify(calls)}\n</tool_calls>`;
 }
 
 type ParamEntry = [name: string, value: string, stringAttr: 'true' | 'false'];
 
-function parseParamDict(invokeBody: string): ParamEntry[] {
+/** 解析 invoke 体内的 parameter；返回 null = 有 parameter 开标记没解出来（截断/形态漂移）。
+ *  2026-09-11（fix/review-r1）：旧实现静默忽略未匹配的 parameter，参数被丢光后调用仍以 {} 发出。 */
+function parseParamDict(invokeBody: string): ParamEntry[] | null {
   const out: ParamEntry[] = [];
   for (const m of invokeBody.matchAll(paramRe())) {
-    out.push([m[1] ?? '', m[3] ?? '', ((m[2] ?? 'true').toLowerCase() === 'false' ? 'false' : 'true')]);
+    out.push([m[1] ?? '', m[3] ?? '', ((m[2] ?? 'false').toLowerCase() === 'false' ? 'false' : 'true')]);
   }
+  const loose = [...invokeBody.matchAll(new RegExp(`<${NS}parameter\\b`, 'gi'))].length;
+  if (loose !== out.length) return null;
   return out;
 }
 

@@ -3,6 +3,8 @@
 // （仅 vision-exp 模型启用上传按钮）；移除 reasoning_effort（DeepSeek 网页无此控件）。
 // 保持原 data-* 属性名 + 右键菜单，使现有 chat.test.ts 全 11 个用例过。
 
+import { escapeHtml } from './log';
+
 type ChatMsg = { role: 'user' | 'assistant'; content: string; reasoning?: string; images?: string[] };
 
 export function mountChat(pane: HTMLElement): () => void {
@@ -58,7 +60,9 @@ export function mountChat(pane: HTMLElement): () => void {
   // 加可选链守护，缺 API 时静默跳过 — topbar select 为空即回退）
   const api = (window as any).deepApi;
   api?.models?.list?.().then((r: any) => {
-    modelSel.innerHTML = (r.data as any[]).map((m: any) => `<option value="${m.id}">${m.description ?? m.id}</option>`).join('');
+    // 2026-09-11（fix/review-r2）：m.id/m.description 来自 catalog（chat.deepseek.com 页面 DOM 文本）
+    // → 页面可控，必须转义（与 popup 同一数据流）。
+    modelSel.innerHTML = (r.data as any[]).map((m: any) => `<option value="${escapeHtml(String(m.id))}">${escapeHtml(String(m.description ?? m.id))}</option>`).join('');
     refreshUploadState();
   }).catch(() => {});
 
@@ -97,8 +101,7 @@ export function mountChat(pane: HTMLElement): () => void {
 
   const renderMsg = (m: ChatMsg, isPending = false): HTMLElement => {
     const el = document.createElement('div');
-    el.dataset.msg = m.role;
-    el.style.cssText = `margin:4px 0;padding:6px;border-radius:4px;text-align:${m.role === 'user' ? 'right' : 'left'};background:${m.role === 'user' ? '#dceaff' : '#f6f6f6'};`;
+    el.dataset.msg = m.role;    el.style.cssText = `margin:4px 0;padding:6px;border-radius:4px;text-align:${m.role === 'user' ? 'right' : 'left'};background:${m.role === 'user' ? '#dceaff' : '#f6f6f6'};`;
     // 2026-09-10（fix/image-in-bubble）：图片附件直接渲染到**消息气泡里**（学 ChatGPT/DeepSeek）——
     // 发送后输入区缩略图清空，但图作为消息的一部分保留在这里。
     if (m.images?.length) {
@@ -115,8 +118,16 @@ export function mountChat(pane: HTMLElement): () => void {
     const text = document.createElement('div');
     text.textContent = m.content + (isPending ? ' …' : '');
     el.appendChild(text);
+    msgOf.set(el, m);   // 2026-09-11（fix/review-r1）：气泡 → 本地历史对象，右键菜单按对象定位
     return el;
   };
+
+  // 2026-09-11（fix/review-r1）：气泡元素 → 它对应的 ChatMsg。
+  // 旧实现用 DOM 序号（Array.prototype.indexOf.call(stream.children, msgEl)）反查 history：
+  // 流式中的 assistant 占位气泡 / 发送失败后留下的 [错误] 气泡都没有 history 项（失败路径不 push
+  // assistant），DOM 比 history 多一条 → 序号从此错位；showMenu 内 history.indexOf(m) 得到 -1，
+  // 点「从此处重发」时 `history.length = -1` 抛 RangeError（重发不执行、菜单也不关）。
+  const msgOf = new WeakMap<HTMLElement, ChatMsg>();
 
   // contextmenu 委托在 stream 容器
   stream.addEventListener('contextmenu', (e) => {
@@ -124,8 +135,7 @@ export function mountChat(pane: HTMLElement): () => void {
     const msgEl = target?.closest('[data-msg]') as HTMLElement | null;
     if (!msgEl || !stream.contains(msgEl)) return;
     e.preventDefault();
-    const idx = Array.prototype.indexOf.call(stream.children, msgEl);
-    const m = history[idx] ?? { role: msgEl.dataset.msg as 'user' | 'assistant', content: msgEl.textContent ?? '' };
+    const m = msgOf.get(msgEl) ?? { role: msgEl.dataset.msg as 'user' | 'assistant', content: msgEl.textContent ?? '' };
     showMenu(msgEl, m);
   });
 
@@ -141,6 +151,8 @@ export function mountChat(pane: HTMLElement): () => void {
       { label: '复制为 curl',         act: 'copy-curl' },
       { label: '从此处重发',           act: 'replay-from-here' },
     ];
+    // idx < 0 = 该气泡不在本地历史（流式占位/失败气泡）——复制项退化为只复制这一条，
+    // 「从此处重发」禁用（重发需要历史起点）。
     const idx = history.indexOf(m);
     for (const it of items) {
       const btn = document.createElement('button');
@@ -148,12 +160,16 @@ export function mountChat(pane: HTMLElement): () => void {
       btn.textContent = it.label;
       btn.style.display = 'block';
       btn.style.width = '100%';
+      if (it.act === 'replay-from-here' && idx < 0) {
+        btn.disabled = true;
+        btn.title = '该气泡没有对应的本地历史（流式占位或发送失败），无法从此处重发';
+      }
       btn.addEventListener('click', () => {
-        if (it.act === 'copy-messages') navigator.clipboard.writeText(JSON.stringify(historyToApiMessages().slice(idx), null, 2));
-        if (it.act === 'copy-curl') navigator.clipboard.writeText(toCurl(historyToApiMessages().slice(idx)));
+        if (it.act === 'copy-messages') navigator.clipboard.writeText(JSON.stringify(idx >= 0 ? historyToApiMessages().slice(idx) : [toApiMessage(m)], null, 2));
+        if (it.act === 'copy-curl') navigator.clipboard.writeText(toCurl(idx >= 0 ? historyToApiMessages().slice(idx) : [toApiMessage(m)]));
         if (it.act === 'replay-from-here') {
+          if (idx < 0) return;   // 双保险：disabled 之外再挡一次，绝不碰 history.length
           if (!confirm('从此处重发会删除该消息及之后所有回复，并触发 rebuild（新 web session）。确认？')) return;
-          const idx = history.indexOf(m);
           const replayed = history[idx];
           history.length = idx;
           stream.innerHTML = '';
@@ -189,18 +205,20 @@ export function mountChat(pane: HTMLElement): () => void {
     return o;
   };
 
+  // 2026-09-11（fix/review-r1）：单条 ChatMsg → API 消息（historyToApiMessages 的单元素版）。
+  const toApiMessage = (m: ChatMsg): { role: string; content: unknown } => {
+    if (m.role === 'user' && m.images?.length) {
+      const blocks: Array<{ type: string; text?: string; image_url?: { url: string } }> = [];
+      if (m.content) blocks.push({ type: 'text', text: m.content });
+      for (const url of m.images) blocks.push({ type: 'image_url', image_url: { url } });
+      return { role: m.role, content: blocks };
+    }
+    return { role: m.role, content: m.content };
+  };
+
   // 2026-09-10（fix/image-in-bubble）：把 ChatMsg[] 转成 API 消息（带 images → image_url blocks）。
   // 所有对外出口（send / copy-messages / copy-curl）都从这里取，保证一致。
-  const historyToApiMessages = (): Array<{ role: string; content: unknown }> =>
-    history.map((m) => {
-      if (m.role === 'user' && m.images?.length) {
-        const blocks: Array<{ type: string; text?: string; image_url?: { url: string } }> = [];
-        if (m.content) blocks.push({ type: 'text', text: m.content });
-        for (const url of m.images) blocks.push({ type: 'image_url', image_url: { url } });
-        return { role: m.role, content: blocks };
-      }
-      return { role: m.role, content: m.content };
-    });
+  const historyToApiMessages = (): Array<{ role: string; content: unknown }> => history.map(toApiMessage);
 
   const doSend = async (text: string): Promise<void> => {
     const imageUrls = attachments.map((a) => a.dataUrl);
@@ -213,7 +231,10 @@ export function mountChat(pane: HTMLElement): () => void {
     const userEl = renderMsg(userMsg);
     stream.appendChild(userEl);
 
-    const asstEl = renderMsg({ role: 'assistant', content: '' }, true);
+    // 2026-09-11（fix/review-r1）：占位元素与最终入 history 的必须是同一个对象——右键菜单靠
+    // WeakMap<元素, ChatMsg> 定位（旧的 DOM 序号反查在占位/失败气泡上会错位）。
+    const asstMsg: ChatMsg = { role: 'assistant', content: '' };
+    const asstEl = renderMsg(asstMsg, true);
     stream.appendChild(asstEl);
     asstEl.textContent = ' …';
 
@@ -253,16 +274,19 @@ export function mountChat(pane: HTMLElement): () => void {
       }
       if (streamErr) {
         // 失败：显示错误，**不清附件**（用户可修好后重发同一张图），不污染历史
+        asstMsg.content = '[错误] ' + streamErr;
         asstEl.textContent = '[错误] ' + streamErr;
         stream.scrollTop = stream.scrollHeight;
         return;
       }
-      history.push({ role: 'assistant', content });
+      asstMsg.content = content;
+      history.push(asstMsg);
       asstEl.textContent = content;
       // 发送完清理附件（一次性 image_url）
       attachments.length = 0;
       thumbs.innerHTML = '';
     } catch (e: any) {
+      asstMsg.content = '[错误] ' + (e?.message ?? String(e));
       asstEl.textContent = '[错误] ' + (e?.message ?? String(e));
     }
     stream.scrollTop = stream.scrollHeight;

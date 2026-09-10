@@ -23,7 +23,7 @@ await cp('src/popup/popup.css', 'extension/popup.css');
 // manifest.json 从仓库根复制到 extension/：Chrome 加载 extension/ 时以这里为准。
 // 仓库根 manifest.json 也保留，方便 diff/查看；bundle/version 走脚本同步两端。
 await cp('manifest.json', 'extension/manifest.json');
-// 复制 demo 页到 extension/demo/，让 popup 能通过 chrome.runtime.getURL('demo/index.html') 在新窗口打开
+// 复制 demo 页到 extension/debug/，让 popup 能通过 chrome.runtime.getURL('debug/index.html') 在新窗口打开
 await cp('src/debug/demo-page/index.html', 'extension/debug/index.html');
 console.log('build + copy done');
 

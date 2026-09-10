@@ -19,7 +19,8 @@
       <div class="row">
         <h3 style="flex:1;margin:0;font-size:12px;color:#666;font-weight:600">登录状态</h3>
       </div>
-      <div id="auth-state" class="bad">未登录</div>
+      <!-- 2026-09-11（fix/review-r1）：初值中立——首个 state 到达前（SW 冷启动）不显示假红色「未登录」 -->
+      <div id="auth-state">检查中…</div>
       <div class="row" style="margin-top:6px">
         <button id="btn-resync-auth" title="打开 chat.deepseek.com 登录页，并强制重新注入 content script 同步 token 后重新探测登录状态">🔄 重新同步</button>
         <button id="btn-open-debug">Open Debug</button>
@@ -44,7 +45,7 @@
       <div class="row">
         <h3 style="flex:1;margin:0;font-size:12px;color:#666;font-weight:600">日志</h3>
         <button id="btn-copy-log" title="复制最近 200 条日志为 JSON（排查用）">复制</button>
-        <button id="btn-copy-forensic" title="只复制最近一条的取证字段（含 base64，可无损跨粘贴链）">复制取证</button>
+        <button id="btn-copy-forensic" title="只复制最近 5 条的取证字段（含 base64，可无损跨粘贴链）">复制取证</button>
       </div>
       <p class="small">每条 chat.completions.create 的路由决策现场：rebuild 旧 web session 被删、incremental 复用、threadFound / mirror 是否匹配。复制后贴给 AI / 自己看。</p>
       <ul id="log-list"></ul>

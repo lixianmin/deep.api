@@ -26,10 +26,8 @@ function hashMirror(mirror: Message[]): string {
 
 // hashMirror 不区分 role：system prompt 是调用方注入的指令，不参与「同一会话续聊」判定。
 // 运维上线知识库后 mirror[0] 的 system 变化会让整 hash 不同（误判 rebuild）——
-// 因此 hash 比对时双方各自剥掉 system 后再算（与 mirrorIsPrefix 的 system 豁免语义对齐）。
-function hashExcludingSystem(messages: Message[]): string {
-  return hashMirror(messages.filter((m) => m.role !== 'system'));
-}
+// 因此比对双方的 system 各自剥掉后再算（与 mirrorIsPrefix 的 system 豁免语义对齐）。
+// 2026-09-11（fix/review-r1）：比对在 tailAfter 里直接在过滤后的序列上做，本函数不再使用。
 
 export interface ThreadEntry {
   providerId: string;       // 2026-09-09：持久化恢复需要重建 `providerId:conversationId` 键
@@ -44,6 +42,9 @@ export interface ThreadEntry {
   idleSince: number;
   lastUsedAt: number;
   busy: boolean;
+  /** 2026-09-11（fix/review-r2 N2）：在途请求的所有权 token（router 传 ctx.requestId）。
+   *  fail() 只在 token 匹配时销毁线程/删会话，避免并发排队请求误删他人正在用的会话。 */
+  busyToken?: string;
   // 2026-09-09（fix/model-switch-rebuild）：同一 conversation_id 中途切模型必须走 rebuild。
   // DeepSeek 网页 web API 一个 chat thread 不允许中途换 model_type（聊天前定模型）；
   // reuse 旧 session 会让 model_type 与 parent_message_id 链不一致。register/commit 时
@@ -89,6 +90,37 @@ export class SessionMapper {
 
   private key(providerId: string, conversationId: string) { return `${providerId}:${conversationId}`; }
 
+  /** 2026-09-11（fix/review-r1）：非 system 前缀比对 + tail 计算统一走本方法。
+   *  旧实现用原始下标 slice：mirror 无 system、本轮开头新增一条 system 时，
+   *  hashExcludingSystem(messages.slice(0, mirror.length)) 会把 system 后的一条真实消息挤出窗口，
+   *  与 mirror 的非 system 序列错位 → 误判 rebuild（多开一个 DeepSeek 会话）。
+   *  system 是调用方注入的指令，本就不参与连续性判定（见 mirrorIsPrefix 注释），所以
+   *  比对与 tail 都必须在「过滤 system 后」的序列上做，tail 直接取过滤后序列的剩余部分。
+   *  返回 null 表示 mirror 不是 messages 的非 system 前缀。 */
+  private tailAfter(mirror: Message[], messages: Message[]): Message[] | null {
+    const mirrorNoSys = mirror.filter((x) => x.role !== 'system');
+    const msgsNoSys = messages.filter((x) => x.role !== 'system');
+    if (msgsNoSys.length < mirrorNoSys.length) return null;
+    // hash 快路径（commit 时缓存同口径的非 system hash）；不等再用逐字段比对兜底
+    // （老持久化数据 mirrorHash 缺失，以及 hash 与字段比对语义可能存在的差异）。
+    const mirrorHash = hashMirror(mirrorNoSys);
+    if (hashMirror(msgsNoSys.slice(0, mirrorNoSys.length)) !== mirrorHash && !mirrorIsPrefix(mirror, messages)) {
+      return null;
+    }
+    // 2026-09-11（fix/review-r2 N1）：tail 必须按**原始下标**切，保留 tail 里的 system 消息。
+    // 直接返回 msgsNoSys 的剩余会把「前缀之后新加的 system 指令」静默丢掉——只发 u2 不发 S。
+    // 找到第 mirrorNoSys.length 个非 system 元素在原始数组的位置，从那里切片；
+    // 若 tail 以 system 开头，调用方会回退 rebuild（全量转录一定带 S，与改动前安全行为一致）。
+    let idx = messages.length;
+    let seen = 0;
+    for (let i = 0; i < messages.length; i++) {
+      if (messages[i]!.role === 'system') continue;
+      seen++;
+      if (seen === mirrorNoSys.length) { idx = i + 1; break; }
+    }
+    return messages.slice(idx);
+  }
+
   decide(providerId: string, messages: Message[], conversationId?: string, modelType?: 'default' | 'expert' | 'vision'): Decision {
     if (messages.length === 0) return { action: 'error', code: 'invalid_request_error', message: 'messages is empty' };
     // 2026-09-09（fix/model-switch-rebuild）：同一 cid 中途切模型 → rebuild。
@@ -103,11 +135,8 @@ export class SessionMapper {
     if (conversationId) {
       const t = this.threads.get(this.key(providerId, conversationId));
       if (!t) return { action: 'rebuild', existing: null };
-      const namedTail = messages.slice(t.mirror.length);
-      const prefixOk = t.mirrorHash != null
-        ? messages.length >= t.mirror.length
-          && hashExcludingSystem(messages.slice(0, t.mirror.length)) === hashExcludingSystem(t.mirror)
-        : mirrorIsPrefix(t.mirror, messages);
+      const namedTail = this.tailAfter(t.mirror, messages);
+      const prefixOk = namedTail !== null;
       if (prefixOk && modelMatches(t) && namedTail.length > 0 && (namedTail[0]!.role === 'user' || namedTail[0]!.role === 'tool')) {
         if (t.mirrorHash == null) t.mirrorHash = hashMirror(t.mirror);
         return { action: 'incremental', thread: t, tail: namedTail };
@@ -118,18 +147,15 @@ export class SessionMapper {
     for (const t of this.threads.values()) {
       if (t.kind !== 'auto' || t.busy) continue;
       if (!modelMatches(t)) continue;
-      const prefixOk = t.mirrorHash != null
-        ? messages.length >= t.mirror.length
-          && hashExcludingSystem(messages.slice(0, t.mirror.length)) === hashExcludingSystem(t.mirror)
-        : mirrorIsPrefix(t.mirror, messages);
-      if (!prefixOk) continue;
+      if (this.tailAfter(t.mirror, messages) === null) continue;
       // 多候选：取镜像最长者；等长时取最近未用（LRU）——确定性（spec §4.3）
       if (best === null || t.mirror.length > best.mirror.length || (t.mirror.length === best.mirror.length && t.lastUsedAt < best.lastUsedAt)) best = t;
     }
     if (best) {
-      const tail = messages.slice(best.mirror.length);
+      const tail = this.tailAfter(best.mirror, messages)!;
       if (tail.length === 0) return { action: 'rebuild', existing: best };        // 完整重放（spec §4.3）
       if (tail[0]!.role !== 'user' && tail[0]!.role !== 'tool') return { action: 'rebuild', existing: best }; // 尾部必须以 user 或 tool 开头
+      if (best.mirrorHash == null) best.mirrorHash = hashMirror(best.mirror);
       return { action: 'incremental', thread: best, tail };
     }
     return { action: 'rebuild', existing: null };
@@ -146,19 +172,49 @@ export class SessionMapper {
     };
     if (this.threads.has(this.key(providerId, conversationId))) this.threads.delete(this.key(providerId, conversationId));
     this.threads.set(this.key(providerId, conversationId), t);
+    this.enforcePool(providerId);
+    this.persist();
+    return t;
+  }
+
+  /** 2026-09-11（fix/review-r1）：面板改 poolSize 时实时生效（spec §8.2「池大小（1–5，默认 2）」）。
+   *  旧实现只在构造时读一次 cfg，且 sw.ts 的 build() 有 cached 短路 → 改设置要等 SW 被回收才生效。 */
+  setPoolSize(n: number): void {
+    this.cfg.poolSize = Math.max(1, Math.floor(n) || 1);
+    const pids = new Set([...this.threads.values()].map((t) => t.providerId));
+    for (const pid of pids) this.enforcePool(pid);
+    this.persist();
+  }
+
+  /** 2026-09-11（fix/review-r1）：面板改 TTL 实时生效；0 只作为测试值，SW 侧会先夹取到 >=1 分钟。 */
+  setTtlMs(ms: number): void {
+    this.cfg.ttlMs = Math.max(0, Math.floor(ms) || 0);
+  }
+
+  /** 超出 poolSize 的 auto thread 按 LRU 淘汰（best-effort deleteSession，spec §4.3）。 */
+  private enforcePool(providerId: string): void {
     while (this.countAuto(providerId) > this.cfg.poolSize) {
       const victim = [...this.threads.values()].filter(x => x.kind === 'auto').sort((a, b) => a.lastUsedAt - b.lastUsedAt)[0];
       if (!victim) break;
       void this.deps.deleteSession(victim.webSessionId);   // best-effort（spec §4.3 淘汰）
       this.threads.delete(this.key(providerId, victim.conversationId));
     }
-    this.persist();
-    return t;
   }
 
-  markBusy(providerId: string, conversationId: string) {
+  markBusy(providerId: string, conversationId: string, token?: string) {
     const t = this.threads.get(this.key(providerId, conversationId));
-    if (t) t.busy = true;
+    if (!t) return;
+    // 2026-09-11（fix/review-r2 N2）：已有在途请求持有时不覆盖其所有权 token。
+    // 否则后到的排队请求会把 token 改成自己的，超时/失败时 fail() 会把**别人正在用**的
+    // web session 删掉（同 conversation_id 并发 + 队列超时的现场）。
+    if (t.busy && t.busyToken && token && t.busyToken !== token) return;
+    t.busy = true;
+    if (token) t.busyToken = token;
+  }
+
+  /** 2026-09-11（fix/review-r1）：拿到队列锁后校验线程是否在排队期间被推进（router afterLock 用）。 */
+  peek(providerId: string, conversationId: string): ThreadEntry | undefined {
+    return this.threads.get(this.key(providerId, conversationId));
   }
 
   commit(providerId: string, conversationId: string, messages: Message[], webSessionId: string, parentMessageId: number | string | null, modelType?: 'default' | 'expert' | 'vision') {
@@ -169,6 +225,7 @@ export class SessionMapper {
     t.parentMessageId = parentMessageId;
     if (modelType !== undefined) t.modelType = modelType;   // commit 调用者总是带新 modelType，覆盖以保证该轮成功后状态一致
     t.busy = false;
+    t.busyToken = undefined;
     t.lastUsedAt = this.deps.now();
     t.idleSince = this.deps.now();
     this.persist();
@@ -193,9 +250,12 @@ export class SessionMapper {
     for (const pid of providers) await this.evictExpired(pid);
   }
 
-  async fail(providerId: string, conversationId: string) {
+  async fail(providerId: string, conversationId: string, token?: string) {
     const t = this.threads.get(this.key(providerId, conversationId));
     if (!t) return;
+    // 2026-09-11（fix/review-r2 N2）：本请求不是该线程的在途所有者时不得销毁它
+    // （同 cid 并发下，排队/失败的一方会把另一条正在流的会话 deleteSession 掉）。
+    if (token !== undefined && t.busyToken !== undefined && t.busyToken !== token) return;
     this.threads.delete(this.key(providerId, conversationId));
     try { await this.deps.deleteSession(t.webSessionId); } catch { /* best effort per spec */ }
     this.persist();
@@ -278,8 +338,25 @@ export class SessionMapper {
 
   restore(snap: { seq: number; threads: ThreadEntry[] }): void {
     this.seq = snap.seq;
+    // 2026-09-11（fix/review-r1）：恢复前校验结构——旧持久化数据/人为损坏（缺 mirror、缺 providerId 等）
+    // 会在 decide 里 hashExcludingSystem(t.mirror) 直接抛 TypeError，而且坏数据不清就永远自愈不了
+    // （每次 create 都 500）。跳过坏条目，其余照常恢复。
     // busy 置 false：SW 重启后进程锁失效（decide 对 auto 线程跳过 busy，不重置会死锁到 TTL）
-    this.threads = new Map(snap.threads.map((t) => [this.key(t.providerId, t.conversationId), { ...t, busy: false }]));
+    const entries: Array<[string, ThreadEntry]> = [];
+    for (const t of snap.threads) {
+      if (!t || typeof t !== 'object') continue;
+      if (typeof t.providerId !== 'string' || typeof t.conversationId !== 'string') continue;
+      if (typeof t.webSessionId !== 'string' || !Array.isArray(t.mirror)) continue;
+      entries.push([this.key(t.providerId, t.conversationId), {
+        ...t,
+        parentMessageId: t.parentMessageId ?? null,
+        idleSince: typeof t.idleSince === 'number' ? t.idleSince : this.deps.now(),
+        lastUsedAt: typeof t.lastUsedAt === 'number' ? t.lastUsedAt : this.deps.now(),
+        busy: false,
+        busyToken: undefined,   // 进程锁随 SW 重启失效，所有权 token 一并清掉（fix/review-r2 N2）
+      }]);
+    }
+    this.threads = new Map(entries);
   }
 
   private countAuto(providerId: string) { return [...this.threads.values()].filter(t => t.kind === 'auto').length; }

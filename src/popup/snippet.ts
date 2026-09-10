@@ -41,3 +41,62 @@ export function formatAuthState(s: AuthStatus): { label: string; cls: 'ok' | 'wa
   if (s.state === 'expired') return { label: `登录失效：${s.message ?? ''}`, cls: 'warn' };
   return { label: '未登录（请在浏览器中登录 chat.deepseek.com）', cls: 'bad' };
 }
+
+/** popup 渲染用的日志条目（后台 LogEntry 的子集）。 */
+export interface PopupLogEntry {
+  at: number;
+  provider: string;
+  model: string;
+  ok: boolean;
+  ms: number;
+  error?: string;
+  cid?: string;
+  msgsLen?: number;
+  action?: 'rebuild' | 'incremental' | 'error';
+  threadFound?: boolean;
+  mirrorLen?: number;
+  deletedOld?: boolean;
+  webSessionId?: string;
+  parentMessageId?: string | number | null;
+  finishReason?: string;
+  firstDiffIdx?: number;
+}
+
+/** HTML 转义。
+ *  2026-09-11（fix/review-r1）：popup 的日志/模型列表字段直插 innerHTML——`cid` 来自调用方传入的
+ *  conversation_id、`error` 含 page 可控的 image_url，而 bridge-main 注入 <all_urls> 的任意网页
+ *  都能往 SW 环形日志写内容，popup 每 2s 重渲染 → 任意 HTML/DOM 注入（恶意 img 请求 / UI 钓鱼）。
+ *  MV3 CSP 挡得住脚本执行，但不挡 HTML 注入。所有插值必须过本函数。 */
+export function escapeHtml(s: string): string {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+}
+
+/** 模型列表（description 来自 catalog label，页面可控）。 */
+export function renderModelListHtml(models: Array<{ id: string; description?: string }>): string {
+  if (!models.length) return '<li class="small">（需登录后获取）</li>';
+  return models
+    .map((m) => `<li><code>${escapeHtml(m.id)}</code> <span class="small">${escapeHtml(m.description ?? '')}</span></li>`)
+    .join('');
+}
+
+/** 日志列表（已按展示顺序排好的条目）。所有字段转义后再拼 HTML。 */
+export function renderLogListHtml(entries: PopupLogEntry[]): string {
+  return entries.map((e) => {
+    const okCls = e.ok ? 'ok' : 'err';
+    const okMark = e.ok ? '✓' : '✗';
+    const actionBadge = e.action === 'incremental' ? '<span class="ok">增量</span>'
+      : e.action === 'rebuild' ? `<span class="err">重建</span>${e.deletedOld ? ' <span class="err" title="rebuild 删了旧 web session">🗑️</span>' : ''}`
+      : '';
+    const detailParts: string[] = [];
+    if (e.cid) detailParts.push(`cid=${escapeHtml(e.cid)}`);
+    if (e.threadFound === false) detailParts.push('<span class="err">thread 未找到</span>');
+    if (e.mirrorLen !== undefined) detailParts.push(`mirrorLen=${e.mirrorLen}`);
+    if (e.msgsLen !== undefined) detailParts.push(`msgs=${e.msgsLen}`);
+    if (e.webSessionId) detailParts.push(`web=${escapeHtml(e.webSessionId.slice(0, 8))}…`);
+    if (e.parentMessageId !== undefined && e.parentMessageId !== null) detailParts.push(`parent=${escapeHtml(String(e.parentMessageId).slice(0, 8))}`);
+    if (e.finishReason) detailParts.push(`finish=${escapeHtml(e.finishReason)}`);
+    if (e.error) detailParts.push(`<span class="err">err=${escapeHtml(e.error.slice(0, 80))}</span>`);
+    if (e.firstDiffIdx !== undefined) detailParts.push(`<span class="err">diff@${e.firstDiffIdx}</span>`);
+    return `<li><span class="${okCls}">${okMark}</span> ${new Date(e.at).toLocaleTimeString()} ${escapeHtml(e.provider)}/${escapeHtml(e.model)} ${e.ms}ms ${actionBadge} <span class="small">${detailParts.join(' ')}</span></li>`;
+  }).join('');
+}

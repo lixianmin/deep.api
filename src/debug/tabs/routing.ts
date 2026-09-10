@@ -1,4 +1,5 @@
 import { getPanelApi } from './panel-api';
+import { escapeHtml } from './log';
 import type { ThreadRow } from '../../background/session-mapper';
 
 const REL = (ms: number): string => {
@@ -26,20 +27,26 @@ export function mountRouting(pane: HTMLElement): () => void {
     (empty as HTMLElement).style.display = 'none';
     tbody.innerHTML = rows.map(r => `
       <tr>
-        <td>${r.conversationId}</td>
-        <td>${r.kind}</td>
+        <td>${escapeHtml(r.conversationId)}</td>
+        <td>${escapeHtml(r.kind)}</td>
         <td>${r.mirrorLen}</td>
-        <td>${r.lastDecision ?? ''}</td>
+        <td>${escapeHtml(r.lastDecision ?? '')}</td>
         <td>${REL(r.lastUsedAt)}</td>
         <td>${r.busy}</td>
-        <td>${r.webSessionId.slice(0, 12)}…</td>
+        <td>${escapeHtml(r.webSessionId.slice(0, 12))}…</td>
       </tr>
     `).join('');
   };
 
   const refresh = async (): Promise<void> => {
-    const rows = await getPanelApi().listThreads();
-    render(rows);
+    // 2026-09-11（fix/review-r1）：失败不再静默（旧实现 void refresh() 吞掉 reject → tab 永久空白无提示）
+    try {
+      const rows = await getPanelApi().listThreads();
+      render(rows);
+    } catch (e) {
+      tbody.innerHTML = `<tr><td colspan="7" style="color:#a00;">加载失败：${escapeHtml(e instanceof Error ? e.message : String(e))}</td></tr>`;
+      (empty as HTMLElement).style.display = 'none';
+    }
   };
 
   refreshBtn.addEventListener('click', () => { void refresh(); });

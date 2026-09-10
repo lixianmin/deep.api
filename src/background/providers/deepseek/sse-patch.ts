@@ -37,14 +37,16 @@ export class ResponseTree {
     for (const f of frags) {
       const t = (f as { type?: unknown }).type;
       const content = (f as { content?: unknown }).content;
-      if (typeof content !== 'string' || content === '') continue;
       if (t === 'TIP' || t === 'INFO') continue;  // 2026-09-09（fix/snapshot-fragments）：UI 提示不进入模型输出
+      // 2026-09-11（fix/review-r1）：空 content 的 fragment 也要推进 this.fragments——
+      // 它与 APPEND 分支同一语义（只推进上下文，后续 /-1/content 增量接上）；旧实现先判空
+      // 再跳过，导致快照给了空 THINK/RESPONSE frag 时后续增量因 frag 不存在被静默丢弃（空回复）。
       if (t === 'THINK' || t === 'THINKING') {
         this.fragments.push({ type: 'think', content: '' });
-        out.push({ kind: 'think_delta', content });
+        if (typeof content === 'string' && content !== '') out.push({ kind: 'think_delta', content });
       } else if (t === 'RESPONSE' || t === 'response') {
         this.fragments.push({ type: 'response', content: '' });
-        out.push({ kind: 'content_delta', content });
+        if (typeof content === 'string' && content !== '') out.push({ kind: 'content_delta', content });
       }
       // 其它 type（TIP/INFO/TEXT 等 UI 提示）不产生内容事件，也不推进 fragments
     }
@@ -72,13 +74,15 @@ export class ResponseTree {
       return out;
     }
     if (op.path === 'response/fragments/-1/content' && typeof value === 'string') {
-      const frag = this.fragments[this.fragments.length - 1];
-      if (!frag) return out;
+      // 2026-09-11（fix/review-r1）：无 frag 上下文时不再静默丢弃——新建一个 response frag 接住内容
+      // （旧注释里那个「新建 response frag」的兑底分支被这里的 early return 挡成了死代码）。
+      let frag = this.fragments[this.fragments.length - 1];
+      if (!frag) { frag = { type: 'response', content: '' }; this.fragments.push(frag); }
       frag.content += value;
       out.push({ kind: frag.type === 'think' ? 'think_delta' : 'content_delta', content: value });
       return out;
     }
-    if ((op.path === 'response/content' || op.path === 'response/fragments/-1/content') && typeof value === 'string') {
+    if (op.path === 'response/content' && typeof value === 'string') {
       // 实测 SSE：内容走 {"p":"response/content","o":"APPEND","v":"..."} + 连续增量 {"v":"..."}（继承 p/o）
       this.fragments.push({ type: 'response', content: value });
       out.push({ kind: 'content_delta', content: value });
@@ -108,8 +112,10 @@ export async function* completionEvents(
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
         // 每轮消费都以 timeout 竞速：body 停顿时本轮 reject，消费者能收到超时错误（契约“无进度断流”）
+        // 2026-09-11（fix/review-r1）：带 5xx status，mapErrStatic 才能归入 provider_unavailable 503
+        // （spec §4.5）；裸 Error 会落成 500 internal_error。
         const timeoutP = new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error('stream timeout: no progress')), timeoutMs);
+          timer = setTimeout(() => reject(Object.assign(new Error('stream timeout: no progress'), { status: 504 })), timeoutMs);
         });
         result = await Promise.race([nextP, timeoutP]);
       } finally {

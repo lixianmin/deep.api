@@ -51,6 +51,16 @@ export class PowSolver {
     wasmUrl: string;
   }) {}
 
+  /** 2026-09-11（fix/review-r1）：失败不落缓存。旧实现 `??=` 在 await 之前就把 instantiate(...)
+   *  的 promise 存进字段——一次瞬时失败（CDN 5xx/网络抖动）会把已 reject 的 promise 永久留在
+   *  wasmCache 里，之后整个 SW 生命周期的每次 solve 都立即以同一错误失败（PoW 全挂到 SW 被回收）。 */
+  private loadWasm(): Promise<WasmInstance> {
+    const p = (async () => this.deps.instantiate(await this.deps.fetchBytes(this.deps.wasmUrl)))();
+    this.wasmCache = p;
+    p.catch(() => { if (this.wasmCache === p) this.wasmCache = null; });
+    return p;
+  }
+
   async getChallenge(ctx: ProviderContext, targetPath: string): Promise<Challenge> {
     const r = await this.deps.fetchJson('/chat/create_pow_challenge', { Authorization: `Bearer ${ctx.token}` }, { target_path: targetPath });
     // 实测响应：{code:0, data:{biz_code:0, biz_data:{challenge:{...}}}}，challenge 在 data.biz_data.challenge
@@ -62,7 +72,7 @@ export class PowSolver {
 
   async solve(challenge: Challenge, ctx: ProviderContext): Promise<string> {
     try {
-      const wasm = this.wasmCache ??= this.deps.instantiate(await this.deps.fetchBytes(this.deps.wasmUrl));
+      const wasm = this.wasmCache ?? this.loadWasm();
       const inst = await wasm;
       // 对照 RezaParsian/DeepseekPowsolver（真实 wasm 实测）：
       // 1) malloc 是 __wbindgen_export_0(size, align)，2 参数（align=1）

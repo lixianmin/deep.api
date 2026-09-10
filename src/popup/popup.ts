@@ -1,27 +1,8 @@
 // popup.ts - 通过 port 与 SW 通信；只在 MV3 popup 内执行（chrome.* 在此文件中）
-import { formatAuthState, pickForensicTail } from './snippet';
+import { formatAuthState, pickForensicTail, renderLogListHtml, renderModelListHtml, type PopupLogEntry } from './snippet';
 
 const port = chrome.runtime.connect({ name: 'deepapi-panel' });
-type LogEntry = {
-  at: number;
-  provider: string;
-  model: string;
-  ok: boolean;
-  ms: number;
-  error?: string;
-  // v0.1.50 诊断字段
-  cid?: string;
-  msgsLen?: number;
-  action?: 'rebuild' | 'incremental' | 'error';
-  threadFound?: boolean;
-  mirrorLen?: number;
-  deletedOld?: boolean;
-  webSessionId?: string;
-  parentMessageId?: string | number | null;
-  finishReason?: string;
-  // v0.1.52（fix/mirror-content）：mirror 匹配失败现场
-  firstDiffIdx?: number;
-};
+type LogEntry = PopupLogEntry;
 type PanelState = {
   providers?: Record<string, {
     poolSize?: number;
@@ -39,6 +20,16 @@ port.onMessage.addListener((m: any) => {
 
 function send(kind: string, payload: unknown = {}) { port.postMessage({ kind, payload }); }
 
+// 2026-09-11（fix/review-r1）：2s 心跳的 render() 不得无条件重写 DOM。
+// 旧实现每次都给 number input 回写 storage 值（用户正在输入时被吞字）、给日志列表重设 innerHTML
+// （滚动位置被打回顶部）。只写变化过的控件。
+function setInputValue(el: HTMLInputElement, value: string): void {
+  if (document.activeElement === el) return;   // 用户正在编辑，不覆盖
+  if (el.value !== value) el.value = value;
+}
+let lastModelListHtml = '';
+let lastLogListHtml = '';
+
 function render() {
   const provider = state.providers?.deepseek;
   const auth = provider?.lastAuthStatus;
@@ -50,7 +41,9 @@ function render() {
     authEl.title = auth.message ?? '';
   } else {
     authEl.textContent = '检查中...';
-    authEl.className = 'bad';
+    // 2026-09-11（fix/review-r1）：初值不再写死红色错误态（popup.html 也同步改为中立文案）——
+    // SW 冷启动期间已登录用户不该看到假「未登录」。
+    authEl.className = '';
     authEl.title = '';
   }
 
@@ -59,34 +52,19 @@ function render() {
 
   const models = provider?.models ?? [];
   const modelList = document.getElementById('model-list')!;
-  modelList.innerHTML = models.length
-    ? models.map(m => `<li><code>${m.id}</code> <span class="small">${m.description}</span></li>`).join('')
-    : '<li class="small">（需登录后获取）</li>';
+  const modelHtml = renderModelListHtml(models);
+  if (modelHtml !== lastModelListHtml) { modelList.innerHTML = modelHtml; lastModelListHtml = modelHtml; }
 
-  (document.getElementById('pool-size') as HTMLInputElement).value = String(provider?.poolSize ?? 2);
-  (document.getElementById('ttl-min') as HTMLInputElement).value = String(provider?.ttlMinutes ?? 30);
+  setInputValue(document.getElementById('pool-size') as HTMLInputElement, String(provider?.poolSize ?? 2));
+  setInputValue(document.getElementById('ttl-min') as HTMLInputElement, String(provider?.ttlMinutes ?? 30));
 
   // v0.1.50 渲染决策现场：action 标色 + deletedOld 红警，让「每发一条消息重建一条」一眼可见
+  // 2026-09-11（fix/review-r1）：整块 HTML 由 renderLogListHtml 生成（全部字段已转义）；
+  // 内容未变就不重设 innerHTML。
   const logEl = document.getElementById('log-list')!;
   const entries = state.log ?? [];
-  logEl.innerHTML = entries.slice(-200).reverse().map(e => {
-    const okCls = e.ok ? 'ok' : 'err';
-    const okMark = e.ok ? '✓' : '✗';
-    const actionBadge = e.action === 'incremental' ? '<span class="ok">增量</span>'
-      : e.action === 'rebuild' ? `<span class="err">重建</span>${e.deletedOld ? ' <span class="err" title="rebuild 删了旧 web session">🗑️</span>' : ''}`
-      : '';
-    const detailParts: string[] = [];
-    if (e.cid) detailParts.push(`cid=${e.cid}`);
-    if (e.threadFound === false) detailParts.push('<span class="err">thread 未找到</span>');
-    if (e.mirrorLen !== undefined) detailParts.push(`mirrorLen=${e.mirrorLen}`);
-    if (e.msgsLen !== undefined) detailParts.push(`msgs=${e.msgsLen}`);
-    if (e.webSessionId) detailParts.push(`web=${e.webSessionId.slice(0, 8)}…`);
-    if (e.parentMessageId !== undefined && e.parentMessageId !== null) detailParts.push(`parent=${String(e.parentMessageId).slice(0, 8)}`);
-    if (e.finishReason) detailParts.push(`finish=${e.finishReason}`);
-    if (e.error) detailParts.push(`<span class="err">err=${e.error.slice(0, 80)}</span>`);
-    if (e.firstDiffIdx !== undefined) detailParts.push(`<span class="err">diff@${e.firstDiffIdx}</span>`);
-    return `<li><span class="${okCls}">${okMark}</span> ${new Date(e.at).toLocaleTimeString()} ${e.provider}/${e.model} ${e.ms}ms ${actionBadge} <span class="small">${detailParts.join(' ')}</span></li>`;
-  }).join('');
+  const logHtml = renderLogListHtml(entries.slice(-200).reverse());
+  if (logHtml !== lastLogListHtml) { logEl.innerHTML = logHtml; lastLogListHtml = logHtml; }
 
   // Tab 高度同步（v0.1.62）：三 panel 中最高者作 min-height，避免切换时整体跳动
   syncTabHeight();
@@ -94,7 +72,9 @@ function render() {
 
 function snippetText(): string {
   // 默认取第一个模型；用户可在自己的网站代码里覆盖
-  const firstModel = (state.providers?.deepseek?.models ?? [{ id: 'deepseek-v4-flash' }])[0]!.id;
+  // 2026-09-11（fix/review-r1）：models 为空数组时 `[0]!.id` 会抛 TypeError（render() 整个挂掉）；
+  // 改用可选链 + 当前默认模型 id 作为兑底。
+  const firstModel = state.providers?.deepseek?.models?.[0]?.id ?? 'deepseek-flash';
   return `// deep.api 接入：本机桥接，无需 API Key
 // 多轮对话测试：每轮把完整历史（含上一轮回复）传给 messages，上下文自动续接
 let history = [{ role: 'user', content: '你好，我叫小明' }];
@@ -115,8 +95,29 @@ document.getElementById('btn-resync-auth')!.addEventListener('click', () => {
   send('panel.resyncAuth');
 });
 document.getElementById('btn-copy-snippet')!.addEventListener('click', () => navigator.clipboard.writeText((document.getElementById('snippet') as HTMLTextAreaElement).value));
-document.getElementById('pool-size')!.addEventListener('change', (e) => send('panel.setPool', { poolSize: Number((e.target as HTMLInputElement).value) }));
-document.getElementById('ttl-min')!.addEventListener('change', (e) => send('panel.setTtl', { ttlMinutes: Number((e.target as HTMLInputElement).value) }));
+// 2026-09-11（fix/review-r1）：空值/0 不发（Number('') === 0）；值夹取到合法区间（SW 也会再夹一次）。
+function readClampedInput(el: HTMLInputElement, min: number, max: number): number | null {
+  const n = Number(el.value);
+  if (!Number.isFinite(n) || n < min) return null;
+  return Math.min(max, Math.floor(n));
+}
+document.getElementById('pool-size')!.addEventListener('change', (e) => {
+  const input = e.target as HTMLInputElement;
+  const n = readClampedInput(input, 1, 5);
+  if (n === null) { input.value = String(state.providers?.deepseek?.poolSize ?? 2); return; }
+  send('panel.setPool', { poolSize: n });
+});
+document.getElementById('ttl-min')!.addEventListener('change', (e) => {
+  const input = e.target as HTMLInputElement;
+  const n = readClampedInput(input, 1, 1440);
+  if (n === null) { input.value = String(state.providers?.deepseek?.ttlMinutes ?? 30); return; }
+  send('panel.setTtl', { ttlMinutes: n });
+});
+
+// 2026-09-11（fix/review-r1）：按钮文案用常量，不从「可能已被上次闪现改写」的 textContent 读回
+// （1.5s 内连点两次会把闪现文案当成原文恢复，按钮永久显示「已复制 N 条」）。
+const COPY_LOG_LABEL = '复制';
+const COPY_FORENSIC_LABEL = '复制取证';
 
 // 2026-09-09（feat/diagnostic-logging）：复制最近 200 条日志为 JSON，贴给 AI / 自己排查
 document.getElementById('btn-copy-log')!.addEventListener('click', () => {
@@ -124,9 +125,8 @@ document.getElementById('btn-copy-log')!.addEventListener('click', () => {
   const text = JSON.stringify(entries, null, 2);
   navigator.clipboard.writeText(text).then(() => {
     const btn = document.getElementById('btn-copy-log') as HTMLButtonElement;
-    const orig = btn.textContent;
     btn.textContent = `已复制 ${entries.length} 条`;
-    setTimeout(() => { btn.textContent = orig ?? '复制'; }, 1500);
+    setTimeout(() => { btn.textContent = COPY_LOG_LABEL; }, 1500);
   }).catch((e) => {
     console.error('[deep.api popup] 复制日志失败', e);
   });
@@ -138,10 +138,9 @@ document.getElementById('btn-copy-log')!.addEventListener('click', () => {
 // 也不用「复制」按钮的 200 条完整日志（含 messagesFull / mirrorFull，可达 MB，贴给 AI 不现实）。
 document.getElementById('btn-copy-forensic')!.addEventListener('click', () => {
   const btn = document.getElementById('btn-copy-forensic') as HTMLButtonElement;
-  const orig = btn.textContent;
   const flash = (msg: string): void => {
     btn.textContent = msg;
-    setTimeout(() => { btn.textContent = orig ?? '复制取证'; }, 1500);
+    setTimeout(() => { btn.textContent = COPY_FORENSIC_LABEL; }, 1500);
   };
   const tail = (state.log ?? []).slice(-5) as unknown as Record<string, unknown>[];
   if (!tail.length) { flash('没有日志'); return; }
@@ -193,12 +192,17 @@ function syncTabHeight(): void {
   const panels = document.querySelectorAll<HTMLElement>('.tab-panel');
   let max = 0;
   panels.forEach(p => {
+    // 2026-09-11（fix/review-r1）：测量前先清掉上一轮写的 min-height——否则元素自己的 min-height
+    // 会把本轮 scrollHeight 抬高，max 单调不减（日志变少后永久留一块空白）。
+    p.style.minHeight = '';
     const wasActive = p.classList.contains('active');
     if (!wasActive) {
       p.style.visibility = 'hidden';
       p.style.display = 'block';
       p.style.position = 'absolute';
       p.style.left = '-9999px';
+      // absolute 定位下 width:auto 走 shrink-to-fit，隐藏 panel 的换行/高度都不真实——补 width。
+      p.style.width = '100%';
     }
     const h = p.scrollHeight;
     if (h > max) max = h;
@@ -207,6 +211,7 @@ function syncTabHeight(): void {
       p.style.display = '';
       p.style.position = '';
       p.style.left = '';
+      p.style.width = '';
     }
   });
   panels.forEach(p => { p.style.minHeight = max + 'px'; });

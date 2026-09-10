@@ -374,3 +374,104 @@ describe('SessionMapper.listThreads', () => {
   });
 });
 
+
+// 2026-09-11（fix/review-r1）：全量审查发现的三个缺陷回归用例。
+describe('SessionMapper review-r1 fixes', () => {
+  it('hash 快路径：mirror 无 system、本轮开头新增 system → 仍判 incremental（不误 rebuild）', () => {
+    const { mapper } = mk();
+    const t = mapper.register('deepseek', 'auto:1', 's1', [m('user', 'q1'), m('assistant', 'a1')]);
+    mapper.commit('deepseek', t.conversationId, [m('user', 'q1'), m('assistant', 'a1')], 's1', 10);
+    const d = mapper.decide('deepseek', [m('system', 'S'), m('user', 'q1'), m('assistant', 'a1'), m('user', 'q2')]);
+    expect(d.action).toBe('incremental');
+    if (d.action === 'incremental') expect(d.tail).toEqual([m('user', 'q2')]);
+  });
+
+  it('hash 快路径：命名线程同样按「非 system 前缀」比对', () => {
+    const { mapper } = mk();
+    mapper.register('deepseek', 'conv-1', 's1', [m('user', 'q1'), m('assistant', 'a1')]);
+    mapper.commit('deepseek', 'conv-1', [m('user', 'q1'), m('assistant', 'a1')], 's1', 10);
+    const d = mapper.decide('deepseek', [m('system', 'S'), m('user', 'q1'), m('assistant', 'a1'), m('user', 'q2')], 'conv-1');
+    expect(d.action).toBe('incremental');
+  });
+
+  it('restore 跳过 mirror 缺失的损坏条目（不使 decide 抛 TypeError）', () => {
+    const { mapper } = mk();
+    mapper.restore({
+      seq: 1,
+      threads: [
+        { providerId: 'deepseek', conversationId: 'broken', webSessionId: 'w', parentMessageId: null, kind: 'auto', idleSince: 0, lastUsedAt: 0, busy: false } as any,
+        { providerId: 'deepseek', conversationId: 'ok', webSessionId: 'w2', parentMessageId: null, kind: 'auto', idleSince: 0, lastUsedAt: 0, busy: false, mirror: [m('user', 'hi')] } as any,
+      ],
+    });
+    const d = mapper.decide('deepseek', [m('user', 'hi'), m('user', 'next')]);
+    expect(d.action).toBe('incremental');
+    if (d.action === 'incremental') expect(d.thread.conversationId).toBe('ok');
+  });
+
+  it('setPoolSize 立即生效：缩容时驱逐最久未用的 auto thread', () => {
+    const { mapper } = mk();
+    mapper.register('deepseek', 'auto:1', 's1', [m('user', 'a')]);
+    mapper.register('deepseek', 'auto:2', 's2', [m('user', 'b')]);
+    expect(mapper.stats().threads).toBe(2);
+    mapper.setPoolSize(1);
+    expect(mapper.stats().threads).toBe(1);
+  });
+
+  it('setTtlMs 立即生效：下轮 evictExpired 立刻按新 TTL 清理', async () => {
+    let clock = 1000;
+    const mapper = new SessionMapper(
+      { createSession: async () => ({ webSessionId: 's1' }), deleteSession: async () => {}, now: () => clock },
+      { poolSize: 2, ttlMs: 60_000 },
+    );
+    mapper.register('deepseek', 'auto:1', 's1', [m('user', 'a')]);
+    clock = 2000;
+    mapper.setTtlMs(500);
+    await mapper.evictExpired('deepseek');
+    expect(mapper.stats().threads).toBe(0);
+  });
+});
+
+// 2026-09-11（fix/review-r2）：独立验证发现的两个 P1 回归。
+describe('SessionMapper review-r2 fixes', () => {
+  it('N1: 前缀之后新增的 system 不被 tailAfter 静默丢弃（tail 以 system 开头 → 安全回退 rebuild）', () => {
+    const { mapper } = mk();
+    const t = mapper.register('deepseek', 'auto:1', 's1', [m('user', 'u1'), m('assistant', 'a1')]);
+    mapper.commit('deepseek', t.conversationId, [m('user', 'u1'), m('assistant', 'a1')], 's1', 10);
+    const d = mapper.decide('deepseek', [m('user', 'u1'), m('assistant', 'a1'), m('system', 'S'), m('user', 'u2')]);
+    expect(d.action).toBe('rebuild');
+  });
+
+  it('N1: 镜像无 system（非前缀处）时不影响正常增量', () => {
+    const { mapper } = mk();
+    const t = mapper.register('deepseek', 'auto:1', 's1', [m('user', 'u1'), m('assistant', 'a1')]);
+    mapper.commit('deepseek', t.conversationId, [m('user', 'u1'), m('assistant', 'a1')], 's1', 10);
+    const d = mapper.decide('deepseek', [m('system', 'S'), m('user', 'u1'), m('assistant', 'a1'), m('user', 'u2')]);
+    expect(d.action).toBe('incremental');
+    if (d.action === 'incremental') expect(d.tail).toEqual([m('user', 'u2')]);
+  });
+
+  it('N2: 别人持有的 busy 线程不因本请求 fail 被删除（token 不匹配则跳过）', async () => {
+    const deps = { createSession: vi.fn(async () => ({ webSessionId: 's1' })), deleteSession: vi.fn(async () => {}), now: () => 1000 };
+    const mapper = new SessionMapper(deps, { poolSize: 2, ttlMs: 60_000 });
+    const t = mapper.register('deepseek', 'conv-1', 's1', [m('user', 'u1')]);
+    mapper.markBusy('deepseek', t.conversationId, 'reqA');
+    mapper.markBusy('deepseek', t.conversationId, 'reqB');   // B 不覆盖 A 的所有权
+    await mapper.fail('deepseek', t.conversationId, 'reqB');
+    expect(mapper.stats().threads).toBe(1);
+    expect(deps.deleteSession).not.toHaveBeenCalled();
+    // 所有者 A 失败时才销毁
+    await mapper.fail('deepseek', t.conversationId, 'reqA');
+    expect(mapper.stats().threads).toBe(0);
+    expect(deps.deleteSession).toHaveBeenCalledWith('s1');
+  });
+
+  it('N2: commit 后所有权清空，下一次 fail（带 token）仍可销毁已提交线程', async () => {
+    const deps = { createSession: vi.fn(async () => ({ webSessionId: 's1' })), deleteSession: vi.fn(async () => {}), now: () => 1000 };
+    const mapper = new SessionMapper(deps, { poolSize: 2, ttlMs: 60_000 });
+    const t = mapper.register('deepseek', 'conv-1', 's1', [m('user', 'u1')]);
+    mapper.markBusy('deepseek', t.conversationId, 'reqA');
+    mapper.commit('deepseek', t.conversationId, [m('user', 'u1'), m('assistant', 'a1')], 's1', 10);
+    await mapper.fail('deepseek', t.conversationId, 'reqB');
+    expect(mapper.stats().threads).toBe(0);
+  });
+});

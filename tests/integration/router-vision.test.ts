@@ -76,7 +76,7 @@ describe('router: vision multimodal 路由', () => {
     const uploadFile = vi.fn(async (_c, _bytes, _mime, _name) => ({
       id: 'file-deadbeef-1234', filename: 'x.png', bytes: 11, status: 'uploaded',
     }));
-    const pollFileReady = vi.fn(async () => {});
+    const pollFileReady = vi.fn(async () => ({ ready: true }));
     const adapter = makeMockAdapter({ uploadFile, pollFileReady });
     const router = makeRouter(adapter);
     const req: ChatCompletionRequest = {
@@ -92,7 +92,7 @@ describe('router: vision multimodal 路由', () => {
     const res: any = await router.create('T', req);
     expect(res.choices[0].message.content).toBe('看到了，这是电路图');
     expect(uploadFile).toHaveBeenCalledTimes(1);
-    expect(pollFileReady).toHaveBeenCalledWith(expect.anything(), 'file-deadbeef-1234', expect.anything());
+    expect(pollFileReady).toHaveBeenCalledWith(expect.anything(), 'file-deadbeef-1234');
     expect(adapter.streamCalls).toHaveLength(1);
     const sent = adapter.streamCalls[0]!;
     expect(sent.refFileIds).toEqual(['file-deadbeef-1234']);
@@ -156,7 +156,7 @@ describe('router: vision multimodal 路由', () => {
   // 发 model_type='default'（避开 vision 变体的 DSML 工具调用格式，下游才能解析工具调用）。
   it('fail-to-pass: flash(modelType=default)+supportsImages → 上传图片且 completion 发 model_type=default', async () => {
     const uploadFile = vi.fn(async () => ({ id: 'file-flash-1', filename: 'x.png', bytes: 11, status: 'uploaded' }));
-    const pollFileReady = vi.fn(async () => {});
+    const pollFileReady = vi.fn(async () => ({ ready: true }));
     const adapter = makeMockAdapter({ uploadFile, pollFileReady });
     adapter.resolveModel = (() => ({ modelId: 'deepseek-flash', modelType: 'default', supportsImages: true, thinking: true, limitChars: 100000 }));
     const router = makeRouter(adapter);
@@ -178,7 +178,7 @@ describe('router: vision multimodal 路由', () => {
     const uploadFile = vi.fn(async (_c, _b, _m, name) => ({
       id: `file-${name}`, filename: name, bytes: 1, status: 'uploaded',
     }));
-    const adapter = makeMockAdapter({ uploadFile, pollFileReady: async () => {} });
+    const adapter = makeMockAdapter({ uploadFile, pollFileReady: async () => ({ ready: true }) });
     const router = makeRouter(adapter);
     const req: ChatCompletionRequest = {
       model: 'deepseek-v4-flash-vision-exp',
@@ -202,7 +202,7 @@ describe('router: vision multimodal 路由', () => {
     const uploadFile = vi.fn(async () => {
       throw Object.assign(new Error('upload failed: 401 unauthorized'), { status: 401 });
     });
-    const adapter = makeMockAdapter({ uploadFile, pollFileReady: async () => {} });
+    const adapter = makeMockAdapter({ uploadFile, pollFileReady: async () => ({ ready: true }) });
     const log: any[] = [];
     const router = makeRouter(adapter, { logSink: log });
     const req: ChatCompletionRequest = {
@@ -215,7 +215,10 @@ describe('router: vision multimodal 路由', () => {
     await expect(router.create('T', req)).rejects.toMatchObject({
       error: {
         error: {
-          code: 'provider_unavailable',
+          // 2026-09-11（fix/vision-poll-timeout）：未分类的 vision 失败（上传被服务端拒绝等请求侧问题）
+          // 按 spec §3.3 映射 400；若 adapter 的 isAuthExpired/isRateLimited/isUnavailable 命中
+          // （真实 DeepSeek adapter 会把 401 归为登录过期）则相应映射 503/429，并保留原文 message。
+          code: 'invalid_request_error',
           message: expect.stringMatching(/upload failed|401/),
         },
       },
@@ -226,10 +229,29 @@ describe('router: vision multimodal 路由', () => {
     expect(errEntry.error).toMatch(/upload|401/);
   });
 
-  it('vision + 图片：pollFileReady 超时 → router 写 log + 拋带 message 的 BridgeError', async () => {
+  // 2026-09-11（fix/vision-poll-timeout 定稿）：轮询超时是「继续发 + warning 日志」，不是报错
+  // （对齐参考实现 llmweb2api）。但文件解析 FAILED 必须显式报（请求侧问题 → 400）。
+  it('vision + 图片：pollFileReady 超时（ready:false）→ completion 照发，log 带 warnings', async () => {
+    const uploadFile = vi.fn(async () => ({ id: 'file-abc', filename: 'x.png', bytes: 11, status: 'uploaded' }));
+    const pollFileReady = vi.fn(async () => ({ ready: false }));
+    const adapter = makeMockAdapter({ uploadFile, pollFileReady });
+    const log: any[] = [];
+    const router = makeRouter(adapter, { logSink: log });
+    const req: ChatCompletionRequest = {
+      model: 'deepseek-v4-flash-vision-exp',
+      messages: [{ role: 'user', content: [
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,AAA' } },
+      ] }],
+    };
+    await expect(router.create('T', req)).resolves.toBeTruthy();
+    const okEntry = log.find((e) => e.ok === true);
+    expect(okEntry?.warnings?.join(' ')).toMatch(/file-abc/);
+  });
+
+  it('vision + 图片：pollFileReady 抛 FAILED → 400 invalid_request_error（请求侧问题，不是 502）', async () => {
     const uploadFile = vi.fn(async () => ({ id: 'file-abc', filename: 'x.png', bytes: 11, status: 'uploaded' }));
     const pollFileReady = vi.fn(async () => {
-      throw new Error('pollFileReady timeout after 10 attempts (fileId=file-abc)');
+      throw new Error('File parse failed: file-abc status=FAILED');
     });
     const adapter = makeMockAdapter({ uploadFile, pollFileReady });
     const log: any[] = [];
@@ -241,7 +263,7 @@ describe('router: vision multimodal 路由', () => {
       ] }],
     };
     await expect(router.create('T', req)).rejects.toMatchObject({
-      error: { error: { message: expect.stringMatching(/pollFileReady|timeout/) } },
+      error: { error: { code: 'invalid_request_error', message: expect.stringMatching(/File parse failed/) } },
     });
     expect(log.find((e) => e.ok === false && e.model === 'deepseek-v4-flash-vision-exp')).toBeTruthy();
   });
@@ -251,7 +273,7 @@ describe('router: vision multimodal 路由', () => {
     const origFetch = globalThis.fetch;
     (globalThis as any).fetch = vi.fn(async () => ({ ok: false, status: 404 } as Response));
     try {
-      const adapter = makeMockAdapter({ uploadFile: vi.fn(), pollFileReady: vi.fn() });
+      const adapter = makeMockAdapter({ uploadFile: vi.fn(), pollFileReady: vi.fn(async () => ({ ready: true })) });
       const log: any[] = [];
       const router = makeRouter(adapter, { logSink: log });
       const req: ChatCompletionRequest = {

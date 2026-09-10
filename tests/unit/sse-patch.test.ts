@@ -183,3 +183,36 @@ describe('completionEvents (真实 SSE 格式 p/o/v)', () => {
     expect(stats.rawSample).toContain('"unknown":"xxx"');
   });
 });
+
+// 2026-09-11（fix/review-r1）：全量审查发现的 fragments 上下文脱节回归用例。
+describe('ResponseTree review-r1 fixes', () => {
+  it('快照里空 content 的 fragment 也推进上下文，后续 /-1/content 增量不丢字', () => {
+    const tree = new ResponseTree();
+    const snap = tree.applySnapshot({ v: { response: { fragments: [{ id: 2, type: 'THINK', content: '' }] } } });
+    expect(snap).toEqual([]);
+    const out = tree.apply({ op: 'APPEND', path: 'response/fragments/-1/content', value: '思考中' });
+    expect(out).toEqual([{ kind: 'think_delta', content: '思考中' }]);
+  });
+
+  it('无 fragment 上下文时 response/fragments/-1/content 走新建 response frag 回退（不再静默丢弃）', () => {
+    const tree = new ResponseTree();
+    const out = tree.apply({ op: 'APPEND', path: 'response/fragments/-1/content', value: '你好' });
+    expect(out).toEqual([{ kind: 'content_delta', content: '你好' }]);
+  });
+});
+
+describe('completionEvents review-r1 fixes', () => {
+  it('无进度超时错误带 5xx status → isUnavailable（503 provider_unavailable），不是 500 internal_error', async () => {
+    const body = {
+      [Symbol.asyncIterator]: () => ({ next: () => new Promise<IteratorResult<Uint8Array>>(() => {}) }),
+    };
+    const iter = completionEvents(body as AsyncIterable<Uint8Array>, 5, () => {});
+    const next = (iter as AsyncGenerator<ProviderStreamEvent>).next();
+    let caught: unknown;
+    try { await next; } catch (e) { caught = e; }
+    expect(caught).toBeInstanceOf(Error);
+    const status = (caught as { status?: number }).status;
+    expect(typeof status).toBe('number');
+    expect(status! >= 500).toBe(true);
+  });
+});
