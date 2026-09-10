@@ -31,7 +31,11 @@ function makeMockAdapter(opts: {
       yield { kind: 'content_delta', content: '看到了，这是电路图' };
       yield { kind: 'usage', inputTokens: 100, outputTokens: 50 };
     },
-    models: [],
+    models: [
+      { id: 'deepseek-v4-flash', provider: 'deepseek', description: 'deepseek-v4-flash' },
+      { id: 'deepseek-v4-pro', provider: 'deepseek', description: 'deepseek-v4-pro' },
+      { id: 'deepseek-v4-flash-vision-exp', provider: 'deepseek', description: 'deepseek-v4-flash-vision-exp' },
+    ],
     resolveModel(): ResolvedModel | null {
       return { modelId: 'deepseek-v4-flash-vision-exp', modelType: 'vision', thinking: true, limitChars: 100000 };
     },
@@ -43,21 +47,25 @@ function makeMockAdapter(opts: {
   } as ProviderAdapter & { streamCalls: ProviderCompletion[] };
 }
 
-function makeRouter(adapter: ProviderAdapter, logSink?: any[]): Router {
+// 2026-09-10（merge）：combined signature supporting HEAD's logSink (v0.1.85 vision-error tests) +
+// feat/models-sync's storageStub (Task 5 catalog-merge tests).
+function makeRouter(
+  adapter: ProviderAdapter,
+  opts: { logSink?: any[]; storageStub?: { get: (k: string) => Promise<unknown | undefined> } } = {},
+): Router {
   const now = vi.fn(() => 1000);
   const mapper = new SessionMapper(
     { createSession: async () => ({ webSessionId: 's1' }), deleteSession: async () => {}, now },
     { poolSize: 2, ttlMs: 60_000 },
   );
   const queue = new Queue({ timeoutMs: 60_000, now });
-  // log: RingLog（默认）或可注入 sink 让测试能读 log entries
   const ring = new RingLog(20);
-  const log: RingLog = logSink
-    ? new Proxy(ring, { get(t, p) { if (p === 'push') { return (e: unknown) => { ring.push(e as never); logSink.push(e); }; } return Reflect.get(t, p); } }) as unknown as RingLog
+  const log: RingLog = opts.logSink
+    ? new Proxy(ring, { get(t, p) { if (p === 'push') { return (e: unknown) => { ring.push(e as never); opts.logSink!.push(e); }; } return Reflect.get(t, p); } }) as unknown as RingLog
     : ring;
   return new Router({
     registry: { deepseek: adapter }, mapper, queue, now, log,
-    storage: { get: async () => undefined, set: async () => undefined },
+    storage: { get: opts.storageStub?.get ?? (async () => undefined), set: async () => undefined },
     version: '0.0.0-test',
   });
 }
@@ -173,7 +181,7 @@ describe('router: vision multimodal 路由', () => {
     });
     const adapter = makeMockAdapter({ uploadFile, pollFileReady: async () => {} });
     const log: any[] = [];
-    const router = makeRouter(adapter, log);
+    const router = makeRouter(adapter, { logSink: log });
     const req: ChatCompletionRequest = {
       model: 'deepseek-v4-flash-vision-exp',
       messages: [{ role: 'user', content: [
@@ -202,7 +210,7 @@ describe('router: vision multimodal 路由', () => {
     });
     const adapter = makeMockAdapter({ uploadFile, pollFileReady });
     const log: any[] = [];
-    const router = makeRouter(adapter, log);
+    const router = makeRouter(adapter, { logSink: log });
     const req: ChatCompletionRequest = {
       model: 'deepseek-v4-flash-vision-exp',
       messages: [{ role: 'user', content: [
@@ -222,7 +230,7 @@ describe('router: vision multimodal 路由', () => {
     try {
       const adapter = makeMockAdapter({ uploadFile: vi.fn(), pollFileReady: vi.fn() });
       const log: any[] = [];
-      const router = makeRouter(adapter, log);
+      const router = makeRouter(adapter, { logSink: log });
       const req: ChatCompletionRequest = {
         model: 'deepseek-v4-flash-vision-exp',
         messages: [{ role: 'user', content: [
@@ -237,4 +245,40 @@ describe('router: vision multimodal 路由', () => {
       (globalThis as any).fetch = origFetch;
     }
   });
+
+
+// 2026-09-10（feat/models-sync）：router.models() 合并 catalog（Task 5）。
+// 验证：当 storage 有 modelsCatalog 且在 7 天 TTL 内，description 被替换为捕获的 label；
+//  storage 缺失 / 超时 → fall back 到 hardcoded description（= id）。
+describe('router.models(): merged catalog from storage', () => {
+  it('falls back to hardcoded descriptions when no catalog in storage', async () => {
+    const adapter = makeMockAdapter({});
+    const router = makeRouter(adapter, { storageStub: { get: async () => undefined } });
+    const r = await router.models();
+    expect(r.data.map((m) => m.description)).toEqual([
+      'deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-v4-flash-vision-exp',
+    ]);
+  });
+
+  it('enriches description with captured label when catalog is fresh (within 7d TTL)', async () => {
+    const capturedAt = Date.now();
+    const adapter = makeMockAdapter({});
+    const router = makeRouter(adapter, {
+      storageStub: {
+        get: async (k: string) => k === 'modelsCatalog' ? {
+          source: 'chat.deepseek.com', capturedAt,
+          models: [
+            { label: 'DeepSeek V4 Flash' },
+            { label: 'DeepSeek V4 Pro' },
+            { label: 'DeepSeek V4 Flash Vision Exp' },
+          ],
+        } : undefined,
+      },
+    });
+    const r = await router.models();
+    expect(r.data.map((m) => m.description)).toEqual([
+      'DeepSeek V4 Flash', 'DeepSeek V4 Pro', 'DeepSeek V4 Flash Vision Exp',
+    ]);
+  });
+});
 });

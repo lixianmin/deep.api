@@ -13,6 +13,7 @@ await Promise.all([
   build({ ...shared, entryPoints: ['src/background/sw.ts'], outfile: 'extension/sw.js', format: 'esm' }),
   build({ ...shared, entryPoints: ['src/content/bridge-main.ts'], outfile: 'extension/bridge-main.js', format: 'iife' }),
   build({ ...shared, entryPoints: ['src/content/bridge-relay.ts'], outfile: 'extension/bridge-relay.js', format: 'iife' }),
+  build({ ...shared, entryPoints: ['src/content/models-sync.ts'], outfile: 'extension/models-sync.js', format: 'iife' }),
   build({ ...shared, entryPoints: ['src/popup/popup.ts'], outfile: 'extension/popup.js', format: 'iife' }),
   build({ ...shared, entryPoints: ['src/debug/demo-page/demo.js'], outfile: 'extension/debug/demo.js', format: 'iife', target: 'chrome120' }),
 ]);

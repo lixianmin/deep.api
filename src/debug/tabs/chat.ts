@@ -53,7 +53,7 @@ export function mountChat(pane: HTMLElement): () => void {
   // 加可选链守护，缺 API 时静默跳过 — topbar select 为空即回退）
   const api = (window as any).deepApi;
   api?.models?.list?.().then((r: any) => {
-    modelSel.innerHTML = (r.data as any[]).map((m: any) => `<option value="${m.id}">${m.id}</option>`).join('');
+    modelSel.innerHTML = (r.data as any[]).map((m: any) => `<option value="${m.id}">${m.description ?? m.id}</option>`).join('');
     refreshUploadState();
   }).catch(() => {});
 

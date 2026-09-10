@@ -1,4 +1,5 @@
 import type { ModelInfo, ProviderSession, ResolvedModel } from '../adapter';
+import { labelToModelId, type ModelOption } from '../../../content/models-sync';
 
 // 当前线上公开模型（来源: https://api-docs.deepseek.com/quick_start/pricing，spike 任务 #1 校准）
 export const MODELS: ModelInfo[] = [
@@ -6,6 +7,36 @@ export const MODELS: ModelInfo[] = [
   { id: 'deepseek-v4-pro', provider: 'deepseek', description: 'V4-Pro — 推理能力更强，含 thinking' },
   { id: 'deepseek-v4-flash-vision-exp', provider: 'deepseek', description: 'V4-Flash-Vision — 视觉模型（图转 token 计费）' },
 ];
+
+export interface MergedModel {
+  id: string;
+  description: string;
+  modelType: 'default' | 'expert' | 'vision';
+  thinking: boolean;
+  limitChars: number;
+  capturedAt?: number;
+  source?: string;
+}
+
+/** 2026-09-10（feat/models-sync）：catalog 与 hardcoded 合并——id 匹配则覆盖
+ *  description + 加 capturedAt / source；不删 hardcoded，不加新 id（spec §6 不做）。
+ *  catalog 为 null → 返回 hardcoded 副本（不共享引用）。 */
+export function mergeWithHardcoded(
+  catalog: { capturedAt: number; models: ModelOption[] } | null,
+  hardcoded: MergedModel[],
+): MergedModel[] {
+  if (!catalog) return hardcoded.map((m) => ({ ...m }));
+  const byLabel: Map<string, string> = new Map();
+  for (const o of catalog.models) {
+    const id = labelToModelId(o.label);
+    if (id) byLabel.set(id, o.label);
+  }
+  return hardcoded.map((m) =>
+    byLabel.has(m.id)
+      ? { ...m, description: byLabel.get(m.id)!, capturedAt: catalog.capturedAt, source: 'chat.deepseek.com' }
+      : { ...m, description: m.id },
+  );
+}
 
 // 内部 web API 模型类型（chat.deepseek.com/api/v0 用 default/expert/vision）
 // 公开模型 ID → 内部模型类型 + 字符上限 + 是否开启 thinking

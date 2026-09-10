@@ -6,7 +6,7 @@ beforeEach(() => {
   (globalThis as any).window = globalThis;
   (globalThis as any).deepApi = {
     chat: { completions: { create: vi.fn().mockResolvedValue({ choices: [{ message: { content: 'hello' }, finish_reason: 'stop' }] }) } },
-    models: { list: vi.fn().mockResolvedValue({ data: [{ id: 'm1' }] }) },
+    models: { list: vi.fn().mockResolvedValue({ data: [{ id: 'm1', description: 'Mock Model 1' }] }) },
   };
   // 屏蔽 topbar 渲染失败（模型列表的 select 控件）
 });
@@ -138,7 +138,10 @@ describe('mountChat: vision 图片上传', () => {
   it('渲染上传按钮（默认 model 为 flash 时禁用 + tooltip）', async () => {
     // 模型列表只含 flash + vision-exp，install 默认选第一个
     (globalThis as any).deepApi.models.list = vi.fn().mockResolvedValue({
-      data: [{ id: 'deepseek-v4-flash' }, { id: 'deepseek-v4-flash-vision-exp' }],
+      data: [
+        { id: 'deepseek-v4-flash', description: 'DeepSeek V4 Flash' },
+        { id: 'deepseek-v4-flash-vision-exp', description: 'DeepSeek V4 Flash Vision Exp' },
+      ],
     });
     const pane = document.createElement('div');
     mountChat(pane);
@@ -153,7 +156,10 @@ describe('mountChat: vision 图片上传', () => {
 
   it('选 vision-exp 模型后，上传按钮启用', async () => {
     (globalThis as any).deepApi.models.list = vi.fn().mockResolvedValue({
-      data: [{ id: 'deepseek-v4-flash' }, { id: 'deepseek-v4-flash-vision-exp' }],
+      data: [
+        { id: 'deepseek-v4-flash', description: 'DeepSeek V4 Flash' },
+        { id: 'deepseek-v4-flash-vision-exp', description: 'DeepSeek V4 Flash Vision Exp' },
+      ],
     });
     const pane = document.createElement('div');
     mountChat(pane);
@@ -207,7 +213,7 @@ describe('mountChat: vision 图片上传', () => {
 
   it('发送时：图片 + 文本 → content array 含 image_url + text 块', async () => {
     (globalThis as any).deepApi.models.list = vi.fn().mockResolvedValue({
-      data: [{ id: 'deepseek-v4-flash-vision-exp' }],
+      data: [{ id: 'deepseek-v4-flash-vision-exp', description: 'DeepSeek V4 Flash Vision Exp' }],
     });
     // mock FileReader（同步触发 onload）
     const origFileReader = (globalThis as any).FileReader;
@@ -256,5 +262,39 @@ describe('mountChat: vision 图片上传', () => {
     } finally {
       (globalThis as any).FileReader = origFileReader;
     }
+  });
+});
+
+// 2026-09-10（feat/models-sync）：model <option> 文本使用 m.description（catalog
+// 抓取的 label），无 description 时回退到 m.id。
+describe('mountChat: model option 文本 = m.description (catalog label)', () => {
+  it('渲染时用 description 作为 option 文本（value 仍用 id）', async () => {
+    (globalThis as any).deepApi.models.list = vi.fn().mockResolvedValue({
+      data: [
+        { id: 'deepseek-v4-flash', description: 'DeepSeek V4 Flash' },
+        { id: 'deepseek-v4-pro', description: 'DeepSeek V4 Pro' },
+      ],
+    });
+    const pane = document.createElement('div');
+    mountChat(pane);
+    await new Promise(r => setTimeout(r, 10));
+    const opts = Array.from(pane.querySelectorAll('[data-chat-model] option'));
+    expect(opts).toHaveLength(2);
+    expect((opts[0] as HTMLOptionElement).textContent).toBe('DeepSeek V4 Flash');
+    expect((opts[0] as HTMLOptionElement).value).toBe('deepseek-v4-flash');
+    expect((opts[1] as HTMLOptionElement).textContent).toBe('DeepSeek V4 Pro');
+    expect((opts[1] as HTMLOptionElement).value).toBe('deepseek-v4-pro');
+  });
+
+  it('description 缺失时回退到 id（catalog 过期 / null 场景）', async () => {
+    (globalThis as any).deepApi.models.list = vi.fn().mockResolvedValue({
+      data: [{ id: 'deepseek-v4-flash' }],  // 无 description
+    });
+    const pane = document.createElement('div');
+    mountChat(pane);
+    await new Promise(r => setTimeout(r, 10));
+    const opt = pane.querySelector('[data-chat-model] option') as HTMLOptionElement;
+    expect(opt.textContent).toBe('deepseek-v4-flash');
+    expect(opt.value).toBe('deepseek-v4-flash');
   });
 });
