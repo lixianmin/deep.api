@@ -397,3 +397,126 @@ describe('mountChat: SSE error 帧显示（vision 失败可见）', () => {
     }
   });
 });
+
+// 2026-09-10（fix/image-in-bubble）：现场——带图发送成功后，图只在输入区一闪（清空），
+// 气泡里只剩 "[图片×N]" 文字占位，用户找不到图。
+// 期望（学 ChatGPT/DeepSeek）：图片显示在**消息气泡里**（发送后输入区清空），
+// 且复制 messages JSON 输出真正的 image_url blocks、replay 可带图重发。
+describe('mountChat: 发送后图片显示在消息气泡（fix/image-in-bubble）', () => {
+  const okStream = (): ReadableStream<Uint8Array> => new ReadableStream<Uint8Array>({
+    start(c) {
+      c.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n'));
+      c.close();
+    },
+  });
+  const mockFileReader = (): () => void => {
+    const orig = (globalThis as any).FileReader;
+    (globalThis as any).FileReader = class {
+      onload: ((e: any) => void) | null = null;
+      result: string | null = null;
+      readAsDataURL(_blob: Blob) {
+        this.result = 'data:image/png;base64,FAKE_IMG';
+        queueMicrotask(() => this.onload?.({ target: this } as never));
+      }
+    };
+    return () => { (globalThis as any).FileReader = orig; };
+  };
+  const setup = async (pane: HTMLElement): Promise<void> => {
+    (globalThis as any).deepApi.models.list = vi.fn().mockResolvedValue({
+      data: [{ id: 'deepseek-flash', description: 'DeepSeek V4.1 Flash' }],
+    });
+    mountChat(pane);
+    await new Promise(r => setTimeout(r, 10));
+    const fileInput = pane.querySelector<HTMLInputElement>('[data-chat-file-input]')!;
+    Object.defineProperty(fileInput, 'files', { value: [new Blob([new Uint8Array([1])], { type: 'image/png' })], configurable: true });
+    fileInput.dispatchEvent(new Event('change'));
+    await new Promise(r => setTimeout(r, 10));
+  };
+
+  it('带图发送后：user 气泡内出现缩略图 <img>，输入区附件区清空', async () => {
+    const restore = mockFileReader();
+    (globalThis as any).deepApi.chat.completions.create = vi.fn().mockResolvedValue({ body: okStream() });
+    try {
+      const pane = document.createElement('div');
+      await setup(pane);
+      expect(pane.querySelectorAll('[data-chat-thumb]').length).toBe(1);
+      const input = pane.querySelector<HTMLTextAreaElement>('[data-chat-input]')!;
+      input.value = '帮我分析一下这个图片。';
+      pane.querySelector<HTMLButtonElement>('[data-chat-send]')!.click();
+      await new Promise(r => setTimeout(r, 40));
+      // 气泡里有图
+      const userBubble = pane.querySelector('[data-msg="user"]') as HTMLElement;
+      const bubbleImg = userBubble.querySelector('img') as HTMLImageElement | null;
+      expect(bubbleImg).toBeTruthy();
+      expect(bubbleImg!.src).toMatch(/^data:image\/png;base64,/);
+      expect(userBubble.textContent).toContain('帮我分析一下这个图片。');
+      expect(userBubble.textContent).not.toContain('[图片×');
+      // 输入区附件已清空（图片已进入消息）
+      expect(pane.querySelectorAll('[data-chat-thumb]').length).toBe(0);
+    } finally { restore(); }
+  });
+
+  it('copy-messages 输出 image_url blocks（不再有 [图片×N] 占位文字）', async () => {
+    const restore = mockFileReader();
+    (globalThis as any).deepApi.chat.completions.create = vi.fn().mockResolvedValue({ body: okStream() });
+    let captured = '';
+    const origClipboard = (navigator as any).clipboard;
+    (navigator as any).clipboard = { writeText: (s: string) => { captured = s; } };
+    try {
+      const pane = document.createElement('div');
+      await setup(pane);
+      const input = pane.querySelector<HTMLTextAreaElement>('[data-chat-input]')!;
+      input.value = '看图';
+      pane.querySelector<HTMLButtonElement>('[data-chat-send]')!.click();
+      await new Promise(r => setTimeout(r, 40));
+      // 右键 user 消息 → copy-messages
+      const userBubble = pane.querySelector('[data-msg="user"]') as HTMLElement;
+      userBubble.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
+      const btn = document.querySelector('[data-msg-menu] [data-menu-item="copy-messages"]') as HTMLButtonElement;
+      btn.click();
+      const parsed = JSON.parse(captured);
+      // spec：当前消息及之后的所有消息；右键 user → [user, assistant]
+      expect(parsed).toHaveLength(2);
+      const userEntry = parsed.find((x: any) => x.role === 'user');
+      expect(Array.isArray(userEntry.content)).toBe(true);
+      const types = userEntry.content.map((b: any) => b.type);
+      expect(types).toContain('text');
+      expect(types).toContain('image_url');
+      expect(userEntry.content.find((b: any) => b.type === 'image_url').image_url.url).toMatch(/^data:image\/png/);
+    } finally {
+      (navigator as any).clipboard = origClipboard;
+      restore();
+    }
+  });
+
+  it('replay-from-here 带图消息 → 图片恢复到输入区并重发（messages 里含 image_url）', async () => {
+    const restore = mockFileReader();
+    const createMock = vi.fn().mockResolvedValue({ body: okStream() });
+    (globalThis as any).deepApi.chat.completions.create = createMock;
+    const origConfirm = (globalThis as any).confirm;
+    (globalThis as any).confirm = () => true;
+    try {
+      const pane = document.createElement('div');
+      await setup(pane);
+      const input = pane.querySelector<HTMLTextAreaElement>('[data-chat-input]')!;
+      input.value = '看图';
+      pane.querySelector<HTMLButtonElement>('[data-chat-send]')!.click();
+      await new Promise(r => setTimeout(r, 40));
+      createMock.mockClear();
+      // 右键 user 消息 → replay-from-here
+      const userBubble = pane.querySelector('[data-msg="user"]') as HTMLElement;
+      userBubble.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
+      const btn = document.querySelector('[data-msg-menu] [data-menu-item="replay-from-here"]') as HTMLButtonElement;
+      btn.click();
+      await new Promise(r => setTimeout(r, 40));
+      expect(createMock).toHaveBeenCalledTimes(1);
+      const sent = createMock.mock.calls[0]![0].messages;
+      const lastUser = sent[sent.length - 1];
+      expect(Array.isArray(lastUser.content)).toBe(true);
+      expect(lastUser.content.some((b: any) => b.type === 'image_url')).toBe(true);
+    } finally {
+      (globalThis as any).confirm = origConfirm;
+      restore();
+    }
+  });
+});

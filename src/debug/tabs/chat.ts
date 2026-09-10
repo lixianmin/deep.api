@@ -3,7 +3,7 @@
 // （仅 vision-exp 模型启用上传按钮）；移除 reasoning_effort（DeepSeek 网页无此控件）。
 // 保持原 data-* 属性名 + 右键菜单，使现有 chat.test.ts 全 11 个用例过。
 
-type ChatMsg = { role: 'user' | 'assistant'; content: string; reasoning?: string };
+type ChatMsg = { role: 'user' | 'assistant'; content: string; reasoning?: string; images?: string[] };
 
 export function mountChat(pane: HTMLElement): () => void {
   const history: ChatMsg[] = [];
@@ -99,7 +99,22 @@ export function mountChat(pane: HTMLElement): () => void {
     const el = document.createElement('div');
     el.dataset.msg = m.role;
     el.style.cssText = `margin:4px 0;padding:6px;border-radius:4px;text-align:${m.role === 'user' ? 'right' : 'left'};background:${m.role === 'user' ? '#dceaff' : '#f6f6f6'};`;
-    el.textContent = m.content + (isPending ? ' …' : '');
+    // 2026-09-10（fix/image-in-bubble）：图片附件直接渲染到**消息气泡里**（学 ChatGPT/DeepSeek）——
+    // 发送后输入区缩略图清空，但图作为消息的一部分保留在这里。
+    if (m.images?.length) {
+      const strip = document.createElement('div');
+      strip.style.cssText = `display:flex;gap:4px;flex-wrap:wrap;justify-content:${m.role === 'user' ? 'flex-end' : 'flex-start'};margin-bottom:4px;`;
+      for (const url of m.images) {
+        const img = document.createElement('img');
+        img.src = url;
+        img.style.cssText = 'width:96px;height:96px;object-fit:cover;border:1px solid #ccc;border-radius:4px;';
+        strip.appendChild(img);
+      }
+      el.appendChild(strip);
+    }
+    const text = document.createElement('div');
+    text.textContent = m.content + (isPending ? ' …' : '');
+    el.appendChild(text);
     return el;
   };
 
@@ -134,15 +149,24 @@ export function mountChat(pane: HTMLElement): () => void {
       btn.style.display = 'block';
       btn.style.width = '100%';
       btn.addEventListener('click', () => {
-        if (it.act === 'copy-messages') navigator.clipboard.writeText(JSON.stringify(history.slice(idx), null, 2));
-        if (it.act === 'copy-curl') navigator.clipboard.writeText(toCurl(history.slice(idx)));
+        if (it.act === 'copy-messages') navigator.clipboard.writeText(JSON.stringify(historyToApiMessages().slice(idx), null, 2));
+        if (it.act === 'copy-curl') navigator.clipboard.writeText(toCurl(historyToApiMessages().slice(idx)));
         if (it.act === 'replay-from-here') {
           if (!confirm('从此处重发会删除该消息及之后所有回复，并触发 rebuild（新 web session）。确认？')) return;
           const idx = history.indexOf(m);
+          const replayed = history[idx];
           history.length = idx;
           stream.innerHTML = '';
           history.forEach(x => stream.appendChild(renderMsg(x)));
-          doSend(m.content);
+          // 2026-09-10（fix/image-in-bubble）：重发的消息若带图，把 images 放回输入区附件再发
+          attachments.length = 0;
+          thumbs.innerHTML = '';
+          for (const url of (replayed?.images ?? [])) {
+            const aid = `att-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            attachments.push({ id: aid, dataUrl: url });
+            renderThumb(aid, url);
+          }
+          doSend(replayed?.content ?? m.content);
         }
         menu.remove();
       });
@@ -152,7 +176,7 @@ export function mountChat(pane: HTMLElement): () => void {
     setTimeout(() => document.addEventListener('click', () => menu.remove(), { once: true }), 0);
   };
 
-  const toCurl = (msgs: ChatMsg[]): string => {
+  const toCurl = (msgs: Array<{ role: string; content: unknown }>): string => {
     const body = JSON.stringify({ model: modelSel.value, messages: msgs, stream: true });
     return `curl -N -X POST https://chat.deepseek.com/api/v0/chat/completion \\\n  -H "Authorization: Bearer <token>" \\\n  -H "Content-Type: application/json" \\\n  -d '${body.replace(/'/g, "'\\''")}'`;
   };
@@ -165,18 +189,26 @@ export function mountChat(pane: HTMLElement): () => void {
     return o;
   };
 
-  // 构造 user message content：纯文本 → string；带图 → ContentBlock[]
-  const buildUserContent = (text: string): string | Array<{ type: string; text?: string; image_url?: { url: string } }> => {
-    if (attachments.length === 0) return text;
-    const blocks: Array<{ type: string; text?: string; image_url?: { url: string } }> = [];
-    if (text) blocks.push({ type: 'text', text });
-    for (const a of attachments) blocks.push({ type: 'image_url', image_url: { url: a.dataUrl } });
-    return blocks;
-  };
+  // 2026-09-10（fix/image-in-bubble）：把 ChatMsg[] 转成 API 消息（带 images → image_url blocks）。
+  // 所有对外出口（send / copy-messages / copy-curl）都从这里取，保证一致。
+  const historyToApiMessages = (): Array<{ role: string; content: unknown }> =>
+    history.map((m) => {
+      if (m.role === 'user' && m.images?.length) {
+        const blocks: Array<{ type: string; text?: string; image_url?: { url: string } }> = [];
+        if (m.content) blocks.push({ type: 'text', text: m.content });
+        for (const url of m.images) blocks.push({ type: 'image_url', image_url: { url } });
+        return { role: m.role, content: blocks };
+      }
+      return { role: m.role, content: m.content };
+    });
 
   const doSend = async (text: string): Promise<void> => {
-    const userContent = buildUserContent(text);
-    const userMsg: ChatMsg = { role: 'user', content: typeof userContent === 'string' ? userContent : `[图片×${attachments.length}] ${text}` };
+    const imageUrls = attachments.map((a) => a.dataUrl);
+    const userMsg: ChatMsg = {
+      role: 'user',
+      content: text,
+      ...(imageUrls.length ? { images: imageUrls } : {}),
+    };
     history.push(userMsg);
     const userEl = renderMsg(userMsg);
     stream.appendChild(userEl);
@@ -185,10 +217,8 @@ export function mountChat(pane: HTMLElement): () => void {
     stream.appendChild(asstEl);
     asstEl.textContent = ' …';
 
-    // 真实发给 deepApi 的 messages 用结构化形式（让 router 走 vision-pipeline）
-    const sentMessages = history.map((m, i) => i === history.length - 1 && m.role === 'user' && typeof userContent !== 'string'
-      ? { role: m.role as 'user', content: userContent } as never
-      : m);
+    // 发给 deepApi 的 messages 统一从 history 转换（含所有历史图片 → image_url blocks）
+    const sentMessages = historyToApiMessages();
 
     try {
       const res = await (window as any).deepApi.chat.completions.create({
