@@ -4,6 +4,15 @@ export type ProviderId = 'deepseek' | (string & {});
 export interface ProviderContext { token: string; requestId: string }
 export type AuthStatus = { state: 'logged_in' } | { state: 'logged_out' } | { state: 'expired'; message: string };
 export interface ProviderSession { providerId: ProviderId; webSessionId: string; parentMessageId: number | string | null }
+/** 2026-09-09（feat/vision-multimodal）：file upload 返回结构。spike #2 用户现场 biz_data.id 格式
+ *  `file-<UUID>`（如 `file-5232d461-f059-...`）—— deep.api 用作 ref_file_ids 传入主请求。 */
+export interface UploadFileResult {
+  id: string;
+  filename: string;
+  bytes: number;
+  status: string;
+}
+export interface PollFileReadyOptions { maxAttempts?: number; intervalMs?: number }
 /** 调用方可覆盖的模型层开关；undefined 表示沿用 ResolvedModel/LIMITS 默认。 */
 export interface CompletionOverrides {
   /** 覆盖 thinking_enabled；null/false 显式关闭，true 开启。undefined 沿用默认。 */
@@ -17,6 +26,9 @@ export interface ProviderCompletion {
   session: ProviderSession;
   prompt: string;
   model: { modelType: 'default' | 'expert' | 'vision'; thinking: boolean };
+  /** 2026-09-09（feat/vision-multimodal）：vision 模型 multipart 上传后拿到的 file_id 数组。
+   *  adapter 透传到请求体的 ref_file_ids；flash/pro 不用。 */
+  refFileIds?: string[];
   overrides?: CompletionOverrides;
   requestId: string;
 }
@@ -32,6 +44,11 @@ export interface ProviderAdapter {
   createSession(ctx: ProviderContext): Promise<ProviderSession>;
   deleteSession(ctx: ProviderContext, s: ProviderSession): Promise<void>;
   stopStream(ctx: ProviderContext, s: ProviderSession, messageId: number | string | null): Promise<void>;
+  // 2026-09-09（feat/vision-multimodal）：spike #2 现场 chat.deepseek.com/api/v0/file/upload_file
+  // + /file/fetch_files 逆向（用户 DevTools curl 验证）。adapter 提供 file upload + poll ready；
+  // 详见 docs/superpowers/specs/2026-09-09-vision-multimodal-design.md §4。
+  uploadFile?(ctx: ProviderContext, bytes: Uint8Array, mime: string, filename: string): Promise<UploadFileResult>;
+  pollFileReady?(ctx: ProviderContext, fileId: string, options?: PollFileReadyOptions): Promise<void>;
   streamCompletion(ctx: ProviderContext, req: ProviderCompletion): AsyncIterable<ProviderStreamEvent>;
   readonly models: ModelInfo[];
   resolveModel(modelId: string): ResolvedModel | null;

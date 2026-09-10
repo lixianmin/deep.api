@@ -1,4 +1,4 @@
-import type { ProviderAdapter, ProviderCompletion, ProviderContext, ProviderSession } from '../adapter';
+import type { ProviderAdapter, ProviderCompletion, ProviderContext, ProviderSession, UploadFileResult, PollFileReadyOptions } from '../adapter';
 import { completionPayload, baseHeaders, classify, MODELS, resolveModel } from './client';
 import { getAuthStatus, DEEPSEEK_LOGIN_PAGE, DEEPSEEK_COOKIE_NAMES } from './auth';
 import { completionEvents } from './sse-patch';
@@ -6,12 +6,19 @@ import { completionEvents } from './sse-patch';
 export interface AdapterDeps {
   getToken(): Promise<string | null>;
   fetchJson(path: string, headers: Record<string, string>, body: unknown): Promise<unknown>;
+  /** 2026-09-09（feat/vision-multimodal）：原始 fetch（不 stringify body、不限定 JSON 响应）。
+   *  用于 file upload（multipart/form-data）+ poll（GET）等不规则端点；见 spec §4。 */
+  fetchRaw?(path: string, headers: Record<string, string>, init: { method?: string; body?: BodyInit | null }): Promise<{ status: number; json: () => Promise<unknown>; text: () => Promise<string> }>;
   fetchStream(path: string, headers: Record<string, string>, body: unknown): Promise<{ status: number; headers: Headers; body: AsyncIterable<Uint8Array> }>;
   pow: { getChallenge(ctx: ProviderContext, targetPath: string): Promise<unknown>; solve(challenge: unknown, ctx: ProviderContext): Promise<string> };
   now(): number;
 }
 
 const NO_PROGRESS_MS = 600_000;   // 10 分钟无进度断流（spec §4.5）
+const FILE_UPLOAD_TARGET = '/api/v0/file/upload_file';
+const FILE_FETCH_TARGET = '/api/v0/file/fetch_files';
+const DEFAULT_POLL_MAX = 10;
+const DEFAULT_POLL_INTERVAL_MS = 2000;
 
 export function createDeepSeekAdapter(deps: AdapterDeps): ProviderAdapter {
   const classifyErr = (e: unknown) => Object.assign(e instanceof Error ? e : new Error(JSON.stringify(e)), classify(e));
@@ -84,10 +91,76 @@ export function createDeepSeekAdapter(deps: AdapterDeps): ProviderAdapter {
       } catch { /* best-effort per spec */ }
     },
 
+    // 2026-09-09（feat/vision-multimodal）：spike #2 现场 user Chrome DevTools 抓包逆向。
+    // 完整请求：POST /api/v0/file/upload_file · multipart/form-data field="file" · 必须
+    // headers: x-ds-pow-response（pow target=upload_file）、x-file-size、x-model-type=vision、
+    // x-thinking-enabled=1。响应：{code:0, data:{biz_code:0, biz_data:{id, filename, bytes, status}}}，
+    // id 格式 `file-<UUID>`——作为 ref_file_ids 传入主 completion 请求。
+    // SW 不能设 origin/referer/UA（forbidden headers）——期望服务端不校验，与 v0.1.76 completion 路径一致。
+    async uploadFile(ctx, bytes, mime, filename): Promise<UploadFileResult> {
+      const challenge = await deps.pow.getChallenge(ctx, FILE_UPLOAD_TARGET)
+        .catch((e) => { throw classifyErr(Object.assign(e instanceof Error ? e : new Error(String(e)), { status: 503 })); });
+      const powHeader = await deps.pow.solve(challenge, ctx);
+      const boundary = `----WebKitFormBoundary${Date.now().toString(36)}`;
+      const head = `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: ${mime}\r\n\r\n`;
+      const tail = `\r\n--${boundary}--\r\n`;
+      const headBytes = new TextEncoder().encode(head);
+      const tailBytes = new TextEncoder().encode(tail);
+      const body = new Uint8Array(headBytes.length + bytes.length + tailBytes.length);
+      body.set(headBytes, 0);
+      body.set(bytes, headBytes.length);
+      body.set(tailBytes, headBytes.length + bytes.length);
+      const headers: Record<string, string> = {
+        ...baseHeaders(ctx.token),
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'X-Ds-Pow-Response': powHeader,
+        'x-file-size': String(bytes.length),
+        'x-model-type': 'vision',
+        'x-thinking-enabled': '1',
+        'x-client-version': '2.4.0',
+        'x-client-bundle-id': 'com.deepseek.chat',
+        'x-client-platform': 'web',
+        'x-client-locale': 'en_US',
+        'x-client-timezone-offset': '28800',
+      };
+      if (!deps.fetchRaw) throw classifyErr(new Error('uploadFile: deps.fetchRaw not implemented'));
+      const resp = await deps.fetchRaw('/file/upload_file', headers, { method: 'POST', body });
+      const r = (resp.status >= 400 ? await resp.json().catch(() => null) : await resp.json()) as any;
+      if (resp.status >= 400 || r?.code !== 0 || r?.data?.biz_code !== 0) {
+        const msg = r?.data?.biz_msg || r?.msg || `http ${resp.status}`;
+        throw classifyErr(new Error(`Upload failed: ${msg}`));
+      }
+      const biz = r?.data?.biz_data;
+      const id: string = biz?.id || biz?.file_id;
+      if (!id) throw classifyErr(new Error('Upload failed: no file id in response'));
+      return { id, filename: biz?.filename || filename, bytes: biz?.bytes || bytes.length, status: biz?.status || 'uploaded' };
+    },
+
+    // 2026-09-09（feat/vision-multimodal）：spike #2 现场 GET /api/v0/file/fetch_files?file_ids=...
+    // （无 pow）。轮询直到 status ∈ ready 类 或 FAILED。默认 10×2s = 20s 超时。
+    async pollFileReady(ctx, fileId, options) {
+      const maxAttempts = options?.maxAttempts ?? DEFAULT_POLL_MAX;
+      const intervalMs = options?.intervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+      const url = `${FILE_FETCH_TARGET}?file_ids=${encodeURIComponent(fileId)}`;
+      const READY = new Set(['processed', 'ready', 'done', 'available', 'success', 'SUCCESS', 'completed', 'finished', 'uploaded']);
+      const FAIL = new Set(['CONTENT_EMPTY', 'PARSE_FAILED', 'FAILED', 'ERROR']);
+      if (!deps.fetchRaw) throw classifyErr(new Error('pollFileReady: deps.fetchRaw not implemented'));
+      for (let i = 0; i < maxAttempts; i++) {
+        await new Promise((r) => setTimeout(r, intervalMs));
+        const resp = await deps.fetchRaw(url, baseHeaders(ctx.token), { method: 'GET' });
+        const r = (resp.status >= 400 ? null : await resp.json()) as any;
+        const files = r?.data?.biz_data?.files || r?.data?.files || [];
+        const status = files[0]?.status || '';
+        if (READY.has(status)) return;
+        if (FAIL.has(status)) throw classifyErr(new Error(`File parse failed: ${fileId} status=${status}`));
+      }
+      throw classifyErr(new Error(`pollFileReady timeout after ${maxAttempts} attempts (fileId=${fileId})`));
+    },
+
     async *streamCompletion(ctx, req) {
       const model = { modelType: req.model.modelType, thinking: req.model.thinking };
       const headers = await withPowHeaders(ctx);
-      const res = await fetchStreamSafe('/chat/completion', headers, completionPayload(req.session, req.prompt, model, req.overrides));
+      const res = await fetchStreamSafe('/chat/completion', headers, completionPayload(req.session, req.prompt, model, req.overrides, req.refFileIds));
       if (res.status !== 200) {
         throw classifyErr(Object.assign(new Error(`completion http ${res.status}`), { status: res.status, headers: res.headers }));
       }

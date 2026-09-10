@@ -1,7 +1,14 @@
 export type Role = 'system' | 'user' | 'assistant' | 'tool';
 export interface ToolCall { id: string; type: 'function'; function: { name: string; arguments: string } }
+/** OpenAI 兼容 content block。文本 + 图片 URL（deep.api 仅 image_url）；image_url.url 支持
+ *  data URL（base64）与 http(s) URL——上传后转 DeepSeek ref_file_ids。详情：docs/superpowers/specs/2026-09-09-vision-multimodal-design.md */
+export type ContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string; detail?: 'low' | 'high' | 'auto' } };
 export interface Message {
-  role: Role; content: string | null;
+  role: Role;
+  /** string 是默认；ContentBlock[] 用于 vision multimodal 调用（仅 user role 且 model=vision 时）。 */
+  content: string | ContentBlock[] | null;
   tool_call_id?: string; name?: string;   // role='tool' 时
   tool_calls?: ToolCall[];                 // role='assistant' 时
 }

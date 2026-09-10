@@ -97,6 +97,23 @@ async function build(): Promise<{ router: Router; log: RingLog; mapper: SessionM
   }
   const deps: AdapterDeps = {
     getToken: async () => loadCachedToken(),
+    // 2026-09-09（feat/vision-multimodal）：原始 fetch（不 stringify body）—— file upload（multipart）
+    // + poll file ready（GET）。与 fetchJson 区别：不限定 POST、不 JSON.stringify、返回原始响应包装
+    // （status + json/text 方法）。详见 docs/superpowers/specs/2026-09-09-vision-multimodal-design.md §4。
+    fetchRaw: async (path, headers, init) => {
+      const t = await loadCachedToken();
+      if (!t) throw Object.assign(new Error('no token'), { status: 401 });
+      const r = await fetch(DEEPSEEK_API_BASE + path, {
+        method: init?.method || 'GET',
+        headers: { ...headers, Authorization: `Bearer ${t}` },
+        body: init?.body as BodyInit | undefined,
+      });
+      return {
+        status: r.status,
+        json: async () => { try { return await r.json(); } catch { return null; } },
+        text: async () => r.text(),
+      };
+    },
     fetchJson: async (path, headers, body) => {
       const t = await loadCachedToken();
       if (!t) throw Object.assign(new Error('no token'), { status: 401 });
@@ -104,7 +121,6 @@ async function build(): Promise<{ router: Router; log: RingLog; mapper: SessionM
         method: 'POST', headers: { ...headers, Authorization: `Bearer ${t}` },
         body: body === undefined || body === null ? undefined : JSON.stringify(body),
       });
-      const text = await r.text();
       let parsed: unknown;
       try { parsed = text ? JSON.parse(text) : null; } catch { throw Object.assign(new Error(`bad json: ${text.slice(0, 200)}`), { status: r.status }); }
       // DeepSeek 业务错误：HTTP 200 但顶层 code != 0（如 token 过期 code=401）——必须识别，

@@ -97,7 +97,7 @@ vision-pipeline.run(message, token):
      a. data URL → 解码 base64 → bytes + mime
      b. http(s) URL → fetch 下载 → bytes + mime
      c. uploadFile(token, filename, bytes, mime) → file_id
-     d. pollFileReady(token, file_id) // 默认 30s，超时报错
+     d. pollFileReady(token, file_id) // 默认 10×2s = 20s，超时报错
   3. 重写 messages:
      - text 块保留
      - image_url 块替换为 `[image]` 占位符（参考 llmweb2api `renderMessageBlock`）
@@ -106,6 +106,19 @@ vision-pipeline.run(message, token):
 router 转发到 chat.deepseek.com/api/v0 completion:
   payload = { ...existingPayload, ref_file_ids: refFileIds, prompt: renderedPrompt }
 ```
+
+### 4.1.1 Spike #2 用户现场（Chrome DevTools 4 curl）—— 协议补丁
+
+| 项 | spike 实测 | spec 初稿 | 修正 |
+|---|---|---|---|
+| upload 端点 | `POST /api/v0/file/upload_file` | 一致 | — |
+| upload 鉴权 | `X-Ds-Pow-Response`（pow target_path = `/api/v0/file/upload_file`）| 一致 | — |
+| upload 必带 header | `x-file-size`, `x-model-type: vision`, **`x-thinking-enabled: 1`**（**不是 0**）| `x-thinking-enabled: 0`（llmweb2api 推的）| **改为 1** |
+| upload body | multipart/form-data field `name="file"` | 一致 | — |
+| poll 端点 | `GET /api/v0/file/fetch_files?file_ids={id}`（无 pow）| 一致 | — |
+| `file_id` 格式 | `file-<UUID>`（如 `file-5232d461-...`）| 裸 UUID | **加 `file-` 前缀** |
+| `ref_file_ids` 值 | 主请求里 `["file-<UUID>"]` | 裸 UUID | **加 `file-` 前缀** |
+| 浏览器独有头 | `origin`, `referer`, `user-agent`, `sec-ch-ua*`, `sec-fetch-*`, `accept-language` | 列出同 | deep.api SW 不能设（forbidden）；v0.1.76-79 验证服务端不校验 UA/Referer。**upload 端点尚未实测**。 |
 
 ### 4.2 关键决策
 

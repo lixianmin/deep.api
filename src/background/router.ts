@@ -1,6 +1,7 @@
 import { BridgeError } from '../shared/protocol';
 import type { ApiErrorCode, ChatCompletion, ChatCompletionChunk, Message, ModelInfo, ToolCall, ToolChoice, ToolDef } from '../shared/api-types';
 import type { ProviderAdapter, ProviderCompletion, ProviderContext, ProviderId, ProviderSession, ProviderStreamEvent, ResolvedModel } from './providers/adapter';
+import { extractImageRefs, renderMessageContent } from './vision-pipeline';
 import { SessionMapper, type ThreadEntry } from './session-mapper';
 import { Queue, QueueTimeoutError } from './queue';
 import { renderTranscript, renderTail, limitCharsFor } from './transcript-renderer';
@@ -57,18 +58,53 @@ export class Router {
     const resolved = provider.resolveModel(modelId)!;
     const messages = p.messages as Message[] | undefined;
     if (!Array.isArray(messages) || messages.length === 0) throw err('invalid_request_error', 'messages array required', 400);
-    // 2026-09-09（fix/vision-rejection）：spec §6.3 vision v1 不接入。网页 web API 的 completion
-    // body `prompt` 是单字符串，不接受 OpenAI 风格 `messages[].content` 数组（含 image_url block）。
-    // 旧实现把 array content 静默吞为 `[object Object]` 透传 → DeepSeek 视觉侧返空 → 客户端
-    // 看不到 SSE 事件也看不到错误（spice 实测：网页里看不到新 session）。
-    // 入口处显式拒绝非字符串 content；视觉模型未来需要走独立上传端点 + ref_file_ids（v2 spike）。
-    for (let i = 0; i < messages.length; i++) {
-      const c = messages[i]!.content;
-      if (c !== null && typeof c !== 'string') {
-        throw err('invalid_request_error', `messages[${i}].content 必须是字符串（vision / image_url 暂不支持，v1 仅接受纯文本；视觉模型请使用图片上传 API——v2 计划）`, 400);
+    const ctx = { token, requestId: `req-${started}-${Math.random().toString(36).slice(2, 8)}` };
+    // 2026-09-09（feat/vision-multimodal）：原 v0.1.66 拒绝 array content；现在为 vision 模型
+    // 放开——vision 接受 image_url 块，走 vision-pipeline 上传转 ref_file_ids。
+    // flash/pro 仍拒绝 image_url（保留 v0.1.66）。
+    const refFileIds: string[] = [];
+    if (resolved.modelType === 'vision' && provider.uploadFile && provider.pollFileReady) {
+      // 抽所有 user message 的 image_url，按出现顺序上传
+      let imgIdx = 0;
+      for (let i = 0; i < messages.length; i++) {
+        const refs = extractImageRefs(messages[i]!);
+        for (const ref of refs) {
+          let bytes: Uint8Array;
+          let mime: string;
+          if (ref.isDataUrl) {
+            const b64 = ref.url.split(',')[1] ?? '';
+            bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+            mime = ref.mimeType || 'image/png';
+          } else {
+            const r = await fetch(ref.url);
+            if (!r.ok) throw err('invalid_request_error', `image_url download failed: ${ref.url} (http ${r.status})`, 400);
+            const ab = await r.arrayBuffer();
+            bytes = new Uint8Array(ab);
+            mime = r.headers.get('content-type')?.split(';')[0]?.trim() || ref.mimeType || 'image/png';
+          }
+          const filename = `img${imgIdx}.${(mime.split('/')[1] || 'png')}`;
+          imgIdx++;
+          const up = await provider.uploadFile(ctx, bytes, mime, filename);
+          await provider.pollFileReady(ctx, up.id, { maxAttempts: 10, intervalMs: 2000 });
+          refFileIds.push(up.id);
+        }
+      }
+    } else {
+      // flash/pro：array content 含 image_url → 400（保留 v0.1.66 拒绝）
+      for (let i = 0; i < messages.length; i++) {
+        const refs = extractImageRefs(messages[i]!);
+        if (refs.length > 0) {
+          throw err('invalid_request_error', `messages[${i}] 含 image_url 但模型 ${resolved.modelId} 不支持视觉；仅 deepseek-v4-flash-vision-exp 可接收图片`, 400);
+        }
       }
     }
-    const ctx = { token, requestId: `req-${started}-${Math.random().toString(36).slice(2, 8)}` };
+    // 2026-09-09（feat/vision-multimodal）：array content → 渲染成 prompt 字符串 + 标记有图位置。
+    // 不修改原 messages（mirror 要存原 array 形态），复制一份 string 版给 renderTranscript/renderTail。
+    const stringMessages: Message[] = messages.map((m) => ({
+      ...m,
+      content: typeof m.content === 'string' || m.content === null ? m.content : renderMessageContent(m),
+    }));
+
     const toolCtx = buildToolPrompt((p.tools as ToolDef[] | undefined) ?? [], (p.tool_choice as ToolChoice | undefined) ?? 'auto');
     // 调用方可覆盖 thinking/search/reasoning_effort；undefined 字段被下游忽略
     const overrides = {
@@ -102,7 +138,7 @@ export class Router {
         return mirror.length;
       })()
       : undefined;
-    const handle = await this.runCompletion(provider, resolved, messages, toolCtx, conversationId, ctx, overrides);
+    const handle = await this.runCompletion(provider, resolved, messages, stringMessages, toolCtx, conversationId, ctx, overrides, refFileIds);
     const diag = {
       cid: handle.convId, msgsLen: messages.length, action: handle.thread.kind ? (preDecide.action === 'incremental' ? 'incremental' as const : 'rebuild' as const) : undefined,
       threadFound, mirrorLen,
@@ -144,9 +180,10 @@ export class Router {
   }
 
   private async runCompletion(
-    provider: ProviderAdapter, resolved: ResolvedModel, messages: Message[], toolCtx: ToolContext,
+    provider: ProviderAdapter, resolved: ResolvedModel, messages: Message[], stringMessages: Message[], toolCtx: ToolContext,
     conversationId: string | undefined, ctx: ProviderContext,
     overrides?: { thinking?: boolean | null; search?: boolean; reasoningEffort?: 'low' | 'medium' | 'high' | 'max' },
+    refFileIds: string[] = [],
   ): Promise<{ stream: AsyncIterable<ProviderStreamEvent>; session: ProviderSession; convId: string; thread: ThreadEntry; run: RunState }> {
     const pid = provider.id;
     const decision = this.d.mapper.decide(pid, messages, conversationId, resolved.modelType);
@@ -163,13 +200,19 @@ export class Router {
       // 让 mapper 跟踪该 cid 当前绑定的模型。下一轮同 cid 同模型→ incremental；下一轮同 cid 换模型→ rebuild。
       thread = this.d.mapper.register(pid, convId, s.webSessionId, messages, resolved.modelType);
       session = { providerId: pid, webSessionId: s.webSessionId, parentMessageId: null };
-      prompt = renderTranscript(messages).ok
-        ? (renderTranscript(messages) as { ok: true; prompt: string }).prompt + toolCtx.promptSuffix
+      prompt = renderTranscript(stringMessages).ok
+        ? (renderTranscript(stringMessages) as { ok: true; prompt: string }).prompt + toolCtx.promptSuffix
         : '';   // 超限在下方统一检查
     } else {
       thread = decision.thread; convId = decision.thread.conversationId;
       session = { providerId: pid, webSessionId: decision.thread.webSessionId, parentMessageId: decision.thread.parentMessageId };
-      prompt = renderTail(decision.tail) + toolCtx.promptSuffix;
+      // 2026-09-09（feat/vision-multimodal）：incremental tail 也要 string content（vision multimodal
+      // 首次请求带图时，tail 也含 array content 的 user message —— 用 string 版渲染）。
+      const tail = decision.tail.map((m) => ({
+        ...m,
+        content: typeof m.content === 'string' || m.content === null ? m.content : renderMessageContent(m),
+      }));
+      prompt = renderTail(tail) + toolCtx.promptSuffix;
       this.d.mapper.markBusy(pid, convId);
     }
     if (prompt.length > resolved.limitChars) {
@@ -177,7 +220,7 @@ export class Router {
       throw err('invalid_request_error', `transcript too long: ${prompt.length} > ${resolved.limitChars}（建议缩短历史或分批）`, 400);
     }
     const run: RunState = { parentMessageId: null, repairDone: false, model: resolved };
-    const req: ProviderCompletion = { session, prompt, model: { modelType: resolved.modelType, thinking: resolved.thinking }, overrides, requestId: ctx.requestId };
+    const req: ProviderCompletion = { session, prompt, model: { modelType: resolved.modelType, thinking: resolved.thinking }, overrides, requestId: ctx.requestId, ...(refFileIds.length ? { refFileIds } : {}) };
     const stream = this.runExclusiveStream(provider, ctx, req);
     return { stream, session, convId, thread, run };
   }

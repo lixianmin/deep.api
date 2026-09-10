@@ -33,6 +33,8 @@ export function completionPayload(
   prompt: string,
   model: { modelType: 'default' | 'expert' | 'vision'; thinking: boolean },
   overrides?: { thinking?: boolean | null; search?: boolean; reasoningEffort?: 'low' | 'medium' | 'high' | 'max' },
+  /** 2026-09-09（feat/vision-multimodal）：vision 模型上传后的 file_id 列表，传 ref_file_ids。 */
+  refFileIds?: string[],
 ) {
   // thinking: undefined → 用模型默认；null/false 显式关；true 显式开
   const thinkingEnabled = overrides?.thinking === undefined ? model.thinking : Boolean(overrides.thinking);
@@ -42,7 +44,7 @@ export function completionPayload(
     parent_message_id: session.parentMessageId ?? null,
     model_type: model.modelType,
     prompt,
-    ref_file_ids: [] as string[],
+    ref_file_ids: refFileIds && refFileIds.length > 0 ? refFileIds : [],
     thinking_enabled: thinkingEnabled,
     search_enabled: searchEnabled,
     // action: null 与上游 reference 项目（zhu1090093659/deepseek-pp）字段对齐——多轮靠服务端按 parent_message_id 关联历史
