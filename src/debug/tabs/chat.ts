@@ -2,7 +2,9 @@ type ChatMsg = { role: 'user' | 'assistant'; content: string; reasoning?: string
 
 export function mountChat(pane: HTMLElement): () => void {
   const history: ChatMsg[] = [];
-  let abort: AbortController | null = null;
+  // 在途流的 reader：unmount 时 cancel，避免面板销毁后流继续跑（原 `abort` 变量从未赋值，
+  // 是个永远 no-op 的死代码；改用真实 reader 让取消意图生效）。
+  let currentReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
 
   pane.innerHTML = `
     <div data-topbar>
@@ -124,6 +126,7 @@ export function mountChat(pane: HTMLElement): () => void {
       });
       // SSE 流式消费（与 demo.js:156 相同的 reader + TextDecoder 逻辑）
       const reader = res.body.getReader();
+      currentReader = reader;
       const dec = new TextDecoder('utf-8');
       let buf = '';
       let content = '';
@@ -163,5 +166,5 @@ export function mountChat(pane: HTMLElement): () => void {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendBtn.click(); }
   });
 
-  return () => { pane.innerHTML = ''; abort?.abort(); };
+  return () => { pane.innerHTML = ''; void currentReader?.cancel().catch(() => undefined); };
 }

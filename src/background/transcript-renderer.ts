@@ -1,4 +1,5 @@
 import type { Message } from '../shared/api-types';
+import { renderMessageContent } from './vision-pipeline';
 
 export function limitCharsFor(modelType: 'default' | 'expert'): number {
   return modelType === 'expert' ? 163_840 : 2_621_440;
@@ -20,7 +21,8 @@ function mergeAdjacent(msgs: Message[]): Message[] {
 // DeepSeek 网页版 completion 接口的 prompt = 当前轮提问的纯文本；历史上下文由 parent_message_id 链维护。
 // 不再使用 <｜user｜> 等模板标记（网页端会原样显示）。
 function renderOne(msg: Message): string {
-  return msg.content ?? '';
+  // content 可能是 string / null / ContentBlock[]（vision）——统一渲染为纯文本。
+  return renderMessageContent(msg);
 }
 
 // 2026-09-09（fix/full-tool-prompt）：tool_call_id → 函数名，用于「【工具结果 <name>】」标注。

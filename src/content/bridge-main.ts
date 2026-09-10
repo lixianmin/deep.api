@@ -182,7 +182,7 @@ function streamHandle(id: number) {
 // ---- 暴露给 page 的 API ----
 const api = {
   chat: { completions: {
-    create: (params: { model: string; messages: Array<{ role: string; content: string; [k: string]: unknown }>; stream?: boolean; tools?: unknown[]; tool_choice?: unknown; conversation_id?: string; thinking?: boolean | null; search?: boolean; reasoning_effort?: 'low' | 'medium' | 'high' | 'max' }): Promise<ChatCompletion> | (AsyncIterable<string> & { cancel(): Promise<void> }) => {
+    create: (params: { model: string; messages: Array<{ role: string; content: string; [k: string]: unknown }>; stream?: boolean; tools?: unknown[]; tool_choice?: unknown; conversation_id?: string; thinking?: boolean | null; search?: boolean; reasoning_effort?: 'low' | 'medium' | 'high' | 'max' }): Promise<ChatCompletion> | Response => {
       const id = postRequest('chat.completions.create', params);
       if (params.stream === true) return streamHandle(id);
       return new Promise<ChatCompletion>((resolve, reject) => {

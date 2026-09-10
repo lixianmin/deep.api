@@ -13,7 +13,7 @@ export interface ImageRef {
  *  - array content：遍历找 type='image_url' 且 image_url.url 存在的块
  *  - data URL 解析 data:xxx;base64 中的 xxx 作为 mime（解析失败默认 image/png）
  */
-export function extractImageRefs(msg: Pick<Message, 'content'>): ImageRef[] {
+export function extractImageRefs(msg: Message): ImageRef[] {
   const c = msg.content;
   if (!c || typeof c === 'string') return [];
   if (!Array.isArray(c)) return [];
@@ -38,7 +38,7 @@ export function extractImageRefs(msg: Pick<Message, 'content'>): ImageRef[] {
  *  - array：text 块 → text 拼接；image_url 块 → `[image]` 占位符
  *  （对齐 llmweb2api renderMessageBlock：ref_file_ids 携带实际图，prompt 文本携带位置）
  */
-export function renderMessageContent(msg: Pick<Message, 'content'>): string {
+export function renderMessageContent(msg: Message): string {
   const c = msg.content;
   if (c == null) return '';
   if (typeof c === 'string') return c;

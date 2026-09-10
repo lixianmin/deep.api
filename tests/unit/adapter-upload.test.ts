@@ -38,7 +38,7 @@ function makeDeps(respond: (path: string, init: { method?: string; body?: unknow
   };
   return { getToken: async () => 'TEST_TOKEN', fetchJson, fetchRaw, fetchStream, pow, now: () => 1000 };
 }
-const ctx: ProviderContext = { token: 'TEST_TOKEN' };
+const ctx: ProviderContext = { token: 'TEST_TOKEN', requestId: 'r-test' };
 
 describe('deepseek adapter: uploadFile + pollFileReady', () => {
   let uploads: Array<{ path: string; init: { method?: string; body?: unknown } }> = [];

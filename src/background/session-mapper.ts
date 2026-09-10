@@ -305,8 +305,10 @@ function sameMsg(a: Message, b: Message): boolean {
     && JSON.stringify(a.tool_calls ?? null) === JSON.stringify(b.tool_calls ?? null);
 }
 /** null 与 '' 视为等价：OpenAI 客户端多轮场景下，assistant 带 tool_calls 时 content 通常为 null，
- *  而 deep.api router finalize 存的是 ''（agg.content）。两种表示语义相同。 */
-function normContent(c: string | null | undefined): string | null {
-  if (c === '' || c === undefined) return null;
-  return c;
+ *  而 deep.api router finalize 存的是 ''（agg.content）。两种表示语义相同。
+ *  vision 的 array content（ContentBlock[]）用 JSON 结构比较——不能渲染成文本比，
+ *  否则 [text] 与 [text,image_url] 会被误判为同一 mirror。 */
+function normContent(c: Message['content']): string | null {
+  if (c === '' || c === undefined || c === null) return null;
+  return typeof c === 'string' ? c : JSON.stringify(c);
 }

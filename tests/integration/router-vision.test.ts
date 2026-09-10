@@ -3,7 +3,10 @@ import { Router } from '../../src/background/router';
 import { SessionMapper } from '../../src/background/session-mapper';
 import { Queue } from '../../src/background/queue';
 import { RingLog } from '../../src/background/log';
-import type { ChatCompletionRequest, ProviderAdapter, ProviderCompletion, ProviderContext, ResolvedModel, ProviderStreamEvent, ProviderSession } from '../../src/background/providers/adapter';
+import type { ProviderAdapter, ProviderCompletion, ProviderContext, ResolvedModel, ProviderStreamEvent, ProviderSession } from '../../src/background/providers/adapter';
+
+// router.create() 第二参是 unknown（原始请求体）；测试里用这个局部类型标注请求形状。
+type ChatCompletionRequest = { model: string; messages: Array<{ role: string; content: unknown; [k: string]: unknown }>; [k: string]: unknown };
 
 // 2026-09-09（feat/vision-multimodal）：router 集成测试——
 //  vision model + array content 含 image_url → uploadFile → pollFileReady → completion with ref_file_ids
@@ -47,7 +50,11 @@ function makeRouter(adapter: ProviderAdapter): Router {
     { poolSize: 2, ttlMs: 60_000 },
   );
   const queue = new Queue({ timeoutMs: 60_000, now });
-  return new Router({ registry: { deepseek: adapter }, mapper, queue, now, log: new RingLog(20) });
+  return new Router({
+    registry: { deepseek: adapter }, mapper, queue, now, log: new RingLog(20),
+    storage: { get: async () => undefined, set: async () => undefined },
+    version: '0.0.0-test',
+  });
 }
 
 describe('router: vision multimodal 路由', () => {
