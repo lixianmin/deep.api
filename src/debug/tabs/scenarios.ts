@@ -58,6 +58,49 @@ async function runTool(m: string, opts: any, choice: 'auto' | 'required'): Promi
 const toolAuto     = (m: string, opts: any) => runTool(m, opts, 'auto');
 const toolRequired = (m: string, opts: any) => runTool(m, opts, 'required');
 
+// 2026-09-10（diag/tool-format-probe）：判定 DeepSeek 何时把工具调用从标准 <tool_calls> JSON 切成
+// XML 形态的 DSML（<|dsml|invoke name="..."> / <|dsml|parameter ...>）。两个候选变量：并行多调用、
+// 工具集合大小。2×2 矩阵一次跑完：{1 tool, 5 tools} × {1 call, 多 call}。每次报告 finish_reason /
+// 解析出的 tool_calls 数 / content 是否残留 dsml。工具集用 spice 的真实工具名与描述（精简 schema）。
+// 每个探针独立开新 thread（不传 conversation_id）——避免工具集差异触发 mapper rebuild 干扰判定。
+const PROBE_WEATHER_TOOL = {
+  type: 'function',
+  function: { name: 'get_weather', description: '取某地天气', parameters: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'] } },
+};
+const PROBE_SPICE_TOOLS = [
+  { type: 'function', function: { name: 'Read', description: 'Read the contents of a text file. Output is truncated to 2000 lines or 50KB whichever is hit first. Use offset/limit for large files.', parameters: { type: 'object', required: ['path'], properties: { path: { type: 'string', description: 'Path to the file to read.' }, offset: { type: 'number', description: 'Line number to start reading from (1-indexed).' }, limit: { type: 'number', description: 'Maximum number of lines to read.' } } } } },
+  { type: 'function', function: { name: 'Write', description: 'Write content to a file. Creates the file if it does not exist, overwrites if it does.', parameters: { type: 'object', required: ['path', 'content'], properties: { path: { type: 'string', description: 'Path to write to.' }, content: { type: 'string', description: 'Full file content to write.' } } } } },
+  { type: 'function', function: { name: 'Edit', description: 'Edit a source file using exact text replacement.', parameters: { type: 'object', required: ['path', 'edits'], properties: { path: { type: 'string', description: 'Path to the file to edit.' }, edits: { type: 'array', items: { type: 'object', required: ['oldText', 'newText'], properties: { oldText: { type: 'string' }, newText: { type: 'string' } } } } } } } },
+  { type: 'function', function: { name: 'Grep', description: 'Search project files for a pattern.', parameters: { type: 'object', required: ['pattern'], properties: { pattern: { type: 'string' }, path: { type: 'string' }, ignoreCase: { type: 'boolean' }, literal: { type: 'boolean' } } } } },
+  { type: 'function', function: { name: 'Compile', description: 'Compile the current sketch.ino. Returns diagnostics as text.', parameters: { type: 'object' } } },
+];
+// 四个探针：提问措辞固定，只改工具集与提问，避免额外变量
+const PROBE_TASKS = [
+  { label: '1 tool  / 1 call ', tools: [PROBE_WEATHER_TOOL], ask: '北京天气如何？' },
+  { label: '1 tool  / 2 calls', tools: [PROBE_WEATHER_TOOL], ask: '北京和上海的天气如何？' },
+  { label: '5 tools / 1 call ', tools: PROBE_SPICE_TOOLS, ask: 'sketch.ino 的第一行是什么？' },
+  { label: '5 tools / 3 calls', tools: PROBE_SPICE_TOOLS, ask: '读一下 sketch.ino、diagram.json、libraries.txt 这三个文件。' },
+];
+export async function probeToolFormat(m: string, opts: any): Promise<string> {
+  const lines: string[] = [];
+  for (const t of PROBE_TASKS) {
+    try {
+      const r = await (window as any).deepApi.chat.completions.create({ model: m, messages: [{ role: 'user', content: t.ask }], tools: t.tools, tool_choice: 'auto', ...opts });
+      const msg = r.choices[0].message;
+      const content = String(msg.content ?? '');
+      const calls = msg.tool_calls ?? [];
+      // dsml 判定：非流式路径会把标准 <tool_calls> 块剥掉；解析失败时 XML DSML 会原样留在 content
+      const dsml = /dsml|invoke\s+name=/i.test(content);
+      lines.push(`[${t.label}] finish=${r.choices[0].finish_reason} calls=${calls.length} dsml=${dsml} contentLen=${content.length}`);
+      if (calls.length) lines.push(`    names=${calls.map((c: any) => c.function.name).join(',')}`);
+      if (content) lines.push(`    content=${JSON.stringify(content.slice(0, 300))}`);
+    } catch (e: any) {
+      lines.push(`[${t.label}] ERROR ${e?.message ?? String(e)}`);
+    }
+  }
+  return lines.join('\n');
+}
+
 async function rebuild(m: string, opts: any): Promise<string> {
   // 第一轮：user '2+2 等于几？' → assistant '4'
   const m1 = [{ role: 'user', content: '2+2 等于几？' }];
@@ -112,6 +155,7 @@ export function mountScenarios(pane: HTMLElement): () => void {
       <button data-run-stream>流式问答</button>
       <button data-run-tool-auto>工具调用 (auto)</button>
       <button data-run-tool-required>工具调用 (required)</button>
+      <button data-run-probe style="background:#ffeedd;">工具调用格式判定 (2×2)</button>
       <button data-run-rebuild>修改历史重发 (rebuild)</button>
       <button data-run-conv>conversation_id 续聊</button>
       <button data-run-all style="margin-left:12px;background:#e0f0e0;">全部跑</button>
@@ -132,6 +176,7 @@ export function mountScenarios(pane: HTMLElement): () => void {
     ['data-run-stream',       '流式问答',                  () => stream(modelSel.value, baseOpts())],
     ['data-run-tool-auto',    '工具调用 (auto)',           () => toolAuto(modelSel.value, baseOpts())],
     ['data-run-tool-required','工具调用 (required)',       () => toolRequired(modelSel.value, baseOpts())],
+    ['data-run-probe',        '工具调用格式判定 (2×2)',    () => probeToolFormat(modelSel.value, baseOpts())],
     ['data-run-rebuild',      '修改历史重发 (rebuild)',    () => rebuild(modelSel.value, baseOpts())],
     ['data-run-conv',         'conversation_id 续聊',     () => conv(modelSel.value, baseOpts())],
   ];
