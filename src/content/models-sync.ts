@@ -37,3 +37,14 @@ export async function extractModelOptions(): Promise<ModelOption[]> {
   }
   return [];
 }
+
+/** 2026-09-10（feat/models-sync）：fire-and-forget 推 catalog 到 SW。
+ *  spec §3.6 跨域消息协议。失败一律吞（spec §3.5 失败回退）。
+ *  preflight ruling：使用 bridge 协议的 `method:` 字段（与 src/shared/protocol.ts
+ *  isBridgeRequest + src/background/sw.ts port.onMessage 一致；不是 `kind:`）。 */
+export function sendCatalogUpdate(models: ModelOption[]): void {
+  try {
+    (globalThis as { chrome?: { runtime?: { sendMessage: (m: unknown) => void } } })
+      .chrome?.runtime?.sendMessage({ method: 'models-catalog:update', models });
+  } catch { /* silent fallback per spec §3.5 */ }
+}

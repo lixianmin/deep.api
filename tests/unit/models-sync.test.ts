@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { extractModelOptions, labelToModelId } from '../../src/content/models-sync';
+import { describe, it, expect, vi } from 'vitest';
+import { extractModelOptions, labelToModelId, sendCatalogUpdate } from '../../src/content/models-sync';
 
 describe('labelToModelId', () => {
   it('maps "DeepSeek V4 Flash" → "deepseek-v4-flash"', () => {
@@ -51,5 +51,33 @@ describe('extractModelOptions', () => {
     `);
     const opts = await extractModelOptions();
     expect(opts).toEqual([{ label: 'DeepSeek V4 Flash' }]);
+  });
+});
+
+// 2026-09-10（feat/models-sync）：Task 2 — content script → SW 消息桥。
+// preflight ruling：使用 bridge 协议 `method:` 字段（不是 `kind:`），
+// 与 src/shared/protocol.ts isBridgeRequest + sw.ts port.onMessage 一致。
+describe('sendCatalogUpdate', () => {
+  it('posts models-catalog:update to chrome.runtime.sendMessage with method field', () => {
+    const send = vi.fn();
+    vi.stubGlobal('chrome', { runtime: { sendMessage: send } });
+    sendCatalogUpdate([{ label: 'DeepSeek V4 Flash' }]);
+    expect(send).toHaveBeenCalledWith({
+      method: 'models-catalog:update',
+      models: [{ label: 'DeepSeek V4 Flash' }],
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it('does not throw when chrome.runtime is undefined (e.g. non-extension context)', () => {
+    vi.stubGlobal('chrome', undefined);
+    expect(() => sendCatalogUpdate([{ label: 'x' }])).not.toThrow();
+    vi.unstubAllGlobals();
+  });
+
+  it('does not throw when chrome.runtime.sendMessage throws', () => {
+    vi.stubGlobal('chrome', { runtime: { sendMessage: () => { throw new Error('port dead'); } } });
+    expect(() => sendCatalogUpdate([{ label: 'x' }])).not.toThrow();
+    vi.unstubAllGlobals();
   });
 });
