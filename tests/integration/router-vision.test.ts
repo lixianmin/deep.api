@@ -43,15 +43,20 @@ function makeMockAdapter(opts: {
   } as ProviderAdapter & { streamCalls: ProviderCompletion[] };
 }
 
-function makeRouter(adapter: ProviderAdapter): Router {
+function makeRouter(adapter: ProviderAdapter, logSink?: any[]): Router {
   const now = vi.fn(() => 1000);
   const mapper = new SessionMapper(
     { createSession: async () => ({ webSessionId: 's1' }), deleteSession: async () => {}, now },
     { poolSize: 2, ttlMs: 60_000 },
   );
   const queue = new Queue({ timeoutMs: 60_000, now });
+  // log: RingLog（默认）或可注入 sink 让测试能读 log entries
+  const ring = new RingLog(20);
+  const log: RingLog = logSink
+    ? new Proxy(ring, { get(t, p) { if (p === 'push') { return (e: unknown) => { ring.push(e as never); logSink.push(e); }; } return Reflect.get(t, p); } }) as unknown as RingLog
+    : ring;
   return new Router({
-    registry: { deepseek: adapter }, mapper, queue, now, log: new RingLog(20),
+    registry: { deepseek: adapter }, mapper, queue, now, log,
     storage: { get: async () => undefined, set: async () => undefined },
     version: '0.0.0-test',
   });
@@ -155,5 +160,81 @@ describe('router: vision multimodal 路由', () => {
     expect(uploadFile).toHaveBeenCalledTimes(2);
     expect(adapter.streamCalls[0]!.refFileIds).toEqual(['file-img0.png', 'file-img1.png']);
     expect(adapter.streamCalls[0]!.prompt).toBe('[image][image]');
+  });
+
+  // 2026-09-10（fix/sw-vision-error）：v0.1.82 现场——vision + 图片发送后
+  // 静默失败。根因：router.create 入口的 vision pipeline（upload / poll / atob）
+  // 拋错后未被任何 try/catch 包住。SW 端没有 unhandledrejection 监听 → console 静默。
+  // 修复：router 在 vision pipeline 拋错时包 try/catch + 写 log + 重拋明确 BridgeError，
+  // 让 SW 也能接住「vision pipeline 失败」详情。不变接口：调用方仍接收 reject。
+  it('vision + 图片：uploadFile reject → router 写 log + 拋带 message 的 BridgeError', async () => {
+    const uploadFile = vi.fn(async () => {
+      throw Object.assign(new Error('upload failed: 401 unauthorized'), { status: 401 });
+    });
+    const adapter = makeMockAdapter({ uploadFile, pollFileReady: async () => {} });
+    const log: any[] = [];
+    const router = makeRouter(adapter, log);
+    const req: ChatCompletionRequest = {
+      model: 'deepseek-v4-flash-vision-exp',
+      messages: [{ role: 'user', content: [
+        { type: 'text', text: '看这图' },
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,FAKE' } },
+      ] }],
+    };
+    await expect(router.create('T', req)).rejects.toMatchObject({
+      error: {
+        error: {
+          code: 'provider_unavailable',
+          message: expect.stringMatching(/upload failed|401/),
+        },
+      },
+    });
+    // 错误应被记入 log（不是静默）
+    const errEntry = log.find((e) => e.ok === false && e.model === 'deepseek-v4-flash-vision-exp');
+    expect(errEntry).toBeTruthy();
+    expect(errEntry.error).toMatch(/upload|401/);
+  });
+
+  it('vision + 图片：pollFileReady 超时 → router 写 log + 拋带 message 的 BridgeError', async () => {
+    const uploadFile = vi.fn(async () => ({ id: 'file-abc', filename: 'x.png', bytes: 11, status: 'uploaded' }));
+    const pollFileReady = vi.fn(async () => {
+      throw new Error('pollFileReady timeout after 10 attempts (fileId=file-abc)');
+    });
+    const adapter = makeMockAdapter({ uploadFile, pollFileReady });
+    const log: any[] = [];
+    const router = makeRouter(adapter, log);
+    const req: ChatCompletionRequest = {
+      model: 'deepseek-v4-flash-vision-exp',
+      messages: [{ role: 'user', content: [
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,AAA' } },
+      ] }],
+    };
+    await expect(router.create('T', req)).rejects.toMatchObject({
+      error: { error: { message: expect.stringMatching(/pollFileReady|timeout/) } },
+    });
+    expect(log.find((e) => e.ok === false && e.model === 'deepseek-v4-flash-vision-exp')).toBeTruthy();
+  });
+
+  it('vision + 图片：image_url download HTTP 404 → 拋 invalid_request_error（400）+ log 记录', async () => {
+    // fetch mock 返回 404（HTTP URL 场景）
+    const origFetch = globalThis.fetch;
+    (globalThis as any).fetch = vi.fn(async () => ({ ok: false, status: 404 } as Response));
+    try {
+      const adapter = makeMockAdapter({ uploadFile: vi.fn(), pollFileReady: vi.fn() });
+      const log: any[] = [];
+      const router = makeRouter(adapter, log);
+      const req: ChatCompletionRequest = {
+        model: 'deepseek-v4-flash-vision-exp',
+        messages: [{ role: 'user', content: [
+          { type: 'image_url', image_url: { url: 'https://example.com/notfound.png' } },
+        ] }],
+      };
+      await expect(router.create('T', req)).rejects.toMatchObject({
+        error: { error: { code: 'invalid_request_error', message: expect.stringMatching(/404/) } },
+      });
+      expect(log.find((e) => e.ok === false)).toBeTruthy();
+    } finally {
+      (globalThis as any).fetch = origFetch;
+    }
   });
 });

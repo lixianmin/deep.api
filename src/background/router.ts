@@ -59,45 +59,67 @@ export class Router {
     const messages = p.messages as Message[] | undefined;
     if (!Array.isArray(messages) || messages.length === 0) throw err('invalid_request_error', 'messages array required', 400);
     const ctx = { token, requestId: `req-${started}-${Math.random().toString(36).slice(2, 8)}` };
-    // 2026-09-09（feat/vision-multimodal）：原 v0.1.66 拒绝 array content；现在为 vision 模型
-    // 放开——vision 接受 image_url 块，走 vision-pipeline 上传转 ref_file_ids。
-    // flash/pro 仍拒绝 image_url（保留 v0.1.66）。
-    const refFileIds: string[] = [];
-    if (resolved.modelType === 'vision' && provider.uploadFile && provider.pollFileReady) {
-      // 抽所有 user message 的 image_url，按出现顺序上传
-      let imgIdx = 0;
-      for (let i = 0; i < messages.length; i++) {
-        const refs = extractImageRefs(messages[i]!);
-        for (const ref of refs) {
-          let bytes: Uint8Array;
-          let mime: string;
-          if (ref.isDataUrl) {
-            const b64 = ref.url.split(',')[1] ?? '';
-            bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-            mime = ref.mimeType || 'image/png';
-          } else {
-            const r = await fetch(ref.url);
-            if (!r.ok) throw err('invalid_request_error', `image_url download failed: ${ref.url} (http ${r.status})`, 400);
-            const ab = await r.arrayBuffer();
-            bytes = new Uint8Array(ab);
-            mime = r.headers.get('content-type')?.split(';')[0]?.trim() || ref.mimeType || 'image/png';
+    // 2026-09-10（fix/sw-vision-error）：vision pipeline（uploadFile / pollFileReady / fetch / atob）
+    // 任何拋错都会被 SW 端作为 unhandledrejection 吞掉（chrome MV3 SW 不自动 console.error
+    // unhandledrejection）。外层包 try/catch + 写 log（ok:false + error message）保证错误不静默：
+    // 1) Debug Log tab 有记录  2) BridgeError 透传到 SW line 280 catch 发 kind:'error' 给 bridge。
+    try {
+      // 2026-09-09（feat/vision-multimodal）：原 v0.1.66 拒绝 array content；现在为 vision 模型
+      // 放开——vision 接受 image_url 块，走 vision-pipeline 上传转 ref_file_ids。
+      // flash/pro 仍拒绝 image_url（保留 v0.1.66）。
+      const refFileIds: string[] = [];
+      if (resolved.modelType === 'vision' && provider.uploadFile && provider.pollFileReady) {
+        // 抽所有 user message 的 image_url，按出现顺序上传
+        let imgIdx = 0;
+        for (let i = 0; i < messages.length; i++) {
+          const refs = extractImageRefs(messages[i]!);
+          for (const ref of refs) {
+            let bytes: Uint8Array;
+            let mime: string;
+            if (ref.isDataUrl) {
+              const b64 = ref.url.split(',')[1] ?? '';
+              bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+              mime = ref.mimeType || 'image/png';
+            } else {
+              const r = await fetch(ref.url);
+              if (!r.ok) throw err('invalid_request_error', `image_url download failed: ${ref.url} (http ${r.status})`, 400);
+              const ab = await r.arrayBuffer();
+              bytes = new Uint8Array(ab);
+              mime = r.headers.get('content-type')?.split(';')[0]?.trim() || ref.mimeType || 'image/png';
+            }
+            const filename = `img${imgIdx}.${(mime.split('/')[1] || 'png')}`;
+            imgIdx++;
+            const up = await provider.uploadFile(ctx, bytes, mime, filename);
+            await provider.pollFileReady(ctx, up.id, { maxAttempts: 10, intervalMs: 2000 });
+            refFileIds.push(up.id);
           }
-          const filename = `img${imgIdx}.${(mime.split('/')[1] || 'png')}`;
-          imgIdx++;
-          const up = await provider.uploadFile(ctx, bytes, mime, filename);
-          await provider.pollFileReady(ctx, up.id, { maxAttempts: 10, intervalMs: 2000 });
-          refFileIds.push(up.id);
+        }
+      } else {
+        // flash/pro：array content 含 image_url → 400（保留 v0.1.66 拒绝）
+        for (let i = 0; i < messages.length; i++) {
+          const refs = extractImageRefs(messages[i]!);
+          if (refs.length > 0) {
+            throw err('invalid_request_error', `messages[${i}] 含 image_url 但模型 ${resolved.modelId} 不支持视觉；仅 deepseek-v4-flash-vision-exp 可接收图片`, 400);
+          }
         }
       }
-    } else {
-      // flash/pro：array content 含 image_url → 400（保留 v0.1.66 拒绝）
-      for (let i = 0; i < messages.length; i++) {
-        const refs = extractImageRefs(messages[i]!);
-        if (refs.length > 0) {
-          throw err('invalid_request_error', `messages[${i}] 含 image_url 但模型 ${resolved.modelId} 不支持视觉；仅 deepseek-v4-flash-vision-exp 可接收图片`, 400);
-        }
-      }
+      // 成功路径：把 refFileIds 赋给外层 closure 供后续 req 用
+      (ctx as { refFileIds?: string[] }).refFileIds = refFileIds;
+    } catch (e) {
+      // 任何 vision pipeline 错误 → 写 log + 拋 BridgeError（不静默）
+      const msg = (e instanceof BridgeError) ? e.error.error.message : (e instanceof Error ? `${e.message}` : String(e));
+      const code = (e instanceof BridgeError) ? e.error.error.code : 'provider_unavailable';
+      this.d.log.push({
+        at: this.d.now(), provider: provider.id, model: modelId, ok: false, ms: this.d.now() - started, error: msg, version: this.d.version,
+        finishReason: undefined, parentMessageId: null,
+        replySample: undefined, reasoningSample: undefined, sseBytes: undefined, ssePaths: undefined, sseRaw: undefined,
+        messagesFull: JSON.stringify(messages),
+        mirrorFull: undefined,
+      });
+      if (e instanceof BridgeError) throw e;
+      throw err(code as never, `vision pipeline failed: ${msg}`, 502);
     }
+    const refFileIds: string[] = (ctx as { refFileIds?: string[] }).refFileIds ?? [];
     // 2026-09-09（feat/vision-multimodal）：array content → 渲染成 prompt 字符串 + 标记有图位置。
     // 不修改原 messages（mirror 要存原 array 形态），复制一份 string 版给 renderTranscript/renderTail。
     const stringMessages: Message[] = messages.map((m) => ({

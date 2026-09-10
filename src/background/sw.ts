@@ -5,7 +5,7 @@ import { Queue } from './queue';
 import { RingLog } from './log';
 import { createDeepSeekAdapter, type AdapterDeps } from './providers/deepseek/adapter';
 import { PowSolver, instantiateDeepSeekWasm, type WasmInstance } from './providers/deepseek/pow';
-import { isBridgeRequest, type BridgeResponseMsg } from '../shared/protocol';
+import { isBridgeRequest, BridgeError, type BridgeResponseMsg } from '../shared/protocol';
 import type { ChatCompletionChunk } from '../shared/api-types';
 import { createRegistry } from './providers/registry';
 
@@ -230,6 +230,15 @@ async function broadcastPanelState(): Promise<void> {
 chrome.runtime.onInstalled.addListener(() => { void refreshAuthAndLog(); });
 chrome.runtime.onStartup.addListener(() => { void refreshAuthAndLog(); });
 
+// 2026-09-10（fix/sw-vision-error）：任何未捕获的 promise rejection（port.onMessage async listener
+// 中 router.create 拋错但未被 catch）都作为 provider_unavailable 发回 bridge，避免 SW console 静默
+// 误导调试。Chrome MV3 SW 默认不会 console.error unhandledrejection。
+self.addEventListener('unhandledrejection', (ev) => {
+  const e = ev.reason as unknown;
+  const msg = e instanceof Error ? e.message : String(e);
+  console.error('[deep.api sw] unhandled rejection:', msg);
+});
+
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name === 'deepapi') {
     // port 存活追踪：页面进 bfcache / 导航离开时 port 会被 Chrome 关闭，
@@ -277,16 +286,27 @@ chrome.runtime.onConnect.addListener((port) => {
           return;
         }
         if (env.method === 'chat.completions.create') {
-          const params = env.params as { stream?: boolean };
-          const resp = await router.create(token, env.params as unknown);
-          if (params.stream) {
-            const iter = resp as AsyncIterable<ChatCompletionChunk>;
-            for await (const chunk of iter) {
-              if (!safePost({ __deepApi: { id: env.id, kind: 'chunk', chunk } } as unknown as BridgeResponseMsg)) break;
+          // 2026-09-10（fix/sw-vision-error）：vision pipeline 拋错不应让 listener 整个 reject
+          // 变 unhandledrejection（Chrome MV3 SW 不默认 console.error）。明确 try/catch + 发
+          // kind:'error' 给 bridge + 写 log entry。
+          try {
+            const params = env.params as { stream?: boolean };
+            const resp = await router.create(token, env.params as unknown);
+            if (params.stream) {
+              const iter = resp as AsyncIterable<ChatCompletionChunk>;
+              for await (const chunk of iter) {
+                if (!safePost({ __deepApi: { id: env.id, kind: 'chunk', chunk } } as unknown as BridgeResponseMsg)) break;
+              }
+              safePost({ __deepApi: { id: env.id, kind: 'done' } } as unknown as BridgeResponseMsg);
+            } else {
+              safePost({ __deepApi: { id: env.id, kind: 'result', value: resp } } as unknown as BridgeResponseMsg);
             }
-            safePost({ __deepApi: { id: env.id, kind: 'done' } } as unknown as BridgeResponseMsg);
-          } else {
-            safePost({ __deepApi: { id: env.id, kind: 'result', value: resp } } as unknown as BridgeResponseMsg);
+          } catch (e) {
+            // 2026-09-10（fix/sw-vision-error）：router.create 拋错（vision pipeline / stream / tool parse）
+            // 都变 BridgeError。透传给 bridge 走 SSE error 帧 + [DONE]（不 hang consumer）。
+            const be = e instanceof BridgeError ? e : new BridgeError({ error: { message: e instanceof Error ? e.message : String(e), type: 'api_error', code: 'provider_unavailable' } }, 500);
+            console.error('[deep.api sw] chat.completions.create failed:', be.error.error.message);
+            safePost({ __deepApi: { id: env.id, kind: 'error', error: be.error } } as unknown as BridgeResponseMsg);
           }
         } else if (env.method === 'chat.completions.cancel') {
           safePost({ __deepApi: { id: env.id, kind: 'done' } } as unknown as BridgeResponseMsg);
