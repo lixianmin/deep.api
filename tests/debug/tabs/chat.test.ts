@@ -135,12 +135,12 @@ describe('mountChat: 控件重排 + 移除 reasoning_effort', () => {
 // 2026-09-09（feat/debug-chat-redesign）：图片上传 UI（Vision multimodal 调试用）。
 // FileReader readAsDataURL mock + 缩略图预览 + 发送转 content array。
 describe('mountChat: vision 图片上传', () => {
-  it('渲染上传按钮（默认 model 为 flash 时禁用 + tooltip）', async () => {
-    // 模型列表只含 flash + vision-exp，install 默认选第一个
+  it('渲染上传按钮（默认 model = deepseek-flash 时启用 + tooltip）', async () => {
+    // 2026-09-09（fix/vision-button）：v4.1 Flash 统一后只有 deepseek-flash 一个模型。
+    // 它支持图片（changelog 实测）——按钮应该默认 enabled，不再是灰的。
     (globalThis as any).deepApi.models.list = vi.fn().mockResolvedValue({
       data: [
-        { id: 'deepseek-v4-flash', description: 'DeepSeek V4 Flash' },
-        { id: 'deepseek-v4-flash-vision-exp', description: 'DeepSeek V4 Flash Vision Exp' },
+        { id: 'deepseek-flash', description: 'DeepSeek V4.1 Flash' },
       ],
     });
     const pane = document.createElement('div');
@@ -149,23 +149,22 @@ describe('mountChat: vision 图片上传', () => {
     await new Promise(r => setTimeout(r, 10));
     const uploadBtn = pane.querySelector<HTMLButtonElement>('[data-chat-upload]');
     expect(uploadBtn).toBeTruthy();
-    // 默认选第一个 model（flash）—— 上传按钮禁用
-    expect(uploadBtn!.disabled).toBe(true);
-    expect(uploadBtn!.title).toMatch(/vision/);
+    // 默认选第一个 model（deepseek-flash）—— 上传按钮应启用
+    expect(uploadBtn!.disabled).toBe(false);
+    expect(uploadBtn!.title).toMatch(/上传图片|点击/);
   });
 
-  it('选 vision-exp 模型后，上传按钮启用', async () => {
+  it('选 deepseek-flash 模型后，上传按钮启用（回归——旧 vision-exp 名字不出现）', async () => {
     (globalThis as any).deepApi.models.list = vi.fn().mockResolvedValue({
       data: [
-        { id: 'deepseek-v4-flash', description: 'DeepSeek V4 Flash' },
-        { id: 'deepseek-v4-flash-vision-exp', description: 'DeepSeek V4 Flash Vision Exp' },
+        { id: 'deepseek-flash', description: 'DeepSeek V4.1 Flash' },
       ],
     });
     const pane = document.createElement('div');
     mountChat(pane);
     await new Promise(r => setTimeout(r, 10));
     const modelSel = pane.querySelector<HTMLSelectElement>('[data-chat-model]')!;
-    modelSel.value = 'deepseek-v4-flash-vision-exp';
+    modelSel.value = 'deepseek-flash';
     modelSel.dispatchEvent(new Event('change'));
     const uploadBtn = pane.querySelector<HTMLButtonElement>('[data-chat-upload]')!;
     expect(uploadBtn.disabled).toBe(false);

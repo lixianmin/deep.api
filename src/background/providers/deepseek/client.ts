@@ -45,9 +45,11 @@ export function mergeWithHardcoded(
 // 9/14 12:00 起 retired，统一为 V4.1 Flash 新 ID `deepseek-flash`。
 // 但 vision-exp 实际是独立实验模型，不在本次统一范围内（DeepSeek changelog
 // 只提 3 个 chat 入口；vision 是 file upload side-model）—— 保留兼容层让 vision 继续可用。
-// 如 vision-exp 后续也 retire，再删。
+// 2026-09-10（fix/vision-button）：V4.1 Flash 统一后 `deepseek-flash` 也走 vision pipeline
+// （服务端路由到 V4.1 Flash，支持 image_url content array）。vision-exp 仅保留做向后
+// 兼容；如 vision-exp 后续也 retire，再删。
 const LIMITS = {
-  'deepseek-flash': { modelType: 'default' as const, thinking: true, limitChars: 2_621_440 },
+  'deepseek-flash': { modelType: 'vision' as const, thinking: true, limitChars: 2_621_440 },
   'deepseek-v4-flash-vision-exp': { modelType: 'vision' as const, thinking: true, limitChars: 2_621_440 },
 };
 

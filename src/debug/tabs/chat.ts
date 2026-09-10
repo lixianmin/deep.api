@@ -39,11 +39,16 @@ export function mountChat(pane: HTMLElement): () => void {
   // 不，模板里写了 data-chat-thinking，重查选择器——
 
   // 模型联动：vision 模型才能上传；非 vision 禁用上传按钮
-  const isVisionModel = (id: string): boolean => id === 'deepseek-v4-flash-vision-exp';
+  // 2026-09-10（fix/vision-button）：v4.1 Flash 统一后（changelog 9/14 retired 三个 V4 ID），只有
+  // `deepseek-flash` 一个模型。V4.1 Flash 原生支持图片（与 vision-exp 走同一服务端路由），
+  // 所以现在所有 chat 调的模型都 vision-capable。保留旧 vision-exp 名字做向后兼容（万一某
+  // 个本地部署还导出它）。
+  const isVisionModel = (id: string): boolean =>
+    id === 'deepseek-flash' || id === 'deepseek-v4-flash-vision-exp';
   const refreshUploadState = (): void => {
     const vision = isVisionModel(modelSel.value);
     uploadBtn.disabled = !vision;
-    uploadBtn.title = vision ? '点击上传图片' : '仅 vision-exp 模型支持图片（当前已禁用）';
+    uploadBtn.title = vision ? '点击上传图片' : '当前模型不支持图片';
   };
   modelSel.addEventListener('change', refreshUploadState);
   uploadBtn.addEventListener('click', () => fileInput.click());

@@ -18,7 +18,8 @@ describe('DeepSeekAdapter', () => {
   it('resolves current public models (V4.1 unified) and rejects unknown', () => {
     const a = createDeepSeekAdapter(mkDeps());
     // 2026-09-14（fix/models-v4-retired）：V4 三个 chat ID retired，只 1 个新 chat ID。
-    expect(a.resolveModel('deepseek-flash')).toMatchObject({ modelType: 'default', thinking: true });
+    // 2026-09-10（fix/vision-button）：V4.1 Flash 统一后 deepseek-flash 也走 vision pipeline。
+    expect(a.resolveModel('deepseek-flash')).toMatchObject({ modelType: 'vision', thinking: true });
     // vision 兼容层仍保留
     expect(a.resolveModel('deepseek-v4-flash-vision-exp')).toMatchObject({ modelType: 'vision', thinking: true });
     // 旧 V4 chat ID 已不再 resolve（用户应改用 deepseek-flash）

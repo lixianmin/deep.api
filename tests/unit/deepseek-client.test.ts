@@ -65,7 +65,9 @@ describe('deepseek client', () => {
     it('resolves chat/vision 默认 thinking=true（V4.1 Flash 统一后 + vision 兼容）', () => {
       const flash = resolveModel('deepseek-flash')!;
       const vision = resolveModel('deepseek-v4-flash-vision-exp')!;
-      expect(flash.modelType).toBe('default');
+      // 2026-09-10（fix/vision-button）：V4.1 Flash 统一后所有 chat 调都走 vision pipeline
+      // （服务端路由到 V4.1 Flash，支持 image_url）。所以 modelType 改为 'vision'。
+      expect(flash.modelType).toBe('vision');
       expect(vision.modelType).toBe('vision');
       // 2026-09-09（fix/pro-thinking-true）：v0.1.72 误判「thinking_enabled=true 会让 Pro 只思考
       // 不说话」——实际根因是客户端版本头缺失 + 嵌套快照/APPEND 数组未解析（v0.1.75-78 已修），
