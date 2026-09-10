@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { formatAuthState } from '../../src/popup/snippet';
 import { pickForensic } from '../../src/popup/snippet';
+import { pickForensicTail } from '../../src/popup/snippet';
 
 describe('formatAuthState', () => {
   it('logged_in → ok', () => {
@@ -50,6 +51,32 @@ describe('pickForensic（feat/log-b64-export）', () => {
     expect(p.ok).toBe(false);
     expect(p.ms).toBe(0);
     expect('error' in p).toBe(false);
+  });
+});
+
+// 2026-09-10（fix/forensic-tail）：v0.1.100 实测取到的是「生成会话标题」辅助调用（tools:[]、
+// 无 DSML），真正的聊天调用在它之前。取尾 n 条才能把整轮包住。
+describe('pickForensicTail（fix/forensic-tail）', () => {
+  const mk = (i: number, extra: Record<string, unknown> = {}) => ({ at: i, version: '0.1.101', ...extra });
+
+  it('取尾部 n 条且保持时间顺序', () => {
+    const out = pickForensicTail([mk(1), mk(2), mk(3), mk(4), mk(5), mk(6)], 3);
+    expect(out.map((e) => e.at)).toEqual([4, 5, 6]);
+  });
+
+  it('少于 n 条时全取', () => {
+    expect(pickForensicTail([mk(1), mk(2)]).map((e) => e.at)).toEqual([1, 2]);
+  });
+
+  it('空/未定义返回空数组（不抛）', () => {
+    expect(pickForensicTail([])).toEqual([]);
+    expect(pickForensicTail(undefined)).toEqual([]);
+  });
+
+  it('每条仍走白名单（messagesFull 不得泄入）', () => {
+    const out = pickForensicTail([mk(1, { messagesFull: 'x'.repeat(10), rawB64: 'QUJD' })]);
+    expect(out[0]!.messagesFull).toBeUndefined();
+    expect(out[0]!.rawB64).toBe('QUJD');
   });
 });
 

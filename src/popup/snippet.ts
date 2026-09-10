@@ -25,6 +25,17 @@ export function pickForensic(entry: Record<string, unknown> | undefined): Record
   return out;
 }
 
+/**
+ * 取最近 n 条日志的取证字段（保持时间顺序）。
+ * 2026-09-10（fix/forensic-tail）：单个「最新一条」会取错——Spice 一轮会发多次请求
+ * （聊天调用之后还有「生成会话标题」辅助调用），最新一条往往不是出问题的那一条。
+ * 取尾 n 条既能看到整轮的时序，也能把真正的失败调用包进来。n 默认 5。
+ */
+export function pickForensicTail(entries: Record<string, unknown>[] | undefined, n = 5): Record<string, unknown>[] {
+  if (!entries?.length) return [];
+  return entries.slice(-n).map(pickForensic);
+}
+
 export function formatAuthState(s: AuthStatus): { label: string; cls: 'ok' | 'warn' | 'bad' } {
   if (s.state === 'logged_in') return { label: '已登录', cls: 'ok' };
   if (s.state === 'expired') return { label: `登录失效：${s.message ?? ''}`, cls: 'warn' };

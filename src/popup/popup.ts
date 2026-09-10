@@ -1,5 +1,5 @@
 // popup.ts - 通过 port 与 SW 通信；只在 MV3 popup 内执行（chrome.* 在此文件中）
-import { formatAuthState, pickForensic } from './snippet';
+import { formatAuthState, pickForensicTail } from './snippet';
 
 const port = chrome.runtime.connect({ name: 'deepapi-panel' });
 type LogEntry = {
@@ -132,9 +132,10 @@ document.getElementById('btn-copy-log')!.addEventListener('click', () => {
   });
 });
 
-// 2026-09-10（feat/log-b64-export）：只复制**最近一条**的取证字段。
-// 「复制」按钮把 200 条完整日志序列化（含 messagesFull / mirrorFull，可达 MB），贴给 AI 不现实；
-// 取证只需要模型原文与其 base64（DSML 标记会被粘贴链吃掉，base64 不会）。
+// 2026-09-10（feat/log-b64-export + fix/forensic-tail）：复制**最近 5 条**的取证字段。
+// 不用「最新一条」：Spice 一轮会发多次请求（聊天调用之后还有「生成会话标题」辅助调用），
+// 最新一条往往不是出问题的那一条（v0.1.100 实测取到标题调用，里面根本没有 DSML）。
+// 也不用「复制」按钮的 200 条完整日志（含 messagesFull / mirrorFull，可达 MB，贴给 AI 不现实）。
 document.getElementById('btn-copy-forensic')!.addEventListener('click', () => {
   const btn = document.getElementById('btn-copy-forensic') as HTMLButtonElement;
   const orig = btn.textContent;
@@ -142,10 +143,10 @@ document.getElementById('btn-copy-forensic')!.addEventListener('click', () => {
     btn.textContent = msg;
     setTimeout(() => { btn.textContent = orig ?? '复制取证'; }, 1500);
   };
-  const last = (state.log ?? []).at(-1) as unknown as Record<string, unknown> | undefined;
-  if (!last) { flash('没有日志'); return; }
-  navigator.clipboard.writeText(JSON.stringify(pickForensic(last), null, 2))
-    .then(() => flash(`已复制取证 v${String(last.version ?? '?')}`))
+  const tail = (state.log ?? []).slice(-5) as unknown as Record<string, unknown>[];
+  if (!tail.length) { flash('没有日志'); return; }
+  navigator.clipboard.writeText(JSON.stringify(pickForensicTail(tail), null, 2))
+    .then(() => flash(`已复制 ${tail.length} 条 v${String(tail[tail.length - 1]!.version ?? '?')}`))
     .catch((e) => { console.error('[deep.api popup] 复制取证失败', e); });
 });
 

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "deep.api — DeepSeek web as OpenAI API",
-  "version": "0.1.100",
+  "version": "0.1.101",
   "description": "把 DeepSeek 网页版转成 OpenAI 形态接口供其他网站调用（无伴生进程）",
   "permissions": [
     "cookies",
