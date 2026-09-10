@@ -42,3 +42,36 @@ describe('getModelsCatalog', () => {
     expect(cat).toMatchObject({ source: 'chat.deepseek.com', capturedAt: oneDayAgo, models: [{ label: 'x' }] });
   });
 });
+
+import { mergeWithHardcoded, type MergedModel } from '../../src/background/providers/deepseek/client';
+
+const HARDCODED: MergedModel[] = [
+  { id: 'deepseek-v4-flash', modelType: 'default', thinking: true, limitChars: 2621440, description: '' },
+  { id: 'deepseek-v4-pro', modelType: 'expert', thinking: true, limitChars: 163840, description: '' },
+  { id: 'deepseek-v4-flash-vision-exp', modelType: 'vision', thinking: true, limitChars: 2621440, description: '' },
+];
+
+describe('mergeWithHardcoded', () => {
+  it('returns hardcoded copy when catalog is null', () => {
+    expect(mergeWithHardcoded(null, HARDCODED)).toEqual(HARDCODED);
+  });
+  it('enriches description + capturedAt from catalog by id match', () => {
+    const cat = { capturedAt: 123, models: [
+      { label: 'DeepSeek V4 Flash' },
+      { label: 'New Unknown Model' },
+    ] };
+    const merged = mergeWithHardcoded(cat, HARDCODED);
+    expect(merged[0]).toMatchObject({
+      id: 'deepseek-v4-flash', description: 'DeepSeek V4 Flash',
+      capturedAt: 123, source: 'chat.deepseek.com',
+    });
+    expect(merged[1]?.description).toBe('deepseek-v4-pro');  // unknown label → no enrich
+    expect(merged[2]?.description).toBe('deepseek-v4-flash-vision-exp');
+  });
+  it('does not mutate the input hardcoded array', () => {
+    const original = HARDCODED.slice();  // shallow copy
+    const cat = { capturedAt: 999, models: [{ label: 'DeepSeek V4 Pro' }] };
+    mergeWithHardcoded(cat, HARDCODED);
+    expect(HARDCODED).toEqual(original);
+  });
+});
