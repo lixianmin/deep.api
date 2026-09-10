@@ -121,6 +121,11 @@ async function build(): Promise<{ router: Router; log: RingLog; mapper: SessionM
         method: 'POST', headers: { ...headers, Authorization: `Bearer ${t}` },
         body: body === undefined || body === null ? undefined : JSON.stringify(body),
       });
+      // v0.1.83 修复：fc4d10e（vision）误删了这行 `const text = await r.text();`，
+      // 下方 3 处 `text` 引用全部变成 ReferenceError: text is not defined——
+      // 所有 fetchJson 调用（create_session / delete_session / pow）运行时必抛，
+      // 导致 chat 完全无响应且 DeepSeek 端看不到 thread。esbuild 不做类型检查所以 build 通过。
+      const text = await r.text();
       let parsed: unknown;
       try { parsed = text ? JSON.parse(text) : null; } catch { throw Object.assign(new Error(`bad json: ${text.slice(0, 200)}`), { status: r.status }); }
       // DeepSeek 业务错误：HTTP 200 但顶层 code != 0（如 token 过期 code=401）——必须识别，
