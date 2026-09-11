@@ -3,3 +3,7 @@ node_modules
 extension/
 *.local
 .workpoints/
+# 外来包管理器的 lockfile：依赖由 bun 管理（bun.lock），误跑 npm/pnpm/yarn 留下的残留文件不得入库
+package-lock.json
+pnpm-lock.yaml
+yarn.lock

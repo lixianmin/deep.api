@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "preinstall": "node -e \"if(!/^bun\\//.test(process.env.npm_config_user_agent||'')){console.error('本仓库依赖用 bun 管理：请改用 bun install（lockfile 是 bun.lock）');process.exit(1)}\"",
     "build": "tsc --noEmit && node build.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
