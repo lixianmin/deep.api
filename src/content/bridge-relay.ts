@@ -51,6 +51,16 @@ export function createRelay(target: Window, port: RelayPort): () => void {
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
   let disposeRelay: (() => void) | null = null;
 
+  /** 终态判定：上下文已被销毁（扩展重载/更新后的孤儿脚本），重试永远不可能成功。
+   *  双判据：① chrome.runtime.id 在孤儿上下文返回 undefined（可靠信号；某些版本访问即抛，一并视为失效）；
+   *  ② Chrome 报错文案 "Extension context invalidated"（错文案稳定，作为 id 判据的兑底）。 */
+  function isContextInvalidated(e: unknown): boolean {
+    try {
+      if (!chrome.runtime?.id) return true;
+    } catch { return true; }
+    return e instanceof Error && e.message.includes('Extension context invalidated');
+  }
+
   // 2026-09-11（fix/review-r1 A3）：稳定的 port 代理——relay（window listener + ping）只装一次，
   // 内部始终引用最新 currentPort；重连只换 port，不再新增 listener/interval。
   const portProxy: RelayPort = {
@@ -77,6 +87,14 @@ export function createRelay(target: Window, port: RelayPort): () => void {
     try {
       p = chrome.runtime.connect({ name: RELAY_PORT_NAME });
     } catch (e) {
+      // 2026-09-15（fix/relay-orphan-stop）：扩展重载/更新后，已开页面里驻留的旧 content script
+      // 上下文已被 Chrome 销毁，connect 永远抛 "Extension context invalidated"，旧上下文永不恢复。
+      // 旧实现照常退避重试 → 每个老标签页永久刷错（用户实测 localhost:5173 页面 console 堆栈）。
+      // 上下文失效属终态：停机，打一条可行动的提示（刷新页面重新注入新脚本）。
+      if (isContextInvalidated(e)) {
+        console.warn('[deep.api bridge-relay] extension context invalidated — refresh this page to restore the bridge (retry stopped)');
+        return;
+      }
       console.warn('[deep.api bridge-relay] connect failed, retrying', e);
       scheduleReconnect();
       return;

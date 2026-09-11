@@ -2,6 +2,8 @@
 // 2026-09-11（fix/review-r1 A3）：relay 断线重连必须有退避重试且不泄漏 window listener / interval。
 // 旧实现：open() 的 catch 返回 null、onDisconnect 只重连一次（失败即永久断桥）；
 // 且每次重连都 createRelay 一遍，window message listener 与 20s ping 定时器线性堆积。
+// 2026-09-15（fix/relay-orphan-stop）：契约细化——「Extension context invalidated」（扩展重载/更新后
+// 旧页面驻留脚本的上下文已销毁）是终态，重试永远失败只会刷屏；其余失败照旧退避重试。
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 interface FakePort {
@@ -39,12 +41,14 @@ describe('bridge-relay 重连与副作用清理（review-r1 A3）', () => {
     let attempt = 0;
     const connect = vi.fn(() => {
       attempt++;
-      if (attempt <= 2) throw new Error('Extension context invalidated');
+      // 2026-09-15（fix/relay-orphan-stop）：原用「Extension context invalidated」当通用失败错误，
+      // 该错误现定义为终态；改用非终态的临时性失败文案（SW 未就绪等）。
+      if (attempt <= 2) throw new Error('connect failed: SW not ready');
       const made = makePort();
       ports.push(made);
       return made.port;
     });
-    vi.stubGlobal('chrome', { runtime: { connect } });
+    vi.stubGlobal('chrome', { runtime: { connect, id: 'test-ext-id' } });
     const addListener = vi.spyOn(window, 'addEventListener');
     const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
 
@@ -70,10 +74,33 @@ describe('bridge-relay 重连与副作用清理（review-r1 A3）', () => {
     expect(setIntervalSpy.mock.calls.length).toBe(1);
   });
 
+  // 2026-09-15（fix/relay-orphan-stop）：扩展重载后旧页面孤儿脚本的终态处理。
+  it('connect 抛 Extension context invalidated → 终态：不再重试，提示刷新页面', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const connect = vi.fn(() => { throw new Error('Extension context invalidated.'); });
+    vi.stubGlobal('chrome', { runtime: { connect, id: 'test-ext-id' } });
+    await import('../../src/content/bridge-relay');
+    expect(connect).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(120_000);        // 若仍在退避重试，次数会涨
+    expect(connect).toHaveBeenCalledTimes(1);          // 终态：一次失败后永久停机
+    expect(warn.mock.calls.some((c) => String(c[0]).includes('invalidated'))).toBe(true);
+  });
+
+  it('chrome.runtime.id 缺失（孤儿上下文的可靠信号）→ 同样终态停止', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const connect = vi.fn(() => { throw new Error('some unrelated failure'); });
+    vi.stubGlobal('chrome', { runtime: { connect } }); // 无 id = 上下文已销毁
+    await import('../../src/content/bridge-relay');
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls.some((c) => String(c[0]).includes('invalidated'))).toBe(true);
+  });
+
   it('重连后页面请求转发到最新 port（旧 port 已死不再使用）', async () => {
     const ports: Array<{ port: FakePort; state: PortState }> = [];
     vi.stubGlobal('chrome', {
       runtime: {
+        id: 'test-ext-id',
         connect: () => {
           const made = makePort();
           ports.push(made);
@@ -100,6 +127,7 @@ describe('bridge-relay 重连与副作用清理（review-r1 A3）', () => {
     const ports: Array<{ port: FakePort; state: PortState }> = [];
     vi.stubGlobal('chrome', {
       runtime: {
+        id: 'test-ext-id',
         connect: () => {
           const made = makePort();
           ports.push(made);
