@@ -172,11 +172,11 @@ await cp('src/demo/demo-page/demo.js', scriptPath);
 ## 6. 不改的东西（明确边界）
 
 - `src/popup/snippet.ts`：formatAuthState 不变。
-- `src/demo/demo-runner.ts`：本次不内嵌，**文件逻辑不变，仅第 2 行注释里 `examples/demo-page/index.html` 引用更新为新路径**。
+- `src/demo/demo-runner.ts`：本次不内嵌，**文件逻辑不变，仅第 2 行注释里 `examples/demo-page/index.html` 引用更新为新路径**（2026-09-11：该文件无任何调用方，已删除；本条为历史记录）。
 - `src/background/sw.ts`：panel.* handler 全保留。
 - `extension/manifest.json`：web_accessible_resources 路径不变。
 - `tests/unit/popup-helpers.test.ts`：只测 formatAuthState，不破坏。
-- `tests/unit/demo-runner.test.ts`：不依赖 popup 结构，不破坏。
+- ~~`tests/unit/demo-runner.test.ts`~~（2026-09-11 随 demo-runner.ts 一并删除）。
 - `tests/unit/demo-shim.test.ts`：**改 import 路径**（见 §5.5），用例不变。
 - `tests/integration/router.test.ts`：panel.* 协议不变，不破坏。
 - 历史文档（`docs/superpowers/plans/2026-09-08-deep-api-extension.md`、`docs/superpowers/specs/2026-09-08-deep-api-extension-design.md`）保留对 `examples/demo-page/` 的历史引用不动（已落盘归档）。

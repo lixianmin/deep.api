@@ -236,13 +236,6 @@ function partialMarkerHold(pending: string): number {
 /** 起始标记的长度上限（`<` + 竖线 + `DSML` + 竖线 + 空格 + `function_calls` 约 27），限制前缀比较窗口。 */
 const MAX_MARKER_LEN = 32;
 
-/** vLLM `utils.partial_tag_overlap`：tag 的最长前缀 === text 的后缀的长度，完整匹配返回 0。 */
-export function partialTagOverlap(text: string, tag: string): number {
-  const max = Math.min(tag.length - 1, text.length);
-  for (let k = max; k > 0; k--) if (text.endsWith(tag.slice(0, k))) return k;
-  return 0;
-}
-
 // ——— internal ———
 
 /** 把一个 DSML 块体解析成结构化调用；返回 null 表示块体里有无法完整解析的 invoke/parameter 标记。

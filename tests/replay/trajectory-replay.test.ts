@@ -48,7 +48,7 @@ function makeRouter(adapter: ProviderAdapter) {
     registry: { deepseek: adapter },
     mapper,
     queue: new Queue({ timeoutMs: 60_000, now }),
-    storage: { get: async () => undefined, set: async () => undefined },
+    storage: { get: async () => undefined },
     log: new RingLog(20),
     now,
     version: '0.0.0-test',

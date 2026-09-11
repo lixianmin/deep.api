@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { hashMessages, renderTranscript, renderTail, limitCharsFor } from '../../src/background/transcript-renderer';
+import { renderTranscript, renderTail, limitCharsFor } from '../../src/background/transcript-renderer';
 import type { Message } from '../../src/shared/api-types';
 
 const m = (role: Message['role'], content: string, extra: Partial<Message> = {}): Message => ({ role, content, ...extra });

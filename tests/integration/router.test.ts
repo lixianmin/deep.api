@@ -60,7 +60,7 @@ function makeRouter(adapter: ProviderAdapter) {
     registry: { deepseek: adapter },
     mapper,
     queue: new Queue({ timeoutMs: 60_000, now }),
-    storage: { get: async () => undefined, set: async () => undefined },
+    storage: { get: async () => undefined },
     log: new RingLog(20),
     now,
     // 2026-09-09（diag/version-stamp）：log 条目自证构建版本。Debug 页「复制完整 JSON」

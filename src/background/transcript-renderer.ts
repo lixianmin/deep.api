@@ -65,9 +65,3 @@ export function renderTail(tail: Message[]): string {
   const r = renderTranscript(tail);
   return r.ok ? r.prompt : '';
 }
-
-export async function hashMessages(msgs: Message[]): Promise<string> {
-  const buf = new TextEncoder().encode(JSON.stringify(msgs));
-  const digest = await crypto.subtle.digest('SHA-256', buf);
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 32);
-}

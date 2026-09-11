@@ -1,5 +1,4 @@
 import type { ModelInfo, ProviderSession, ResolvedModel } from '../adapter';
-import { labelToModelId, type ModelOption } from '../../../content/models-sync';
 
 // 2026-09-14（fix/models-v4-retired）：V4 三个 ID（flash / pro / vision-exp）官方
 // 9/14 12:00 起全部 retired，统一为 V4.1 Flash 新 ID `deepseek-flash`（UI
@@ -19,26 +18,6 @@ export interface MergedModel {
   limitChars: number;
   capturedAt?: number;
   source?: string;
-}
-
-/** 2026-09-10（feat/models-sync）：catalog 与 hardcoded 合并——id 匹配则覆盖
- *  description + 加 capturedAt / source；不删 hardcoded，不加新 id（spec §6 不做）。
- *  catalog 为 null → 返回 hardcoded 副本（不共享引用）。 */
-export function mergeWithHardcoded(
-  catalog: { capturedAt: number; models: ModelOption[] } | null,
-  hardcoded: MergedModel[],
-): MergedModel[] {
-  if (!catalog) return hardcoded.map((m) => ({ ...m }));
-  const byLabel: Map<string, string> = new Map();
-  for (const o of catalog.models) {
-    const id = labelToModelId(o.label);
-    if (id) byLabel.set(id, o.label);
-  }
-  return hardcoded.map((m) =>
-    byLabel.has(m.id)
-      ? { ...m, description: byLabel.get(m.id)!, capturedAt: catalog.capturedAt, source: 'chat.deepseek.com' }
-      : { ...m, description: m.id },
-  );
 }
 
 // 内部 web API 模型类型（chat.deepseek.com/api/v0 用 default/expert/vision）

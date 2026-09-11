@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildToolPrompt, parseToolCalls, TOOL_TAGS, hasToolTags } from '../../src/background/tool-pipeline';
+import { buildToolPrompt, parseToolCalls, hasToolTags } from '../../src/background/tool-pipeline';
 import type { ToolDef } from '../../src/shared/api-types';
 
 describe('buildToolPrompt', () => {
@@ -51,10 +51,6 @@ describe('parseToolCalls', () => {
     expect(r!.calls).toHaveLength(2);
   });
 
-  it('TOOL_TAGS exposes start/end pairs', () => {
-    expect(TOOL_TAGS.starts).toEqual(expect.arrayContaining(['<|tool_call_begin|>', '<tool_calls>', '<tool_call>']));
-    expect(TOOL_TAGS.ends).toEqual(expect.arrayContaining(['<|tool_call_end|>', '</tool_calls>', '</tool_call>']));
-  });
 
   // 2026-09-09（fix/dsml-toolcalls）：DeepSeek Vision（deepseek-v4-flash-vision-exp）不用 prompt
   // 教的 <tool_calls> 标签——它有自己的 DSML 格式（DeepSeek Markup Language），包裹用全角
@@ -96,10 +92,6 @@ describe('parseToolCalls', () => {
     expect(JSON.parse(r!.calls[1]!.function.arguments)).toEqual({ path: 'b' });
   });
 
-  it('TOOL_TAGS exposes DSML start/end pairs (Vision 补）', () => {
-    expect(TOOL_TAGS.starts).toEqual(expect.arrayContaining(['<｜｜DSML｜｜tool_calls>']));
-    expect(TOOL_TAGS.ends).toEqual(expect.arrayContaining(['<｜｜DSML｜｜>']));
-  });
 
   it('parses missing-< opening tag variant (model output deformation)', () => {
     const text = ['tool_calls>', '[{"id":"c1","type":"function","function":{"name":"f","arguments":"{\\"a\\":1}"}}]', '</tool_calls>', '', '根据查询结果，北京明天晴。'].join('\n');

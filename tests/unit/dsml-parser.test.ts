@@ -3,7 +3,6 @@ import {
   DSML_TOKEN,
   parseDsmlToolCalls,
   createDsmlStreamNormalizer,
-  partialTagOverlap,
   hasDsmlToolTags,
 } from '../../src/background/providers/deepseek/dsml-parser';
 import type { ToolDef } from '../../src/shared/api-types';
@@ -111,13 +110,6 @@ describe('parseDsmlToolCalls：非流式解析（逐条对齐 vLLM extract_tool_
   });
 });
 
-describe('partialTagOverlap：跨 delta 切断的标记探测（vLLM utils 同名函数）', () => {
-  it('返回 text 后缀与 tag 前缀的最长匹配长度', () => {
-    expect(partialTagOverlap('abc<｜DS', '<｜DSML｜tool_calls>')).toBe(4);
-    expect(partialTagOverlap('abc', '<｜DSML｜tool_calls>')).toBe(0);
-    expect(partialTagOverlap('<｜DSML｜tool_calls>', '<｜DSML｜tool_calls>')).toBe(0); // 完整标记不算 overlap
-  });
-});
 
 describe('createDsmlStreamNormalizer：流式归一化（不泄漏 DSML，产出标准 <tool_calls> 文本）', () => {
   const start = `<${T}tool_calls>`;

@@ -21,7 +21,7 @@
 ### 不包含（YAGNI）
 
 1. Chat history 持久化（in-memory 即可，刷新即丢，调试场景不需要跨刷新记忆）。
-2. popup 折叠面板同步改造（`src/demo/demo-runner.ts` 保留原 `mountDemo` 给 popup 用，popup 体验不变）。
+2. popup 折叠面板同步改造（`mountDemo` 未接入：popup 后来改用 tab 面板，`src/debug/demo-runner.ts` 已无调用方，2026-09-11 删除）。
 3. 路由 tab 的破坏性操作（重建 / 编辑 mirror / 删 thread）—— v1 只读。
 4. 场景并发跑 / 循环 / 调度依赖——v1 只支持顺序单次「全部跑」。
 5. 视觉模型场景——vision 按钮从 demo 中删除（v1 未启用，参考 memory「Vision 未启用 v0.1.37」），不再保留禁用占位。
@@ -68,9 +68,7 @@ demo 页（同源 chrome-extension://.../demo/index.html）
 - `src/demo/demo-page/index.html` — 仅 `<div id="root">` + `<script src="debug.js">`，不再含场景按钮。
 - `src/demo/demo-page/demo.js` — 仅调用 `mountDebugPanel(document.getElementById('root'))`。
 
-**保留不动**：
-
-- `src/demo/demo-runner.ts` — 仍提供 `mountDemo`，仅 popup 折叠面板使用。
+**2026-09-11 更新**：`src/debug/demo-runner.ts`（原 `mountDemo`）从未被 popup 接入（popup v0.1.63+ 用 tab 面板），已作为死代码删除。
 
 **修改**：
 
@@ -226,7 +224,7 @@ interface ThreadRow {
 
 ## 风险与对策
 
-1. **popup 折叠面板仍用旧 mountDemo**：v0.1.66 不动 popup；未来 popup 升级作为独立 PR（避免本 PR 爆炸）。文档中明确这一边界。
+1. ~~popup 折叠面板仍用旧 mountDemo~~（2026-09-11 结清：popup 用 tab 面板，mountDemo 无调用方已删）。
 2. **SW postMessage 撑爆**：拉模式 + 30s 间隔 + 单例 port 共享三重护栏。
 3. **log ring buffer 容量调整影响现有 popup 行为**：popup 展示的是最近 20 条，容量从 200 调到 500 后，popup 行为不变（不读全量）；内存占用从 ~200 条 JSON 升到 ~500 条，可忽略。
 4. **build.mjs 漏拷新文件**：esbuild 打包 `debug.js` 一个入口文件，所有 tab 模块 inline 进 bundle，build.mjs 只额外拷 HTML 即可。

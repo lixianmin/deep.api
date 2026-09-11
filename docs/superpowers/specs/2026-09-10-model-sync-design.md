@@ -77,8 +77,8 @@ deep.api 的 `client.ts MODELS` 当前是 hardcoded（写死三个模型 ID + �
 | 文件 | 类型 | 说明 |
 |---|---|---|
 | `src/content/models-sync.ts` | **新** | content script：在 chat.deepseek.com 抓模型下拉 |
-| `src/background/models-sync.ts` | **新** | SW 侧：监听消息 + 写 storage + 提供 getModelsCatalog API |
-| `src/background/providers/deepseek/client.ts` | 改 | `MODELS` 保留作为 hardcode fallback；导出 `async getModelsCatalog()` 优先 storage |
+| `src/background/models-sync.ts` | **新** | SW 侧：监听消息 + 写 storage（2026-09-11：删除未接线的 `getModelsCatalog()`，读/合并统一由 `router.loadCatalogFromStorage()` + `router.models()` 实现） |
+| `src/background/providers/deepseek/client.ts` | 改 | `MODELS` 保留作为 hardcode fallback（2026-09-11：`mergeWithHardcoded` 重复实现已删，合并逻辑只在 router） |
 | `src/background/router.ts` | 改 | `models.list()` 用最新 storage 内容 |
 | `extension/manifest.json` | 改 | 加 content script（matches: `https://chat.deepseek.com/*`，run_at: `document_idle`）—— host_permissions 已有 |
 | `src/debug/tabs/chat.ts` | 改 | 模型 select 用最新 catalog（已 async，无需大改） |
@@ -165,7 +165,7 @@ type ModelsCatalog = {
   }>;
 };
 
-// getModelsCatalog 返回合并结果：内置 MODELS 用 ID + 来自 catalog 的最新 label
+// 合并结果：内置 MODELS 用 ID + 来自 catalog 的最新 label（2026-09-11 起由 router.models() + loadCatalogFromStorage 实现）
 type MergedModel = {
   id: string;
   description: string;          // 来自 catalog 的 label，fallback 到内置

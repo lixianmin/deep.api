@@ -183,7 +183,7 @@ async function build(): Promise<{ router: Router; log: RingLog; mapper: SessionM
     registry: createRegistry(adapter),
     mapper,
     queue: new Queue({ timeoutMs: 60_000, concurrency: cfg.poolSize }),
-    storage: { get: async (k) => (await STORAGE.get(k as unknown as string))?.[k as unknown as string], set: async (k, v) => { await STORAGE.set({ [k]: v }); } },
+    storage: { get: async (k) => (await STORAGE.get(k as unknown as string))?.[k as unknown as string] },
     log,
     now: () => Date.now(),
     // 2026-09-09（diag/version-stamp）：manifest version 写入每条 log，日志自证构建版本。

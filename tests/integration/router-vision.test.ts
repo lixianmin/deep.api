@@ -64,7 +64,7 @@ function makeRouter(
     : ring;
   return new Router({
     registry: { deepseek: adapter }, mapper, queue, now, log,
-    storage: { get: opts.storageStub?.get ?? (async () => undefined), set: async () => undefined },
+    storage: { get: opts.storageStub?.get ?? (async () => undefined) },
     version: '0.0.0-test',
   });
 }

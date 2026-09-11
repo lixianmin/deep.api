@@ -1,13 +1,6 @@
 import type { ToolChoice, ToolDef, ToolCall } from '../shared/api-types';
 import { parseDsmlToolCalls, hasDsmlToolTags } from './providers/deepseek/dsml-parser';
 
-/** ds-free-api 默认工具标签范集（spec §4.4）。含 DeepSeek Vision（deepseek-v4-flash-vision-exp）
- *  的 DSML 包裹——Vision 不听 prompt 里教的 <tool_calls>，自带 DSML 格式（DeepSeek Markup
- *  Language），包裹用全角 ｜（U+FF5C）不是 ASCII |。start 要求含 tool_calls 防 end 误匹配。 */
-export const TOOL_TAGS = {
-  starts: ['<|tool_call_begin|>', '<tool_calls>', '<tool_call>', '<｜｜DSML｜｜tool_calls>'] as const,
-  ends: ['<|tool_call_end|>', '</tool_calls>', '</tool_call>', '<｜｜DSML｜｜>'] as const,
-};
 
 /** tools 透传给调用方：DSML 解析需要工具 schema 才能把 `string="false"` 参数转成正确类型。 */
 export interface ToolContext { promptSuffix: string; tools: ToolDef[] }

@@ -16,7 +16,7 @@ export interface RouterDeps {
   registry: Record<ProviderId, ProviderAdapter>;
   mapper: SessionMapper;
   queue: Queue;
-  storage: { get(k: string): Promise<unknown | undefined>; set(k: string, v: unknown): Promise<void> };
+  storage: { get(k: string): Promise<unknown | undefined> };
   log: RingLog;
   now(): number;
   // 2026-09-09（diag/version-stamp）：扩展版本号（来自 manifest.json），写入每条 log 自证构建。
@@ -74,7 +74,7 @@ export class Router {
   async models(): Promise<{ object: 'list'; data: ModelInfo[] }> {
     const hardcoded = Object.values(this.d.registry).flatMap(p => p.models);
     // 2026-09-10（feat/models-sync）：合并 chrome.storage.local 里的 modelsCatalog
-    // （Task 3 getModelsCatalog 写到 storage）——匹配 id 后用 catalog label 替换 description。
+    // （catalog 由 content script 写入 chrome.storage）——匹配 id 后用 catalog label 替换 description。
     // catalog 缺失 / 超 7 天 TTL → fall back 到 hardcoded。
     const catalog = await loadCatalogFromStorage(this.d.storage);
     if (!catalog) return { object: 'list', data: hardcoded };
