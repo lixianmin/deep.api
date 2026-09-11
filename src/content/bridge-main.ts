@@ -48,8 +48,14 @@ function readAuthToken(): string | null {
 }
 // 只在 chat.deepseek.com 上读取/推送 token：其他页面（如 example.com）的 localStorage 无 userToken，
 // 推 null 会反复清空 SW 的 token 缓存导致 popup 登录态闪烁。
+// 2026-09-15（fix/auth-flip-flop）：曾用 endsWith('.deepseek.com') 通配——其他子域名（www/platform 等）
+// localStorage 残留的过期 userToken 也会被每 5s 推给 SW，与 chat 站的好 token 互相顶替，
+// SW 缓存反复翻转 → 调用定期 401/40003（用户实测故障根源）。token 的合法来源只有 chat 站点。
+export function isAuthSyncHost(hostname: string): boolean {
+  return hostname === 'chat.deepseek.com';
+}
 function shouldSyncAuth(): boolean {
-  return location.hostname === 'chat.deepseek.com' || location.hostname.endsWith('.deepseek.com');
+  return isAuthSyncHost(location.hostname);
 }
 function pushAuth() {
   if (!shouldSyncAuth()) return;   // 非 deepseek 页面：只挂 API，不参与 token 同步

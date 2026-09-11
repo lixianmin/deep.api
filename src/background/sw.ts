@@ -10,6 +10,8 @@ import type { ChatCompletionChunk } from '../shared/api-types';
 import { createRegistry } from './providers/registry';
 // 2026-09-14（fix/models-v4-retired）：`onCatalogUpdate` 不再用——仅 register-catalog-listener.ts 调用。
 import { registerCatalogListener } from './register-catalog-listener';
+// 2026-09-15（fix/auth-flip-flop）：auth.sync 采纳策略收拢到 auth-sync.ts（可单测）。
+import { createAuthSync } from './auth-sync';
 
 const STORAGE = chrome.storage.local;
 const DEEPSEEK_API_BASE = 'https://chat.deepseek.com/api/v0';
@@ -196,9 +198,8 @@ async function build(): Promise<{ router: Router; log: RingLog; mapper: SessionM
   return cached;
 }
 
-/** 用缓存 token 探测登录态（发一个 chat_session/create 再 delete）。 */
-async function probeAuthStatus(): Promise<{ state: string; message?: string }> {
-  const token = await loadCachedToken();
+/** 用给定 token 探测登录态（发一个 chat_session/create 再 delete）。 */
+async function probeToken(token: string | null): Promise<{ state: string; message?: string }> {
   if (!token) return { state: 'logged_out', message: '请在 chat.deepseek.com 登录账号' };
   try {
     const r = await fetch(`${DEEPSEEK_API_BASE}/chat_session/create`, {
@@ -220,9 +221,12 @@ async function probeAuthStatus(): Promise<{ state: string; message?: string }> {
   }
 }
 
+// 2026-09-15（fix/auth-flip-flop）：多来源推送不同 token 时，坏 token 不得顶掉近期验证过的好 token
+// （坏名单 + 好窗口，详见 auth-sync.ts 模块头注释）。probeToken 上的 probeAuthStatus 同名职责已并入。
+const authSync = createAuthSync({ loadCachedToken, setCachedToken, probeToken });
+
 async function refreshAuthAndLog(): Promise<void> {
-  // 优先以当前缓存 token 探测（不再主动获取，依赖 content script 推送）
-  const status = await probeAuthStatus();
+  const status = await authSync.probeCached();
   await setAuthStatus('deepseek', status);
   console.log('[deep.api] auth probe:', status);
   await broadcastPanelState();
@@ -284,20 +288,20 @@ chrome.runtime.onConnect.addListener((port) => {
       if (!isBridgeRequest(msg)) return;
       const env = (msg as { __deepApi: { id: number; method: string; params: unknown } }).__deepApi;
 
-      // 来自 content script 的 auth.sync：直接吞掉，不走 Router
+      // 来自 content script 的 auth.sync：直接吞掉，不走 Router。
+      // 2026-09-15（fix/auth-flip-flop）：采纳/拒绝决策在 auth-sync（守卫：坏名单 + 好窗口），
+      // 这里只负责日志与状态落盘/广播。accepted 附带的 status 已探测过，不再二次探测。
       if (env.method === 'auth.sync') {
         const params = env.params as { token: unknown };
         const newTok = typeof params?.token === 'string' && params.token.length > 0 ? params.token : null;
-        const prev = await loadCachedToken();
-        // 防御：null token 不立即清缓存（可能来自非 deepseek 页面误推或 token 轮换瞬态），保留最后一次有效 token
-        if (newTok === null && prev !== null) {
-          console.log('[deep.api sw] auth.sync null ignored (keeping cached token)');
-          return;
-        }
-        if (newTok !== prev) {
-          await setCachedToken(newTok);
+        const r = await authSync.handleSync(newTok);
+        if (r.action === 'accepted') {
           console.log('[deep.api] token updated:', newTok ? newTok.slice(0, 12) + '...' : '(none)');
-          await refreshAuthAndLog();
+          await setAuthStatus('deepseek', r.status);
+          console.log('[deep.api] auth probe:', r.status);
+          await broadcastPanelState();
+        } else {
+          console.log('[deep.api sw] auth.sync ignored:', r.action);
         }
         return;
       }
