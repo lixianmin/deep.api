@@ -53,29 +53,43 @@ export function completionPayload(
   session: ProviderSession,
   prompt: string,
   model: { modelType: 'default' | 'expert' | 'vision'; thinking: boolean },
-  overrides?: { thinking?: boolean | null; search?: boolean; reasoningEffort?: 'low' | 'medium' | 'high' | 'max' },
+  // 2026-09-11（feat/reasoning-search-alignment）：对齐 pi-ai ModelThinkingLevel 单字段；
+  // 'off' 字段缺席表达，其余 level 折叠见 spec §3.2 映射表。
+  overrides?: { reasoning?: import('../../../shared/api-types').ReasoningLevel; search?: boolean },
   /** 2026-09-09（feat/vision-multimodal）：vision 模型上传后的 file_id 列表，传 ref_file_ids。 */
   refFileIds?: string[],
 ) {
-  // thinking: undefined → 用模型默认；null/false 显式关；true 显式开
-  const thinkingEnabled = overrides?.thinking === undefined ? model.thinking : Boolean(overrides.thinking);
-  const searchEnabled = overrides?.search === undefined ? false : Boolean(overrides.search);
+  // search_enabled：默认 false；调用方 search=true 才开（deep.api 独家，行为不变）
+  const searchEnabled = overrides?.search === true;
   const payload: Record<string, unknown> = {
     chat_session_id: session.webSessionId,
     parent_message_id: session.parentMessageId ?? null,
     model_type: model.modelType,
     prompt,
     ref_file_ids: refFileIds && refFileIds.length > 0 ? refFileIds : [],
-    thinking_enabled: thinkingEnabled,
     search_enabled: searchEnabled,
     // action: null 与上游 reference 项目（zhu1090093659/deepseek-pp）字段对齐——多轮靠服务端按 parent_message_id 关联历史
     action: null,
     preempt: false,
   };
-  // reasoning_effort：与 DeepSeek 官方默认一致（high）；调用方可覆盖为 low/medium/max
-  // 官方字段在网页 web API 是否生效待实测（多余字段被忽略不会报错）
-  const effort = overrides?.reasoningEffort ?? 'high';
-  payload.reasoning_effort = effort;
+
+  // reasoning 映射（spec §3.2）：
+  // - 'off' → 字段缺席表达（与 pi-ai thinkingLevelMap: {off: null} 语义对齐）
+  // - undefined → 用模型层默认（model.thinking + reasoning_effort='high'，与 DeepSeek 官方默认一致）
+  // - 其他 level → thinking_enabled=true + reasoning_effort 折叠映射（minimal→low, medium/xhigh→high, max 原样）
+  const r = overrides?.reasoning;
+  if (r === 'off') {
+    // 字段缺席，do nothing
+  } else if (r === undefined) {
+    payload.thinking_enabled = model.thinking;
+    payload.reasoning_effort = 'high';
+  } else {
+    payload.thinking_enabled = true;
+    payload.reasoning_effort =
+      r === 'minimal' ? 'low'
+        : r === 'medium' || r === 'xhigh' ? 'high'
+        : r;  // 'low' | 'high' | 'max' 原样
+  }
   return payload;
 }
 

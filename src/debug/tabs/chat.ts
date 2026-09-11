@@ -1,7 +1,10 @@
 // 2026-09-09（feat/debug-chat-redesign）：把控件（model / thinking / search）从顶部 topbar
 // 重排到底部 sticky 控件行，学 DeepSeek/ChatGPT 聊天页面风格。同时加 vision 图片上传 UI
 // （仅 vision-exp 模型启用上传按钮）；移除 reasoning_effort（DeepSeek 网页无此控件）。
-// 保持原 data-* 属性名 + 右键菜单，使现有 chat.test.ts 全 11 个用例过。
+// 2026-09-11（feat/reasoning-search-alignment）：thinking checkbox → reasoning select
+// （pi-ai 对齐 ModelThinkingLevel：off / minimal / low / medium / high / xhigh / max）。
+// web 端非 off 值功能等价（仅 thinking_enabled + reasoning_effort 字段差异），UI tooltip 说明。
+// 保持原 data-* 属性名 + 右键菜单，使现有 chat.test.ts 用例过。
 
 import { escapeHtml } from './log';
 
@@ -22,7 +25,7 @@ export function mountChat(pane: HTMLElement): () => void {
       <input type="file" data-chat-file-input accept="image/*" multiple style="display:none;">
       <button data-chat-upload title="仅 vision-exp 模型支持图片">📎图片</button>
       <label>model <select data-chat-model></select></label>
-      <label>thinking <input type="checkbox" data-chat-thinking checked></label>
+      <label>reasoning <select data-chat-reasoning title="web 端非 off 值功能等价；reasoning_content 响应通道 web 端不返"><option value="off">off</option><option value="minimal">minimal</option><option value="low">low</option><option value="medium">medium</option><option value="high" selected>high</option><option value="xhigh">xhigh</option><option value="max">max</option></select></label>
       <label><input type="checkbox" data-chat-search>search</label>
       <span style="flex:1"></span>
       <button data-chat-send>发送</button>
@@ -33,7 +36,8 @@ export function mountChat(pane: HTMLElement): () => void {
   const input = pane.querySelector<HTMLTextAreaElement>('[data-chat-input]')!;
   const sendBtn = pane.querySelector<HTMLButtonElement>('[data-chat-send]')!;
   const modelSel = pane.querySelector<HTMLSelectElement>('[data-chat-model]')!;
-  const thinkingCb = pane.querySelector<HTMLInputElement>('[data-chat-thinking]')!;
+  // 2026-09-11（feat/reasoning-search-alignment）：checkbox → select（pi-ai ModelThinkingLevel）
+  const reasoningSel = pane.querySelector<HTMLSelectElement>('[data-chat-reasoning]')!;
   const searchCb = pane.querySelector<HTMLInputElement>('[data-chat-search]')!;
   const uploadBtn = pane.querySelector<HTMLButtonElement>('[data-chat-upload]')!;
   const fileInput = pane.querySelector<HTMLInputElement>('[data-chat-file-input]')!;
@@ -199,8 +203,9 @@ export function mountChat(pane: HTMLElement): () => void {
 
   const baseOpts = (): any => {
     const o: any = {};
-    if (thinkingCb.checked) o.thinking = true;
-    else o.thinking = false;
+    // 2026-09-11（feat/reasoning-search-alignment）：reasoning 永远是单字段；
+    // 默认 'high'（与 DeepSeek 官方 + pi-ai 默认对齐），调用方 UI 切换即生效。
+    o.reasoning = reasoningSel.value;
     if (searchCb.checked) o.search = true;
     return o;
   };

@@ -1,3 +1,7 @@
+/** 2026-09-11（feat/reasoning-search-alignment）：对齐 pi-ai `ModelThinkingLevel` 类型。
+ *  单字段表达"开 + 力度"——`off` 状态由字段缺席实现（与 pi-ai `thinkingLevelMap: {off: null}` 一致）。
+ *  调用方代码与 pi-ai `reasoning: ThinkingLevel` 选项字面相同。spec §3.2 映射表。 */
+export type ReasoningLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 export type Role = 'system' | 'user' | 'assistant' | 'tool';
 export interface ToolCall { id: string; type: 'function'; function: { name: string; arguments: string } }
 /** OpenAI 兼容 content block。文本 + 图片 URL（deep.api 仅 image_url）；image_url.url 支持

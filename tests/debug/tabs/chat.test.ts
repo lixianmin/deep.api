@@ -106,20 +106,34 @@ describe('mountChat: 控件重排 + 移除 reasoning_effort', () => {
     const input = pane.querySelector('[data-chat-input]')!;
     const sendBtn = pane.querySelector('[data-chat-send]')!;
     const modelSel = pane.querySelector('[data-chat-model]')!;
-    const thinkingSel = pane.querySelector('[data-chat-thinking]')!;
+    // 2026-09-11（feat/reasoning-search-alignment）：thinking checkbox → reasoning select
+    const reasoningSel = pane.querySelector('[data-chat-reasoning]')!;
     const searchCb = pane.querySelector('[data-chat-search]')!;
-    // stream 第一个；input 接下来；model/thinking/search 在 input 之后；send 最后
+    // stream 第一个；input 接下来；model/reasoning/search 在 input 之后；send 最后
     expect(stream.compareDocumentPosition(input) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(input.compareDocumentPosition(modelSel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(modelSel.compareDocumentPosition(thinkingSel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(thinkingSel.compareDocumentPosition(searchCb) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(modelSel.compareDocumentPosition(reasoningSel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(reasoningSel.compareDocumentPosition(searchCb) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(searchCb.compareDocumentPosition(sendBtn) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it('reasoning_effort 已移除（DeepSeek 网页不设这个控件，对齐）', () => {
+  it('reasoning 控件是 select（pi-ai 对齐 ModelThinkingLevel）', () => {
     const pane = document.createElement('div');
     mountChat(pane);
-    expect(pane.querySelector('[data-chat-effort]')).toBeNull();
+    const reasoningSel = pane.querySelector('[data-chat-reasoning]');
+    expect(reasoningSel).toBeTruthy();
+    expect((reasoningSel as HTMLSelectElement).tagName).toBe('SELECT');
+    // 7 个 level 选项（off + minimal/low/medium/high/xhigh/max），与 pi-ai ModelThinkingLevel 一致
+    const opts = Array.from((reasoningSel as HTMLSelectElement).options).map((o) => o.value);
+    expect(opts).toEqual(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+    // 默认 high（与 DeepSeek 官方 + pi-ai 默认对齐）
+    expect((reasoningSel as HTMLSelectElement).value).toBe('high');
+  });
+
+  it('老 thinking checkbox 已移除（reasoning 替代）', () => {
+    const pane = document.createElement('div');
+    mountChat(pane);
+    expect(pane.querySelector('[data-chat-thinking]')).toBeNull();
   });
 
   it('流区域不写死 max-height：60vh——改用 flex 布局贴高', () => {
@@ -154,19 +168,44 @@ describe('mountChat: vision 图片上传', () => {
     expect(uploadBtn!.title).toMatch(/上传图片|点击/);
   });
 
-  it('thinking 控件是 checkbox（与 search 保持一致）', async () => {
+  it('reasoning 默认 high → create() 收到 reasoning: "high"', async () => {
     (globalThis as any).deepApi.models.list = vi.fn().mockResolvedValue({
       data: [{ id: 'deepseek-flash', description: 'DeepSeek V4.1 Flash' }],
     });
+    const createMock = (globalThis as any).deepApi.chat.completions.create as any;
+    createMock.mockClear();
     const pane = document.createElement('div');
     mountChat(pane);
     await new Promise(r => setTimeout(r, 10));
-    const thinkingCb = pane.querySelector<HTMLInputElement>('[data-chat-thinking]');
-    expect(thinkingCb).toBeTruthy();
-    expect(thinkingCb!.type).toBe('checkbox');
+    pane.querySelector<HTMLTextAreaElement>('[data-chat-input]')!.value = 'hi';
+    pane.querySelector<HTMLButtonElement>('[data-chat-send]')!.click();
+    await new Promise(r => setTimeout(r, 30));
+    expect(createMock).toHaveBeenCalledTimes(1);
+    const args = createMock.mock.calls[0]![0];
+    expect(args.reasoning).toBe('high');
+    // 老 thinking 字段不再传
+    expect('thinking' in args).toBe(false);
+    expect('reasoning_effort' in args).toBe(false);
   });
 
-  it('search 控件是 checkbox（回归——确认与 thinking 一致）', async () => {
+  it('reasoning 切换为 off → create() 收到 reasoning: "off"（spec §3.2 off 路径）', async () => {
+    (globalThis as any).deepApi.models.list = vi.fn().mockResolvedValue({
+      data: [{ id: 'deepseek-flash', description: 'DeepSeek V4.1 Flash' }],
+    });
+    const createMock = (globalThis as any).deepApi.chat.completions.create as any;
+    createMock.mockClear();
+    const pane = document.createElement('div');
+    mountChat(pane);
+    await new Promise(r => setTimeout(r, 10));
+    const reasoningSel = pane.querySelector<HTMLSelectElement>('[data-chat-reasoning]')!;
+    reasoningSel.value = 'off';
+    pane.querySelector<HTMLTextAreaElement>('[data-chat-input]')!.value = 'hi';
+    pane.querySelector<HTMLButtonElement>('[data-chat-send]')!.click();
+    await new Promise(r => setTimeout(r, 30));
+    expect(createMock.mock.calls[0]![0].reasoning).toBe('off');
+  });
+
+  it('search 控件是 checkbox（回归——与 reasoning select 并存）', async () => {
     (globalThis as any).deepApi.models.list = vi.fn().mockResolvedValue({
       data: [{ id: 'deepseek-flash', description: 'DeepSeek V4.1 Flash' }],
     });

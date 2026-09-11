@@ -204,7 +204,10 @@ function streamHandle(id: number) {
 // ---- 暴露给 page 的 API ----
 const api = {
   chat: { completions: {
-    create: (params: { model: string; messages: Array<{ role: string; content: string; [k: string]: unknown }>; stream?: boolean; tools?: unknown[]; tool_choice?: unknown; conversation_id?: string; thinking?: boolean | null; search?: boolean; reasoning_effort?: 'low' | 'medium' | 'high' | 'max' }): Promise<ChatCompletion> | Response => {
+    // 2026-09-11（feat/reasoning-search-alignment）：硬切到 pi-ai 对齐——
+    // `reasoning: ReasoningLevel` 单字段替代旧 `thinking: bool` + `reasoning_effort: string` 两字段。
+    // `search: boolean` 保留（deep.api 独家，无对齐目标）。spec §3。
+    create: (params: { model: string; messages: Array<{ role: string; content: string; [k: string]: unknown }>; stream?: boolean; tools?: unknown[]; tool_choice?: unknown; conversation_id?: string; reasoning?: import('../shared/api-types').ReasoningLevel; search?: boolean }): Promise<ChatCompletion> | Response => {
       const id = postRequest('chat.completions.create', params);
       if (params.stream === true) return streamHandle(id);
       return new Promise<ChatCompletion>((resolve, reject) => {

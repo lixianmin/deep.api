@@ -186,11 +186,12 @@ export class Router {
     }));
 
     const toolCtx = buildToolPrompt((p.tools as ToolDef[] | undefined) ?? [], (p.tool_choice as ToolChoice | undefined) ?? 'auto');
-    // 调用方可覆盖 thinking/search/reasoning_effort；undefined 字段被下游忽略
+    // 2026-09-11（feat/reasoning-search-alignment）：调用方可覆盖 reasoning/search；
+    // reasoning 对齐 pi-ai ModelThinkingLevel（'off' | 'minimal' | ... | 'max'），
+    // search 是 deep.api 独家保留字段。undefined 字段被下游忽略。
     const overrides = {
-      thinking: (p.thinking ?? undefined) as boolean | null | undefined,
+      reasoning: (p.reasoning ?? undefined) as import('../shared/api-types').ReasoningLevel | undefined,
       search: (p.search ?? undefined) as boolean | undefined,
-      reasoningEffort: (p.reasoning_effort ?? undefined) as 'low' | 'medium' | 'high' | 'max' | undefined,
     };
     const conversationId = p.conversation_id as string | undefined;
     // 2026-09-09 诊断字段（v0.1.50 落地）：在 handle 构造前先比一次，看看是不是 thread 找不到 / mirror 不匹配。
@@ -226,7 +227,8 @@ export class Router {
     const buildRequestFull = () => JSON.stringify({
       modelType: resolved.modelType,
       thinking: resolved.thinking,
-      overrides,
+      reasoningOverride: overrides.reasoning,
+      search: overrides.search,
       toolChoice: p.tool_choice ?? 'auto',
       tools: ((p.tools as ToolDef[] | undefined) ?? []).map((t) => t.function?.name),
       refFileIds: refFileIds.length,

@@ -182,8 +182,9 @@ export function mountScenarios(pane: HTMLElement): () => void {
     ['data-run-conv',         'conversation_id 续聊',     () => conv(modelSel.value, baseOpts())],
   ];
 
-  // v1 简化：scenarios tab 用 deep.api 默认值（thinking=true, reasoning=high），不在 UI 暴露控件
-  // ——避免与 Chat tab 顶栏控件状态漂移。后续如需暴露，把控件设为可见。
+  // 2026-09-11（feat/reasoning-search-alignment）：scenarios tab 不暴露 reasoning 控件——
+  // 走 `completionPayload` reasoning=undefined 默认路径（model.thinking=true + reasoning_effort=high，
+  // 与 Chat tab 默认选项字面等价）。后续如需暴露 controls 控件（让两者状态独立可见），按需开启。
   const searchCb = pane.appendChild(document.createElement('input'));
   searchCb.type = 'checkbox'; searchCb.style.display = 'none';
   const baseOpts = (): any => {

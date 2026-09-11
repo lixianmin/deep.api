@@ -17,14 +17,17 @@ export interface PollFileReadyOptions { maxAttempts?: number; intervalMs?: numbe
  *  调用方继续发 completion 但要记 warning 日志）；文件解析失败（FAILED 类）仍直接抛错。
  *  依据：参考实现 llmweb2api pollFileReady 超时只 log 后返回；spec 旧写的 408 与参考不符，已同步修订。 */
 export interface PollFileReadyResult { ready: boolean }
-/** 调用方可覆盖的模型层开关；undefined 表示沿用 ResolvedModel/LIMITS 默认。 */
+/** 调用方可覆盖的模型层开关；undefined 表示沿用 ResolvedModel/LIMITS 默认。
+ *  2026-09-11（feat/reasoning-search-alignment）：硬切到 pi-ai 对齐——`reasoning` 单字段
+ *  替代旧 `thinking: bool | null` + `reasoning_effort: 'low'|'medium'|'high'|'max'` 两字段。
+ *  spec §3.2 映射表。 */
 export interface CompletionOverrides {
-  /** 覆盖 thinking_enabled；null/false 显式关闭，true 开启。undefined 沿用默认。 */
-  thinking?: boolean | null;
-  /** 覆盖 search_enabled。 */
+  /** Pi-ai-aligned thinking control. undefined = use model.thinking default; 'off' =
+   *  strip thinking_enabled/reasoning_effort from request; other levels collapse to
+   *  thinking_enabled=true with reasoning_effort mapped per spec §3.2. */
+  reasoning?: import('../../shared/api-types').ReasoningLevel;
+  /** Web search toggle (deep.api-specific). undefined → search_enabled=false. */
   search?: boolean;
-  /** 思考力度（OpenAI 兼容字段）；透传到请求体（网页端字段是否生效待实测）。 */
-  reasoningEffort?: 'low' | 'medium' | 'high' | 'max';
 }
 export interface ProviderCompletion {
   session: ProviderSession;

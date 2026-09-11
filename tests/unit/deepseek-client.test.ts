@@ -5,48 +5,88 @@ describe('deepseek client', () => {
   describe('completionPayload', () => {
     const session = { providerId: 'deepseek', webSessionId: 'sess-1', parentMessageId: 'msg-0' };
 
-    it('defaults to thinking=true and reasoning_effort=high (matches DeepSeek official default)', () => {
+    // 2026-09-11（feat/reasoning-search-alignment）：硬切到 pi-ai 对齐的 `reasoning` 单字段。
+    // 老 `thinking: bool` + `reasoning_effort: string` 两字段契约废止。spec §3.2 映射表。
+
+    it('reasoning=undefined → 模型默认（thinking=true, reasoning_effort=high）', () => {
       const p = completionPayload(session, 'hi', { modelType: 'default', thinking: true });
       expect(p.thinking_enabled).toBe(true);
-      expect(p.search_enabled).toBe(false);
       expect(p.reasoning_effort).toBe('high');
     });
 
-    it('uses model default thinking when override is undefined', () => {
-      const p = completionPayload(session, 'hi', { modelType: 'expert', thinking: true });
-      expect(p.thinking_enabled).toBe(true);
-    });
-
-    it('explicit true overrides default off (rare; only when caller sets model.thinking=false)', () => {
-      const p = completionPayload(session, 'hi', { modelType: 'default', thinking: false }, { thinking: true });
-      expect(p.thinking_enabled).toBe(true);
-    });
-
-    it('explicit false overrides default on', () => {
-      const p = completionPayload(session, 'hi', { modelType: 'expert', thinking: true }, { thinking: false });
+    it('reasoning=undefined + model.thinking=false → thinking_enabled=false', () => {
+      const p = completionPayload(session, 'hi', { modelType: 'default', thinking: false });
       expect(p.thinking_enabled).toBe(false);
+      // reasoning_effort 仍按 high 发送（与改前行为一致——模型层默认 high 不受 caller 影响）
+      expect(p.reasoning_effort).toBe('high');
     });
 
-    it('null thinking treated as explicit off', () => {
-      const p = completionPayload(session, 'hi', { modelType: 'expert', thinking: true }, { thinking: null });
-      expect(p.thinking_enabled).toBe(false);
+    it('reasoning="off" → 请求体不含 thinking_enabled 和 reasoning_effort（字段缺席）', () => {
+      const p = completionPayload(session, 'hi', { modelType: 'default', thinking: true }, { reasoning: 'off' });
+      expect('thinking_enabled' in p).toBe(false);
+      expect('reasoning_effort' in p).toBe(false);
     });
 
-    it('passes search_enabled=true', () => {
+    it('reasoning="off" + search=true → search 仍按 caller 透传（互不干扰）', () => {
+      const p = completionPayload(session, 'hi', { modelType: 'default', thinking: true }, { reasoning: 'off', search: true });
+      expect('thinking_enabled' in p).toBe(false);
+      expect('reasoning_effort' in p).toBe(false);
+      expect(p.search_enabled).toBe(true);
+    });
+
+    it('reasoning="low" → thinking_enabled=true, reasoning_effort="low"', () => {
+      const p = completionPayload(session, 'hi', { modelType: 'expert', thinking: true }, { reasoning: 'low' });
+      expect(p.thinking_enabled).toBe(true);
+      expect(p.reasoning_effort).toBe('low');
+    });
+
+    it('reasoning="high" → thinking_enabled=true, reasoning_effort="high"', () => {
+      const p = completionPayload(session, 'hi', { modelType: 'expert', thinking: true }, { reasoning: 'high' });
+      expect(p.thinking_enabled).toBe(true);
+      expect(p.reasoning_effort).toBe('high');
+    });
+
+    it('reasoning="max" → thinking_enabled=true, reasoning_effort="max"', () => {
+      const p = completionPayload(session, 'hi', { modelType: 'expert', thinking: true }, { reasoning: 'max' });
+      expect(p.thinking_enabled).toBe(true);
+      expect(p.reasoning_effort).toBe('max');
+    });
+
+    it('reasoning="minimal" → 折叠为 reasoning_effort="low"（DeepSeek 不接受 minimal）', () => {
+      const p = completionPayload(session, 'hi', { modelType: 'default', thinking: true }, { reasoning: 'minimal' });
+      expect(p.thinking_enabled).toBe(true);
+      expect(p.reasoning_effort).toBe('low');
+    });
+
+    it('reasoning="medium" → 折叠为 reasoning_effort="high"（DeepSeek 不接受 medium）', () => {
+      const p = completionPayload(session, 'hi', { modelType: 'default', thinking: true }, { reasoning: 'medium' });
+      expect(p.thinking_enabled).toBe(true);
+      expect(p.reasoning_effort).toBe('high');
+    });
+
+    it('reasoning="xhigh" → 折叠为 reasoning_effort="high"（DeepSeek 不接受 xhigh）', () => {
+      const p = completionPayload(session, 'hi', { modelType: 'default', thinking: true }, { reasoning: 'xhigh' });
+      expect(p.thinking_enabled).toBe(true);
+      expect(p.reasoning_effort).toBe('high');
+    });
+
+    // search 字段（deep.api 独家保留）—— 行为不变
+    it('search=true → search_enabled=true', () => {
       const p = completionPayload(session, 'hi', { modelType: 'default', thinking: true }, { search: true });
       expect(p.search_enabled).toBe(true);
     });
 
-    it('default reasoning_effort is high when not overridden', () => {
-      const p = completionPayload(session, 'hi', { modelType: 'expert', thinking: true });
-      expect(p.reasoning_effort).toBe('high');
+    it('search=undefined → search_enabled=false（默认 off）', () => {
+      const p = completionPayload(session, 'hi', { modelType: 'default', thinking: true });
+      expect(p.search_enabled).toBe(false);
     });
 
-    it('passes reasoning_effort override through', () => {
-      const p = completionPayload(session, 'hi', { modelType: 'expert', thinking: true }, { reasoningEffort: 'low' });
-      expect(p.reasoning_effort).toBe('low');
+    it('search=false → search_enabled=false', () => {
+      const p = completionPayload(session, 'hi', { modelType: 'default', thinking: true }, { search: false });
+      expect(p.search_enabled).toBe(false);
     });
 
+    // 结构字段（与改前一致）
     it('preserves session/prompt fields', () => {
       const p = completionPayload(session, 'hello', { modelType: 'expert', thinking: true });
       expect(p.chat_session_id).toBe('sess-1');
@@ -54,6 +94,17 @@ describe('deepseek client', () => {
       expect(p.model_type).toBe('expert');
       expect(p.prompt).toBe('hello');
       expect(p.preempt).toBe(false);
+      expect(p.action).toBe(null);
+    });
+
+    it('preserves ref_file_ids when provided', () => {
+      const p = completionPayload(session, 'hi', { modelType: 'vision', thinking: true }, undefined, ['f-1', 'f-2']);
+      expect(p.ref_file_ids).toEqual(['f-1', 'f-2']);
+    });
+
+    it('ref_file_ids 默认空数组（不是 undefined）', () => {
+      const p = completionPayload(session, 'hi', { modelType: 'default', thinking: true });
+      expect(p.ref_file_ids).toEqual([]);
     });
   });
 
