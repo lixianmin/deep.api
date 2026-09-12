@@ -33,7 +33,9 @@ export function mountSse(pane: HTMLElement): () => void {
       const sample = (entries[0]!.replySample ?? '').slice(0, 200);
       // 2026-09-11（diag/continue-thinking）：spike 期间显示响应截断定位字段——一眼看出是哪条 entry。
       const stats = entries[0]!.sseThinkingChars !== undefined
-        ? `think=${entries[0]!.sseThinkingChars}c resp=${entries[0]!.sseResponseChars ?? 0}c status=${JSON.stringify(entries[0]!.sseStatusValues ?? [])}`
+        ? `think=${entries[0]!.sseThinkingChars}c resp=${entries[0]!.sseResponseChars ?? 0}c status=${JSON.stringify(entries[0]!.sseStatusValues ?? [])}` +
+          (entries[0]!.sseAutoResume !== undefined ? ` autoResume=${entries[0]!.sseAutoResume}` : '') +
+          (entries[0]!.sseHasPendingFragment !== undefined ? ` pending=${entries[0]!.sseHasPendingFragment}` : '')
         : '';
       return `
         <details data-group style="margin:4px 0;border:1px solid #ddd;padding:4px;">

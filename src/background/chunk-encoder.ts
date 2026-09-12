@@ -15,6 +15,10 @@ export function eventToChunks(ev: ProviderStreamEvent, ctx: StreamContext): Chat
       return [{ ...base, choices: [{ index: 0, delta: {}, finish_reason: null }], usage: { prompt_tokens: ev.inputTokens, completion_tokens: ev.outputTokens, total_tokens: ev.inputTokens + ev.outputTokens } }];
     case 'message_id':
       return [];
+    // 2026-09-11（fix/incomplete-stream-error）：断流错误是诊断事件——Router 记录后于流末抛 503，
+    // 不向客户端发分块（旧实现落到 switch 外返 undefined → 迭代 TypeError 误打为 503）。
+    case 'stream_error':
+      return [];
     // 2026-09-09（fix/event-stats-stream）：诊断事件，SSE 流末 emit，不发到客户端。
     // data 走 Router 的 run.sseBytes/ssePaths 后入 log；返回 [] 避免在 encodeStream 的
     // `for (let w of eventToChunks(h, d))` 被 for-of 处理 undefined。

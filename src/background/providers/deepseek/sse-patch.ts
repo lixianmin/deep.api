@@ -133,11 +133,20 @@ export async function* completionEvents(
     // 流结束：flush 残余尾帧（无 \n\n 终止也解析，不静默丢失）
     buf += dec.decode();
     if (buf.trim() !== '') yield* processBlock(buf);
+    // 2026-09-11（fix/incomplete-stream-error）：流末兜底——服务端显式终态不是 FINISHED
+    // （实测有 INCOMPLETE；WIP 表示连接在生成中途断开）→ 发 stream_error，Router 报 503。
+    // error 帧已给过信号时不重复发（stats.error 已置）。
+    if (!stats.error) {
+      const terminal = stats.lastStatus ?? stats.lastQuasi;
+      if (terminal !== null && terminal !== 'FINISHED') {
+        yield { kind: 'stream_error', message: `DeepSeek stream incomplete (status=${terminal})`, reason: 'incomplete_status' };
+      }
+    }
     // 2026-09-09（diag/pro-sse-paths）：流末 emit stream_stats 事件，Router 接手后写入 log。
     // 用于诊断 Pro（model_type=expert）在 DeepSeek 网页 web API 上是否只返 thinking fragments
     // （场景 B-1：bytes > 0 但 paths 只含 'response/fragments'+type='think'）还是用了未识别 path（场景 B-2：
     // paths 含 parser 不认识的 path）。bytes = 0 表示上游本就未返任何字节。
-    yield { kind: 'stream_stats', bytes: stats.bytes, paths: [...stats.paths], rawSample: stats.raw, statusValues: stats.statusValues, thinkingChars: stats.thinkingChars, responseChars: stats.responseChars, rawTail: stats.rawTail };
+    yield { kind: 'stream_stats', bytes: stats.bytes, paths: [...stats.paths], rawSample: stats.raw, statusValues: stats.statusValues, thinkingChars: stats.thinkingChars, responseChars: stats.responseChars, rawTail: stats.rawTail, autoResume: stats.autoResume, hasPendingFragment: stats.hasPendingFragment };
   } finally {
     // best-effort 关闭底层迭代器；不 await：源停在未决 await 上时 spec 规定 return() 须等其完成（会死锁），故 fire-and-forget
     void iter.return?.().catch(() => {});
@@ -146,7 +155,13 @@ export async function* completionEvents(
 
 function makeProcessor(onReady: (ids: { requestMessageId: number; responseMessageId: number }) => void): {
   processBlock(block: string): ProviderStreamEvent[];
-  stats: { bytes: number; paths: Set<string>; raw: string; rawTail: string; statusValues: string[]; thinkingChars: number; responseChars: number };
+  stats: {
+    bytes: number; paths: Set<string>; raw: string; rawTail: string;
+    statusValues: string[]; thinkingChars: number; responseChars: number;
+    error: { message: string; reason?: string } | null;
+    lastStatus: string | null; lastQuasi: string | null;
+    autoResume?: boolean; hasPendingFragment?: boolean;
+  };
 } {
   const tree = new ResponseTree();
   let sentReady = false;
@@ -166,6 +181,19 @@ function makeProcessor(onReady: (ids: { requestMessageId: number; responseMessag
     statusValues: [] as string[],
     thinkingChars: 0,
     responseChars: 0,
+    // 2026-09-11（fix/incomplete-stream-error）：断流判定状态——error 帧 / 显式终态 /
+    // Continue 决策字段（auto_resume 实测在 click_behavior 帧里，与 status=INCOMPLETE 同现）。
+    error: null as { message: string; reason?: string } | null,
+    lastStatus: null as string | null,
+    lastQuasi: null as string | null,
+    autoResume: undefined as boolean | undefined,
+    hasPendingFragment: undefined as boolean | undefined,
+  };
+  // 2026-09-11（fix/incomplete-stream-error）：response 元数据字段追踪（form1/form2/BATCH 共用）。
+  const trackMeta = (path: string, value: unknown): void => {
+    if (path === 'response/status' && typeof value === 'string') { stats.statusValues.push(value); stats.lastStatus = value; }
+    else if (path === 'response/quasi_status' && typeof value === 'string') { stats.lastQuasi = value; }
+    else if (path === 'response/has_pending_fragment' && typeof value === 'boolean') { stats.hasPendingFragment = value; }
   };
   const processBlock = (block: string): ProviderStreamEvent[] => {
     const out: ProviderStreamEvent[] = [];
@@ -197,14 +225,45 @@ function makeProcessor(onReady: (ids: { requestMessageId: number; responseMessag
           const op = typeof d.o === 'string' ? d.o : 'SET';
           lastPath = path; lastOp = op;
           stats.paths.add(path);
-          // 2026-09-11（diag/continue-thinking）：记录 response/status 的所有 value——spike
-          // 期间用于探测 DeepSeek thinking 截断的真实信号（待抓包确认字面量）。其它 path 的
-          // value 不记（量级过大，且 sseRawTail 已能取证）。
-          if (path === 'response/status' && typeof d.v === 'string') stats.statusValues.push(d.v);
-          out.push(...tree.apply({ op, path, value: d.v }));
+          // 2026-09-11（fix/incomplete-stream-error）：BATCH 批操作（实测：
+          // {"p":"response","o":"BATCH","v":[{"p":"accumulated_token_usage","v":N},
+          // {"p":"quasi_status","v":"INCOMPLETE"}]}）。子项 path 相对 response/，旧实现整帧
+          // 丢弃——usage 静默丢失、quasi_status 终态无法判定。逐子项解包走同一套 apply/track。
+          if (path === 'response' && op === 'BATCH' && Array.isArray(d.v)) {
+            for (const sub of d.v) {
+              const so = sub as { p?: unknown; o?: unknown; v?: unknown };
+              if (typeof so.p !== 'string') continue;
+              const subPath = so.p === 'response' || so.p.startsWith('response/') ? so.p : `response/${so.p}`;
+              const subOp = typeof so.o === 'string' ? so.o : 'SET';
+              trackMeta(subPath, so.v);
+              out.push(...tree.apply({ op: subOp, path: subPath, value: so.v }));
+            }
+          } else {
+            trackMeta(path, d.v);
+            out.push(...tree.apply({ op, path, value: d.v }));
+          }
         } else if ('v' in d && typeof d.v !== 'object' && lastPath !== null) {
           // 形态2：简写增量（继承上个操作的 path/op）——不重复加 path（已在形态1加过）
+          trackMeta(lastPath, d.v);
           out.push(...tree.apply({ op: lastOp, path: lastPath, value: d.v }));
+        } else if (d.type === 'error' && typeof d.content === 'string') {
+          // 2026-09-11（fix/incomplete-stream-error）：服务端中途错误帧（实测：
+          // {"type":"error","content":"Server is temporarily unavailable.",
+          // "finish_reason":"generation_err"}；Pro 旧案 "unsupported_client_by_model" 同形）。
+          // 旧实现落进 unknown 兜底被丢 → 空回复当成功。改为显式事件，Router 流末报 503。
+          const reason = typeof d.finish_reason === 'string' ? d.finish_reason : undefined;
+          stats.error = { message: d.content, reason };
+          stats.paths.add('error_frame');
+          out.push({ kind: 'stream_error', message: d.content, reason });
+        } else if (
+          (typeof d.auto_resume === 'boolean') || (typeof d.click_behavior === 'string')
+        ) {
+          // 2026-09-11（fix/incomplete-stream-error）：click_behavior 帧（实测：
+          // {"click_behavior":"none","auto_resume":false}）。auto_resume 是网页 UI
+          // 是否给 Continue 按钮的决策字段，先入诊断；对象形态（如 {"click_behavior":{...}}）
+          // 不消费，仍走 unknown 兑底保留诊断粒度。
+          if (typeof d.auto_resume === 'boolean') stats.autoResume = d.auto_resume;
+          stats.paths.add('click_behavior_frame');
         } else {
           // 形态3：旧格式 {op?,path?,value?} 或 {v:{快照}} 等：仅当子对象是 {op,path,value} 时解析
           let parsedAny = false;

@@ -43,6 +43,10 @@ interface RunState {
   sseThinkingChars?: number;
   sseResponseChars?: number;
   sseRawTail?: string;
+  // 2026-09-11（fix/incomplete-stream-error）：服务端 Continue 决策字段 + 流未完成信号。
+  sseAutoResume?: boolean;
+  sseHasPendingFragment?: boolean;
+  streamError?: { message: string; reason?: string };
 }
 
 /** 2026-09-11（fix/review-r1）：会话字段在拿到队列锁后可能被「排队期间线程被推进」重决策改写，
@@ -246,7 +250,7 @@ export class Router {
       deletedOld: handle.deletedOld,
       webSessionId: handle.session.webSessionId,
     });
-    const done = (ok: boolean, ms: number, error?: string, extra?: { finishReason?: string; parentMessageId?: string | number | null; replySample?: string; rawSample?: string; reasoningSample?: string; sseBytes?: number; ssePaths?: string[]; sseRaw?: string; sseStatusValues?: string[]; sseThinkingChars?: number; sseResponseChars?: number; sseRawTail?: string }) =>
+    const done = (ok: boolean, ms: number, error?: string, extra?: { finishReason?: string; parentMessageId?: string | number | null; replySample?: string; rawSample?: string; reasoningSample?: string; sseBytes?: number; ssePaths?: string[]; sseRaw?: string; sseStatusValues?: string[]; sseThinkingChars?: number; sseResponseChars?: number; sseRawTail?: string; sseAutoResume?: boolean; sseHasPendingFragment?: boolean }) =>
       this.d.log.push({
         at: this.d.now(), provider: provider.id, model: modelId, ok, ms, error, version: this.d.version, ...buildDiag(),
         finishReason: extra?.finishReason, parentMessageId: extra?.parentMessageId,
@@ -260,6 +264,8 @@ export class Router {
         sseThinkingChars: extra?.sseThinkingChars,
         sseResponseChars: extra?.sseResponseChars,
         sseRawTail: extra?.sseRawTail,
+        sseAutoResume: extra?.sseAutoResume,
+        sseHasPendingFragment: extra?.sseHasPendingFragment,
         warnings: imageWarnings.length ? [...imageWarnings] : undefined,
         // 2026-09-10（feat/log-b64-export）：同一份现场字符串再给 base64 版本——DSML 标记（｜DSML｜）
         // 会在聊天/终端粘贴链上被吃掉，只有 base64 能把字节原样送出来。
@@ -282,11 +288,14 @@ export class Router {
     let rawSample = '';
     try {
       for await (const ev of handle.stream) this.consumeEvent(ev, agg, handle.run);
+      // 2026-09-11（fix/incomplete-stream-error）：流未正常完成（错误帧/INCOMPLETE 终态）——
+      // 旧实现静默当 stop 返回空回复；现在显式报 503（详细原因在 error 字段）。
+      if (handle.run.streamError) throw err('provider_unavailable', handle.run.streamError.message, 503);
       rawSample = agg.content.slice(0, B64_SAMPLE_CHARS);
       await this.finalize(provider, handle, messages, agg, ctx, toolCtx);
     } catch (e) {
       // 2026-09-10：失败路径也要带现场样本——parsing 失败（400）恰恰是最需要字节证据的场景。
-      done(false, this.d.now() - started, (e as Error).message, { replySample: agg.content.slice(0, 1200), rawSample, sseBytes: handle.run.sseBytes, ssePaths: handle.run.ssePaths, sseRaw: handle.run.sseRaw, sseStatusValues: handle.run.sseStatusValues, sseThinkingChars: handle.run.sseThinkingChars, sseResponseChars: handle.run.sseResponseChars, sseRawTail: handle.run.sseRawTail });
+      done(false, this.d.now() - started, (e as Error).message, { replySample: agg.content.slice(0, 1200), rawSample, sseBytes: handle.run.sseBytes, ssePaths: handle.run.ssePaths, sseRaw: handle.run.sseRaw, sseStatusValues: handle.run.sseStatusValues, sseThinkingChars: handle.run.sseThinkingChars, sseResponseChars: handle.run.sseResponseChars, sseRawTail: handle.run.sseRawTail, sseAutoResume: handle.run.sseAutoResume, sseHasPendingFragment: handle.run.sseHasPendingFragment });
       // 2026-09-11（fix/review-r1）：失败路径必须销毁线程（spec §4.3「线程标记失败并销毁」）。
       // 旧实现只 done(false) 就抛错，incremental 路径 markBusy 后永远没有 commit —— 该 auto
       // thread 永久 busy，decide 会跳过它，直到 TTL/LRU 才被清；mirror 也永远停在旧位置。
@@ -295,7 +304,7 @@ export class Router {
       if (!(e instanceof QueueTimeoutError)) await this.d.mapper.fail(provider.id, handle.convId, ctx.requestId);
       throw this.mapErr(e);
     }
-    done(true, this.d.now() - started, undefined, { finishReason: agg.finishReason ?? 'stop', parentMessageId: handle.run.parentMessageId, replySample: agg.content.slice(0, 1200), rawSample, reasoningSample: agg.reasoning.slice(0, 200), sseBytes: handle.run.sseBytes, ssePaths: handle.run.ssePaths, sseRaw: handle.run.sseRaw, sseStatusValues: handle.run.sseStatusValues, sseThinkingChars: handle.run.sseThinkingChars, sseResponseChars: handle.run.sseResponseChars, sseRawTail: handle.run.sseRawTail });
+    done(true, this.d.now() - started, undefined, { finishReason: agg.finishReason ?? 'stop', parentMessageId: handle.run.parentMessageId, replySample: agg.content.slice(0, 1200), rawSample, reasoningSample: agg.reasoning.slice(0, 200), sseBytes: handle.run.sseBytes, ssePaths: handle.run.ssePaths, sseRaw: handle.run.sseRaw, sseStatusValues: handle.run.sseStatusValues, sseThinkingChars: handle.run.sseThinkingChars, sseResponseChars: handle.run.sseResponseChars, sseRawTail: handle.run.sseRawTail, sseAutoResume: handle.run.sseAutoResume, sseHasPendingFragment: handle.run.sseHasPendingFragment });
     return toAggregate({ id: `chatcmpl-${ctx.requestId}`, model: modelId, created: Math.floor(started / 1000) }, agg);
   }
 
@@ -477,6 +486,13 @@ export class Router {
         run.sseThinkingChars = ev.thinkingChars;
         run.sseResponseChars = ev.responseChars;
         run.sseRawTail = ev.rawTail;
+        run.sseAutoResume = ev.autoResume;
+        run.sseHasPendingFragment = ev.hasPendingFragment;
+        break;
+      // 2026-09-11（fix/incomplete-stream-error）：只记录不抛——让流走完以拿到全部诊断
+      // （auto_resume/status 等），流末统一由调用方抛 503。
+      case 'stream_error':
+        run.streamError = { message: ev.message, reason: ev.reason };
         break;
     }
   }
@@ -536,7 +552,7 @@ export class Router {
     return parseToolCalls(buf, toolCtx.tools);
   }
 
-  private encodeStream(provider: ProviderAdapter, handle: RunHandle, ctx: ProviderContext, model: string, started: number, messages: Message[], toolCtx: ToolContext, done: (ok: boolean, ms: number, error?: string, extra?: { finishReason?: string; parentMessageId?: string | number | null; replySample?: string; rawSample?: string; reasoningSample?: string; sseBytes?: number; ssePaths?: string[]; sseRaw?: string; sseStatusValues?: string[]; sseThinkingChars?: number; sseResponseChars?: number; sseRawTail?: string }) => void): AsyncIterable<ChatCompletionChunk> & { cancel(): Promise<void> } {
+  private encodeStream(provider: ProviderAdapter, handle: RunHandle, ctx: ProviderContext, model: string, started: number, messages: Message[], toolCtx: ToolContext, done: (ok: boolean, ms: number, error?: string, extra?: { finishReason?: string; parentMessageId?: string | number | null; replySample?: string; rawSample?: string; reasoningSample?: string; sseBytes?: number; ssePaths?: string[]; sseRaw?: string; sseStatusValues?: string[]; sseThinkingChars?: number; sseResponseChars?: number; sseRawTail?: string; sseAutoResume?: boolean; sseHasPendingFragment?: boolean }) => void): AsyncIterable<ChatCompletionChunk> & { cancel(): Promise<void> } {
     const cctx: StreamContext = { id: `chatcmpl-${ctx.requestId}`, model, created: Math.floor(started / 1000) };
     const agg: StreamAggregate = { content: '', reasoning: '', toolCalls: [], finishReason: null };
     // 2026-09-10（feat/log-b64-export）：归一化**前**的模型原文。归一化器的输出才是 agg.content，
@@ -586,8 +602,19 @@ export class Router {
             handle.run.sseThinkingChars = ev.thinkingChars;
             handle.run.sseResponseChars = ev.responseChars;
             handle.run.sseRawTail = ev.rawTail;
+            handle.run.sseAutoResume = ev.autoResume;
+            handle.run.sseHasPendingFragment = ev.hasPendingFragment;
+          }
+          // 2026-09-11（fix/incomplete-stream-error）：只记录不抛（同 consumeEvent）——
+          // 流末统一在循环外抛 503，已发出的分块不回滚。
+          if (ev.kind === 'stream_error') {
+            handle.run.streamError = { message: ev.message, reason: ev.reason };
+            continue;
           }
         }
+        // 2026-09-11（fix/incomplete-stream-error）：流未正常完成（错误帧/INCOMPLETE 终态）——
+        // 已发出的分块不回滚；在此终止并抛 503，不再走工具解析/commit。
+        if (handle.run.streamError) throw err('provider_unavailable', handle.run.streamError.message, 503);
         if (dsml) {
           const tail = dsml.flush();
           if (tail) {
@@ -636,11 +663,11 @@ export class Router {
         // 2026-09-09（fix/model-switch-rebuild）：commit 时同步 modelType。
         self.d.mapper.commit(provider.id, handle.convId, mirrorMessages, handle.session.webSessionId, handle.run.parentMessageId ?? handle.session.parentMessageId, handle.run.model.modelType);
         completed = true;
-        done(true, self.d.now() - started, undefined, { finishReason: agg.finishReason ?? 'stop', parentMessageId: handle.run.parentMessageId, replySample: agg.content.slice(0, 1200), rawSample: rawContent.slice(0, B64_SAMPLE_CHARS), reasoningSample: agg.reasoning.slice(0, 200), sseBytes: handle.run.sseBytes, ssePaths: handle.run.ssePaths, sseRaw: handle.run.sseRaw, sseStatusValues: handle.run.sseStatusValues, sseThinkingChars: handle.run.sseThinkingChars, sseResponseChars: handle.run.sseResponseChars, sseRawTail: handle.run.sseRawTail });
+        done(true, self.d.now() - started, undefined, { finishReason: agg.finishReason ?? 'stop', parentMessageId: handle.run.parentMessageId, replySample: agg.content.slice(0, 1200), rawSample: rawContent.slice(0, B64_SAMPLE_CHARS), reasoningSample: agg.reasoning.slice(0, 200), sseBytes: handle.run.sseBytes, ssePaths: handle.run.ssePaths, sseRaw: handle.run.sseRaw, sseStatusValues: handle.run.sseStatusValues, sseThinkingChars: handle.run.sseThinkingChars, sseResponseChars: handle.run.sseResponseChars, sseRawTail: handle.run.sseRawTail, sseAutoResume: handle.run.sseAutoResume, sseHasPendingFragment: handle.run.sseHasPendingFragment });
       } catch (e) {
         // 2026-09-10（feat/log-b64-export）：失败路径（含工具解析失败 400）也要带现场样本——
         // 这正是最需要字节证据的场景（旧实现只记 error，拿不到模型原文）。
-        done(false, self.d.now() - started, (e as Error).message, { replySample: agg.content.slice(0, 1200), rawSample: rawContent.slice(0, B64_SAMPLE_CHARS), sseBytes: handle.run.sseBytes, ssePaths: handle.run.ssePaths, sseRaw: handle.run.sseRaw, sseStatusValues: handle.run.sseStatusValues, sseThinkingChars: handle.run.sseThinkingChars, sseResponseChars: handle.run.sseResponseChars, sseRawTail: handle.run.sseRawTail });
+        done(false, self.d.now() - started, (e as Error).message, { replySample: agg.content.slice(0, 1200), rawSample: rawContent.slice(0, B64_SAMPLE_CHARS), sseBytes: handle.run.sseBytes, ssePaths: handle.run.ssePaths, sseRaw: handle.run.sseRaw, sseStatusValues: handle.run.sseStatusValues, sseThinkingChars: handle.run.sseThinkingChars, sseResponseChars: handle.run.sseResponseChars, sseRawTail: handle.run.sseRawTail, sseAutoResume: handle.run.sseAutoResume, sseHasPendingFragment: handle.run.sseHasPendingFragment });
         queueTimeout = e instanceof QueueTimeoutError;
         throw mapErrStatic(e, self.d.registry);
       } finally {

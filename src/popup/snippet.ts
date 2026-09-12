@@ -11,6 +11,7 @@ export const FORENSIC_FIELDS = [
   'parentMessageId', 'sseBytes', 'ssePaths', 'requestFull',
   // 2026-09-11（diag/continue-thinking）：spike 期间临时加——thinking 截断定位用。
   'sseStatusValues', 'sseThinkingChars', 'sseResponseChars', 'sseRawTail', 'sseRawTailB64',
+  'sseAutoResume', 'sseHasPendingFragment',
   'replySample', 'reasoningSample', 'replyB64', 'rawB64', 'sseRawB64',
 ] as const;
 

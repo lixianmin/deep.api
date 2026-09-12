@@ -77,5 +77,11 @@ export type ProviderStreamEvent =
   //   statusValues: response/status 路径下观察到的全部 value（如 'WIP' / 'FINISHED' / 其它）
   //   thinkingChars / responseChars: 截至流末累计的 THINK / RESPONSE fragment 字符数（设阈值用）
   //   rawTail: 流末最后 600 字符原始 SSE（含 status 终值与可能的 finish 事件）
-  | { kind: 'stream_stats'; bytes: number; paths: string[]; rawSample?: string; statusValues?: string[]; thinkingChars?: number; responseChars?: number; rawTail?: string };
+  //   autoResume / hasPendingFragment：服务端 Continue 决策字段（2026-09-11 实测 incident）
+  | { kind: 'stream_stats'; bytes: number; paths: string[]; rawSample?: string; statusValues?: string[]; thinkingChars?: number; responseChars?: number; rawTail?: string; autoResume?: boolean; hasPendingFragment?: boolean }
+  // 2026-09-11（fix/incomplete-stream-error）：流未正常完成——服务端中途错误帧
+  // （{"type":"error","content":…,"finish_reason":"generation_err"}）或终态非 FINISHED
+  // （INCOMPLETE/WIP）。旧实现当流正常结束 → finish_reason='stop' + 空回复（silent bug）；
+  // Router 收到本事件记录后于流末抛 503 provider_unavailable。
+  | { kind: 'stream_error'; message: string; reason?: string };
 export { ModelInfo };

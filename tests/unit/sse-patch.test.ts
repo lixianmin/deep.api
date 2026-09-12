@@ -217,6 +217,98 @@ describe('completionEvents review-r1 fixes', () => {
   });
 });
 
+// 2026-09-11（fix/incomplete-stream-error）：真实事故回放。v0.2.1 用户现场（rawTail 逐帧）：
+// DeepSeek 服务端在 thinking 中途报错——{"type":"error","content":"Server is temporarily
+// unavailable.","finish_reason":"generation_err"} + response/status=INCOMPLETE——
+// 旧解析器把这帧当 unknown 丢掉，流末无 FINISHED → Router 默认 finish_reason='stop'，
+// 客户端拿到「成功但空回复」。修：识别 error 帧与非 FINISHED 终态 → stream_error 事件。
+const incidentSse = [
+  'event: ready\ndata: {"request_message_id":1,"response_message_id":2,"model_type":"default"}\n\n',
+  'data: {"v":{"response":{"message_id":2,"parent_id":1,"model":"","role":"ASSISTANT","thinking_enabled":true,"status":"WIP","fragments":[{"id":2,"type":"THINK","content":"The","elapsed_secs":null,"references":[],"stage_id":1}]}}}\n\n',
+  'data: {"v":" me"}\n\n',
+  'data: {"v":" read"}\n\n',
+  'data: {"v":" diagram"}\n\n',
+  'data: {"v":".json"}\n\n',
+  'data: {"v":" first"}\n\n',
+  'data: {"v":"."}\n\n',
+  'data: {"p":"response/fragments/-1/elapsed_secs","o":"SET","v":1.34157955}\n\n',
+  'data: {"p":"response/has_pending_fragment","v":true}\n\n',
+  'data: {"v":false}\n\n',
+  'data: {"p":"response","o":"BATCH","v":[{"p":"accumulated_token_usage","v":19458},{"p":"quasi_status","v":"INCOMPLETE"}]}\n\n',
+  'data: {"p":"response/status","o":"SET","v":"INCOMPLETE"}\n\n',
+  'data: {"type":"error","content":"Server is temporarily unavailable.","finish_reason":"generation_err"}\n\n',
+  'data: {"updated_at":1789176654.5457828}\n\n',
+  'data: {"content":"【系统指令】\\nYou are a Coding Agent op"}\n\n',
+  'data: {"click_behavior":"none","auto_resume":false}\n\n',
+].join('');
+
+async function collectSse(text: string): Promise<ProviderStreamEvent[]> {
+  const chunks: Uint8Array[] = [];
+  for (const block of text.split('\n\n')) chunks.push(new TextEncoder().encode(block + '\n\n'));
+  const iter = (async function* () { for (const c of chunks) yield c; })();
+  const evs: ProviderStreamEvent[] = [];
+  for await (const ev of completionEvents(iter, 1000, () => {})) evs.push(ev);
+  return evs;
+}
+
+describe('stream_error 检测（真实事故回放）', () => {
+  it('error 帧 → stream_error（message/reason 取自帧）且只发一次', async () => {
+    const evs = await collectSse(incidentSse);
+    const errs = evs.filter(e => (e as any).kind === 'stream_error');
+    expect(errs).toHaveLength(1);
+    expect(errs[0]).toMatchObject({ message: 'Server is temporarily unavailable.', reason: 'generation_err' });
+  });
+
+  it('BATCH 解包：accumulated_token_usage 不丢 + 系统指令回声不混入正文', async () => {
+    const evs = await collectSse(incidentSse);
+    const usage = evs.find(e => e.kind === 'usage') as any;
+    expect(usage?.outputTokens).toBe(19458);
+    // {"content":"【系统指令】…"} 是服务端元数据帧，不得当模型正文
+    expect(evs.some(e => e.kind === 'content_delta')).toBe(false);
+  });
+
+  it('auto_resume / has_pending_fragment / statusValues / thinkingChars 进 stream_stats', async () => {
+    const evs = await collectSse(incidentSse);
+    const stats = evs.find(e => e.kind === 'stream_stats') as any;
+    expect(stats.statusValues).toEqual(['INCOMPLETE']);
+    expect(stats.autoResume).toBe(false);
+    expect(stats.hasPendingFragment).toBe(false);
+    expect(stats.thinkingChars).toBe(31);   // 'The' + ' me'+' read'+' diagram'+'.json'+' first'+'.'
+    expect(stats.rawTail).toContain('generation_err');
+  });
+
+  it('无 error 帧但终态 INCOMPLETE → 流末 emit stream_error', async () => {
+    const sse = [
+      'event: ready\ndata: {"request_message_id":1,"response_message_id":2}\n\n',
+      'data: {"p":"response/status","o":"SET","v":"INCOMPLETE"}\n\n',
+    ].join('');
+    const evs = await collectSse(sse);
+    const errs = evs.filter(e => (e as any).kind === 'stream_error');
+    expect(errs).toHaveLength(1);
+    expect(errs[0]).toMatchObject({ reason: 'incomplete_status' });
+  });
+
+  it('FINISHED 终态 → 不 emit stream_error（防误报）', async () => {
+    const sse = [
+      'event: ready\ndata: {"request_message_id":1,"response_message_id":2}\n\n',
+      'data: {"p":"response/status","o":"SET","v":"FINISHED"}\n\n',
+    ].join('');
+    const evs = await collectSse(sse);
+    expect(evs.some(e => (e as any).kind === 'stream_error')).toBe(false);
+  });
+
+  it('仅有 BATCH 里的 quasi_status=INCOMPLETE → 流末也判未完成', async () => {
+    const sse = [
+      'event: ready\ndata: {"request_message_id":1,"response_message_id":2}\n\n',
+      'data: {"p":"response","o":"BATCH","v":[{"p":"accumulated_token_usage","v":19458},{"p":"quasi_status","v":"INCOMPLETE"}]}\n\n',
+    ].join('');
+    const evs = await collectSse(sse);
+    expect(evs.some(e => e.kind === 'usage' && (e as any).outputTokens === 19458)).toBe(true);
+    const errs = evs.filter(e => (e as any).kind === 'stream_error');
+    expect(errs).toHaveLength(1);
+  });
+});
+
 // 2026-09-11（diag/continue-thinking）：spike 期间临时诊断字段——定位 DeepSeek thinking 截断触发点。
 describe('completionEvents continue-thinking diagnostics', () => {
   it('stream_stats 携带 statusValues/char counts/rawTail', async () => {

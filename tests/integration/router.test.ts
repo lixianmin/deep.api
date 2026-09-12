@@ -808,3 +808,54 @@ describe('日志字节取证（feat/log-b64-export）', () => {
     expect(e.replyB64).toBeUndefined();
   });
 });
+
+// 2026-09-11（fix/incomplete-stream-error）：真实事故——DeepSeek 服务端中途报错
+// （{"type":"error","finish_reason":"generation_err"} + response/status=INCOMPLETE），
+// 旧实现把它当流正常结束 → finish_reason='stop' + ok=true + 空回复（silent bug）。
+// 修：parser 发 stream_error 事件 → Router 记录后于流末抛 503 provider_unavailable。
+describe('incomplete stream / server error（fix/incomplete-stream-error）', () => {
+  const errEvent = { kind: 'stream_error', message: 'Server is temporarily unavailable.', reason: 'generation_err' } as any;
+
+  it('fail-to-pass：非流式 stream_error → 503 provider_unavailable（不再静默 stop）', async () => {
+    const a = stubAdapter({
+      streamCompletion: async function* () {
+        yield { kind: 'message_id', id: 1 };
+        yield { kind: 'think_delta', content: '想了' };
+        yield errEvent;
+      },
+    });
+    const r = makeRouter(a);
+    await expect(r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'hi')] }))
+      .rejects.toMatchObject({ status: 503, error: { error: { code: 'provider_unavailable', message: 'Server is temporarily unavailable.' } } });
+  });
+
+  it('fail-to-pass：stream:true 路径 stream_error → 已发分块后再抛 503', async () => {
+    const a = stubAdapter({
+      streamCompletion: async function* () {
+        yield { kind: 'message_id', id: 1 };
+        yield { kind: 'content_delta', content: '前半' };
+        yield errEvent;
+      },
+    });
+    const r = makeRouter(a);
+    const s = await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'hi')], stream: true });
+    const got: any[] = [];
+    let caught: any;
+    try { for await (const c of s as AsyncIterable<any>) got.push(c); } catch (e) { caught = e; }
+    expect(got.length).toBeGreaterThan(0);   // 前半已发出的分块不回滚
+    expect(caught).toMatchObject({ status: 503, error: { error: { code: 'provider_unavailable' } } });
+  });
+
+  it('regression：正常流（无 stream_error）仍以 stop 收尾', async () => {
+    const a = stubAdapter({
+      streamCompletion: async function* () {
+        yield { kind: 'message_id', id: 1 };
+        yield { kind: 'content_delta', content: '正常', finish_reason: 'stop' };
+      },
+    });
+    const r = makeRouter(a);
+    const res: any = await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'hi')] });
+    expect(res.choices[0].finish_reason).toBe('stop');
+    expect(res.choices[0].message.content).toBe('正常');
+  });
+});

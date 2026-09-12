@@ -54,6 +54,10 @@ export interface LogEntry {
   sseResponseChars?: number;
   sseRawTail?: string;
   sseRawTailB64?: string;                                       // sseRawTail 的 base64（粘贴链不掉字节）
+  // 2026-09-11（fix/incomplete-stream-error）：服务端 Continue 决策字段（click_behavior 帧）——
+  // auto_resume=false 实测仍会出 Continue 按钮（用户网页实测），先全量记录供下一阶段设计。
+  sseAutoResume?: boolean;
+  sseHasPendingFragment?: boolean;
   // 2026-09-10（feat/log-b64-export）：上面三个现场字符串的 base64（纯 ASCII）。
   // 动机：DSML 标记（｜DSML｜，U+FF5C）在「聊天/终端粘贴」链路上会被吃掉——用户贴回来的样本
   // 永远看不到它，导致无法判断现场字节形态。base64 只含 A-Za-z0-9+/=，可无损跨粘贴链；
