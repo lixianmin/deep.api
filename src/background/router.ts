@@ -324,7 +324,8 @@ export class Router {
     if (decision.action === 'error') throw err(decision.code, decision.message, 400);
     let session: ProviderSession; let convId: string; let thread: ThreadEntry; let prompt: string;
     if (decision.action === 'rebuild') {
-      if (decision.existing) {
+      if (decision.existing && this.d.mapper.autoDeleteWebThreads) {
+        // 2026-09-15（feat/auto-delete-web-threads）：默认关——rebuild 只弃用旧 web session，不删网页会话。
         try { await provider.deleteSession(ctx, { providerId: pid, webSessionId: decision.existing.webSessionId, parentMessageId: decision.existing.parentMessageId }); } catch { /* best effort per spec */ }
       }
       const s = await provider.createSession(ctx);
@@ -397,7 +398,7 @@ export class Router {
         return;
       }
       // 重决策为 rebuild：旧 thread 已不属于本次请求的上下文（或被并发请求淘汰），销毁重建。
-      if (d2.existing) {
+      if (d2.existing && this.d.mapper.autoDeleteWebThreads) {
         try { await provider.deleteSession(ctx, { providerId: pid, webSessionId: d2.existing.webSessionId, parentMessageId: d2.existing.parentMessageId }); } catch { /* best effort per spec */ }
       }
       const s = await provider.createSession(ctx);
@@ -698,6 +699,11 @@ export class Router {
 
   setTtlMinutes(minutes: number): void {
     this.d.mapper.setTtlMs(Math.max(1, Math.floor(minutes) || 1) * 60_000);
+  }
+
+  /** 2026-09-15（feat/auto-delete-web-threads）：面板改「自动删除网页 Chat Thread」实时生效（spec §8.2）。 */
+  setAutoDeleteWebThreads(v: boolean): void {
+    this.d.mapper.setAutoDeleteWebThreads(v);
   }
 }
 

@@ -6,6 +6,7 @@ type PanelState = {
   providers?: Record<string, {
     poolSize?: number;
     ttlMinutes?: number;
+    autoDeleteWebThreads?: boolean;
     lastAuthStatus?: { state: string; message?: string };
     models?: Array<{ id: string; description: string }>;
   }>;
@@ -76,6 +77,7 @@ function render() {
 
   setInputValue(document.getElementById('pool-size') as HTMLInputElement, String(provider?.poolSize ?? 2));
   setInputValue(document.getElementById('ttl-min') as HTMLInputElement, String(provider?.ttlMinutes ?? 30));
+  (document.getElementById('auto-delete') as HTMLInputElement).checked = provider?.autoDeleteWebThreads ?? false;
 
   // v0.1.50 渲染决策现场：action 标色 + deletedOld 红警，让「每发一条消息重建一条」一眼可见
   // 2026-09-11（fix/review-r1）：整块 HTML 由 renderLogListHtml 生成（全部字段已转义）；
@@ -131,6 +133,10 @@ document.getElementById('ttl-min')!.addEventListener('change', (e) => {
   const n = readClampedInput(input, 1, 1440);
   if (n === null) { input.value = String(state.providers?.deepseek?.ttlMinutes ?? 30); return; }
   send('panel.setTtl', { ttlMinutes: n });
+});
+document.getElementById('auto-delete')!.addEventListener('change', (e) => {
+  // 2026-09-15（feat/auto-delete-web-threads）：布尔开关，无夹取；SW 侧照真值持久化并实时生效。
+  send('panel.setAutoDelete', { autoDeleteWebThreads: (e.target as HTMLInputElement).checked });
 });
 
 // 2026-09-11（fix/review-r1）：按钮文案用常量，不从「可能已被上次闪现改写」的 textContent 读回

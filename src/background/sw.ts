@@ -17,7 +17,7 @@ const STORAGE = chrome.storage.local;
 const DEEPSEEK_API_BASE = 'https://chat.deepseek.com/api/v0';
 const WASM_URL = 'https://fe-static.deepseek.com/chat/static/sha3_wasm_bg.7b9ca65ddd.wasm';
 
-interface ProviderConfig { poolSize: number; ttlMinutes: number; lastAuthStatus?: { state: string; message?: string } }
+interface ProviderConfig { poolSize: number; ttlMinutes: number; autoDeleteWebThreads?: boolean; lastAuthStatus?: { state: string; message?: string } }
 
 async function getProviderConfig(providerId: string): Promise<ProviderConfig> {
   // SW 环境下 await chrome.storage.local.get(singleKey) 返回的形状不稳定（实测返回裸值，丢掉 lastAuthStatus）；
@@ -25,7 +25,8 @@ async function getProviderConfig(providerId: string): Promise<ProviderConfig> {
   const k = `providers.${providerId}`;
   const got = (await STORAGE.get([k])) as unknown as Record<string, ProviderConfig | undefined> | undefined;
   const cfg = got?.[k];
-  return { poolSize: cfg?.poolSize ?? 2, ttlMinutes: cfg?.ttlMinutes ?? 30, lastAuthStatus: cfg?.lastAuthStatus };
+  // 2026-09-15（feat/auto-delete-web-threads）：默认 false=不删 DeepSeek 网页会话（淘汰/失败/重建只解除本地映射）。
+  return { poolSize: cfg?.poolSize ?? 2, ttlMinutes: cfg?.ttlMinutes ?? 30, autoDeleteWebThreads: cfg?.autoDeleteWebThreads === true, lastAuthStatus: cfg?.lastAuthStatus };
 }
 async function setProviderConfig(providerId: string, patch: Partial<ProviderConfig>): Promise<void> {
   const cur = await getProviderConfig(providerId);
@@ -86,7 +87,7 @@ async function build(): Promise<{ router: Router; log: RingLog; mapper: SessionM
   const cfg = await getProviderConfig('deepseek');
   const mapper = new SessionMapper(
     { createSession: async () => ({ webSessionId: '' }), deleteSession: deleteDeepSeekSession, now: () => Date.now() },
-    { poolSize: cfg.poolSize, ttlMs: cfg.ttlMinutes * 60_000 },
+    { poolSize: cfg.poolSize, ttlMs: cfg.ttlMinutes * 60_000, autoDeleteWebThreads: cfg.autoDeleteWebThreads },
   );
   // 2026-09-09（fix/thread-persistence）：threads 走数据层（chrome.storage.local），不依赖进程内存。
   // 重装扩展/刷新 spice 页面（MV3 SW 终止重启）后从数据层恢复 → 同 spice chat thread 仍对应
@@ -449,6 +450,12 @@ chrome.runtime.onConnect.addListener((port) => {
           await setProviderConfig('deepseek', { ttlMinutes });
           router.setTtlMinutes(ttlMinutes);
         }
+      } else if (msg?.kind === 'panel.setAutoDelete') {
+        // 2026-09-15（feat/auto-delete-web-threads）：「自动删除网页 Chat Thread」开关（默认关）。
+        // 布尔值不做夹取；写盘 + 实时应用到运行中的 router（同 setPool/setTtl 模式）。
+        const v = msg.payload?.autoDeleteWebThreads === true;
+        await setProviderConfig('deepseek', { autoDeleteWebThreads: v });
+        router.setAutoDeleteWebThreads(v);
       } else if (msg?.kind === 'panel.listLogs') {
         safePostPanel({ kind: 'state', payload: { log: log.list() } });
       } else if (msg?.kind === 'panel.listThreads') {

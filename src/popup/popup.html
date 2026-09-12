@@ -58,6 +58,7 @@
       <h3>配置</h3>
       <label>线程池 <input id="pool-size" type="number" min="1" max="5" value="2"></label>
       <label>TTL 分钟 <input id="ttl-min" type="number" min="1" value="30"></label>
+      <label title="开启：线程被淘汰/失败/重建时真调 DeepSeek delete_session 删除网页会话；关闭（默认）：只解除本地映射，网页上的 Chat Thread 保留">自动删除网页 Chat Thread <input id="auto-delete" type="checkbox"></label>
     </section>
   </section>
 

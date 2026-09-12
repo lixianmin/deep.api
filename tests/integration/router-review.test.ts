@@ -223,3 +223,28 @@ describe('Router review-r2 fixes', () => {
     expect(mapperDeletes).not.toContain('s1');
   });
 });
+
+// 2026-09-15（feat/auto-delete-web-threads）：「自动删除网页 Chat Thread」设置 gate rebuild 的 deleteSession。
+// 默认关：rebuild 只弃用旧 web session（网页会话保留）；开启后照旧真删。
+describe('Router: autoDeleteWebThreads gate rebuild 的 deleteSession', () => {
+  const CID_REQ = { model: 'deepseek-flash', conversation_id: 'conv-1' };
+  it('默认关：同 cid 镜像失配 rebuild 不删旧网页会话，只换新会话', async () => {
+    const deleteSession = vi.fn(async () => {});
+    const adapter = stubAdapter({ deleteSession });
+    const { router, mapper } = setup(adapter);
+    expect(mapper.autoDeleteWebThreads).toBe(false);
+    await router.create(TOKEN, { ...CID_REQ, messages: [m('user', 'u1')] }) as ChatCompletion;
+    await router.create(TOKEN, { ...CID_REQ, messages: [m('user', 'changed')] }) as ChatCompletion;  // mirror 失配 → rebuild
+    expect(deleteSession).not.toHaveBeenCalled();
+    expect(mapper.listThreads()[0]!.webSessionId).toBe('s2');   // 本地映射已切到新会话
+  });
+  it('开启后：rebuild 照旧删除旧网页会话', async () => {
+    const deleted: string[] = [];
+    const adapter = stubAdapter({ deleteSession: async (_ctx, s) => { deleted.push(s.webSessionId); } });
+    const { router, mapper } = setup(adapter);
+    mapper.setAutoDeleteWebThreads(true);
+    await router.create(TOKEN, { ...CID_REQ, messages: [m('user', 'u1')] }) as ChatCompletion;
+    await router.create(TOKEN, { ...CID_REQ, messages: [m('user', 'changed')] }) as ChatCompletion;
+    expect(deleted).toEqual(['s1']);
+  });
+});

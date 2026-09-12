@@ -85,8 +85,14 @@ export class SessionMapper {
   onPersist?: (snap: { seq: number; threads: ThreadEntry[] }) => void;
   constructor(
     private deps: { createSession(): Promise<{ webSessionId: string }>; deleteSession(id: string): Promise<void>; now(): number },
-    private cfg: { poolSize: number; ttlMs: number },
+    private cfg: { poolSize: number; ttlMs: number; autoDeleteWebThreads?: boolean },
   ) {}
+
+  // 2026-09-15（feat/auto-delete-web-threads）：「自动删除网页 Chat Thread」设置（spec §4.3/§8.2）。
+  // 默认 false：淘汰（TTL/LRU）/失败/重建只解除本地映射，DeepSeek 网页会话保留。
+  // true：照旧 best-effort 调 delete_session 真删（保持网页侧干净）。auth 探测的自建会话不受本设置约束（始终清理）。
+  get autoDeleteWebThreads(): boolean { return this.cfg.autoDeleteWebThreads === true; }
+  setAutoDeleteWebThreads(v: boolean): void { this.cfg.autoDeleteWebThreads = v === true; }
 
   private key(providerId: string, conversationId: string) { return `${providerId}:${conversationId}`; }
 
@@ -196,7 +202,7 @@ export class SessionMapper {
     while (this.countAuto(providerId) > this.cfg.poolSize) {
       const victim = [...this.threads.values()].filter(x => x.kind === 'auto').sort((a, b) => a.lastUsedAt - b.lastUsedAt)[0];
       if (!victim) break;
-      void this.deps.deleteSession(victim.webSessionId);   // best-effort（spec §4.3 淘汰）
+      if (this.autoDeleteWebThreads) void this.deps.deleteSession(victim.webSessionId);   // best-effort（spec §4.3 淘汰；默认关=只解除映射，不删网页会话）
       this.threads.delete(this.key(providerId, victim.conversationId));
     }
   }
@@ -257,7 +263,7 @@ export class SessionMapper {
     // （同 cid 并发下，排队/失败的一方会把另一条正在流的会话 deleteSession 掉）。
     if (token !== undefined && t.busyToken !== undefined && t.busyToken !== token) return;
     this.threads.delete(this.key(providerId, conversationId));
-    try { await this.deps.deleteSession(t.webSessionId); } catch { /* best effort per spec */ }
+    if (this.autoDeleteWebThreads) { try { await this.deps.deleteSession(t.webSessionId); } catch { /* best effort per spec */ } }
     this.persist();
   }
 
@@ -272,7 +278,7 @@ export class SessionMapper {
     for (const t of [...this.threads.values()]) {
       if (now - t.idleSince > this.cfg.ttlMs) {
         this.threads.delete(this.key(providerId, t.conversationId));
-        try { await this.deps.deleteSession(t.webSessionId); } catch { /* best effort per spec */ }
+        if (this.autoDeleteWebThreads) { try { await this.deps.deleteSession(t.webSessionId); } catch { /* best effort per spec */ } }
         changed = true;
       }
     }

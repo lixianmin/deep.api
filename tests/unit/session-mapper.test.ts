@@ -4,9 +4,10 @@ import { RingLog } from '../../src/background/log';
 import type { Message } from '../../src/shared/api-types';
 
 const m = (role: Message['role'], content: string, extra: Partial<Message> = {}): Message => ({ role, content, ...extra });
-const mk = () => {
+// 2026-09-15（feat/auto-delete-web-threads）：cfg 可覆盖，默认 autoDeleteWebThreads 缺省=false（不删网页会话）。
+const mk = (cfg: Partial<{ poolSize: number; ttlMs: number; autoDeleteWebThreads: boolean }> = {}) => {
   const deps = { createSession: vi.fn(async () => ({ webSessionId: `s${(deps as any).createSession.mock.calls.length}` })), deleteSession: vi.fn(async () => {}), now: () => 1000 };
-  return { mapper: new SessionMapper(deps, { poolSize: 2, ttlMs: 60_000 }), deps };
+  return { mapper: new SessionMapper(deps, { poolSize: 2, ttlMs: 60_000, ...cfg }), deps };
 };
 
 describe('SessionMapper', () => {
@@ -60,7 +61,7 @@ describe('SessionMapper', () => {
     if (d.action === 'incremental') expect(d.tail).toEqual([m('user', 'next')]);
   });
   it('evicts LRU on register over poolSize and expires idle threads', async () => {
-    const { mapper, deps } = mk();
+    const { mapper, deps } = mk({ autoDeleteWebThreads: true });   // 旧删除行为需显式开启（2026-09-15 起默认关）
     mapper.register('deepseek', 'auto:1', 's1', [m('user', 'a')]);
     mapper.register('deepseek', 'auto:2', 's2', [m('user', 'b')]);
     mapper.register('deepseek', 'auto:3', 's3', [m('user', 'c')]);  // 淘汰 s1
@@ -72,11 +73,35 @@ describe('SessionMapper', () => {
     expect(mapper.stats().threads).toBe(0);
   });
   it('fail() destroys the thread', async () => {
-    const { mapper, deps } = mk();
+    const { mapper, deps } = mk({ autoDeleteWebThreads: true });   // 旧删除行为需显式开启
     const t = mapper.register('deepseek', 'auto:1', 's1', [m('user', 'a')]);
     await mapper.fail('deepseek', t.conversationId);
     expect(deps.deleteSession).toHaveBeenCalledWith('s1');
     expect(mapper.stats().threads).toBe(0);
+  });
+  // 2026-09-15（feat/auto-delete-web-threads）：默认不删 DeepSeek 网页会话——淘汰/失败只解除本地映射。
+  it('默认（autoDeleteWebThreads 关）：LRU 淘汰 / TTL 过期 / fail 只解除本地映射，不调 deleteSession', async () => {
+    const { mapper, deps } = mk();
+    mapper.register('deepseek', 'auto:1', 's1', [m('user', 'a')]);
+    mapper.register('deepseek', 'auto:2', 's2', [m('user', 'b')]);
+    mapper.register('deepseek', 'auto:3', 's3', [m('user', 'c')]);  // LRU 淘汰 s1
+    expect(deps.deleteSession).not.toHaveBeenCalled();
+    expect(mapper.stats().threads).toBe(2);   // 本地映射照常解除
+    deps.now = () => 1000 + 61_000;
+    await mapper.evictExpired('deepseek');
+    expect(mapper.stats().threads).toBe(0);   // TTL 过期照常解除
+    expect(deps.deleteSession).not.toHaveBeenCalled();
+    const t = mapper.register('deepseek', 'auto:9', 's9', [m('user', 'z')]);
+    await mapper.fail('deepseek', t.conversationId);
+    expect(mapper.stats().threads).toBe(0);
+    expect(deps.deleteSession).not.toHaveBeenCalled();
+  });
+  it('setAutoDeleteWebThreads(true) 运行时开启后恢复删除行为', async () => {
+    const { mapper, deps } = mk();
+    mapper.setAutoDeleteWebThreads(true);
+    const t = mapper.register('deepseek', 'auto:1', 's1', [m('user', 'a')]);
+    await mapper.fail('deepseek', t.conversationId);
+    expect(deps.deleteSession).toHaveBeenCalledWith('s1');
   });
   it('incremental allows tool-head tail (tool-loop continuation)', () => {
     const { mapper } = mk();
@@ -452,7 +477,7 @@ describe('SessionMapper review-r2 fixes', () => {
 
   it('N2: 别人持有的 busy 线程不因本请求 fail 被删除（token 不匹配则跳过）', async () => {
     const deps = { createSession: vi.fn(async () => ({ webSessionId: 's1' })), deleteSession: vi.fn(async () => {}), now: () => 1000 };
-    const mapper = new SessionMapper(deps, { poolSize: 2, ttlMs: 60_000 });
+    const mapper = new SessionMapper(deps, { poolSize: 2, ttlMs: 60_000, autoDeleteWebThreads: true });   // 本用例验证删除行为，显式开启
     const t = mapper.register('deepseek', 'conv-1', 's1', [m('user', 'u1')]);
     mapper.markBusy('deepseek', t.conversationId, 'reqA');
     mapper.markBusy('deepseek', t.conversationId, 'reqB');   // B 不覆盖 A 的所有权
