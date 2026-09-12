@@ -859,3 +859,61 @@ describe('incomplete stream / server error（fix/incomplete-stream-error）', ()
     expect(res.choices[0].message.content).toBe('正常');
   });
 });
+
+// 2026-09-15（fix/tool-call-recovery）：v0.2.5 piano 现场链路回归——杂交形态（标准开标签 +
+// inline args 块体 + 漂移闭标签）在 v0.2.5 只能 fail-closed → repair 重问又漂移 → 400 断链
+// （spice 只收到前言文本，任务卡死）。结构化恢复层落地后：直接解出调用，**一次 provider 调用**
+//（不烧 repair 往返）、标记不泄漏、finish_reason=tool_calls；repair 兑底留给真正不可恢复的形态。
+describe('流式：杂交形态结构化恢复，不烧 repair（fix/tool-call-recovery）', () => {
+  const READ = 'Read';
+  const TOOL = [{ type: 'function' as const, function: { name: READ, description: 'read', parameters: { type: 'object', properties: { path: { type: 'string' } } } } }];
+  const HYBRID =
+    '我先看一下当前项目文件。\n\n' +
+    '<tool_calls>\n' +
+    '[{"id":"1","type":"function","function":{"name":"' + READ + '","arguments":"{"path":"sketch.ino"}"}},' +
+    '{"id":"2","type":"function","function":{"name":"' + READ + '","arguments":"{"path":"diagram.json"}"}}]' +
+    '\n</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>';
+
+  interface Drained { content: string; names: string[]; finish: string | null; error?: string }
+  async function drain(iterable: AsyncIterable<unknown>): Promise<Drained> {
+    const out: Drained = { content: '', names: [], finish: null };
+    try {
+      for await (const c of iterable as AsyncIterable<any>) {
+        const d = c?.choices?.[0]?.delta ?? {};
+        if (typeof d.content === 'string') out.content += d.content;
+        for (const tc of d.tool_calls ?? []) if (tc?.function?.name) out.names.push(tc.function.name);
+        const fr = c?.choices?.[0]?.finish_reason;
+        if (fr) out.finish = fr;
+      }
+    } catch (e) { out.error = (e as Error).message; }
+    return out;
+  }
+
+  function adapter(first: string, second: string) {
+    let n = 0;
+    const a = stubAdapter({
+      streamCompletion: async function* () {
+        n += 1;
+        yield { kind: 'message_id', id: 1 };
+        yield { kind: 'content_delta', content: n === 1 ? first : second };
+      },
+    });
+    return { a, calls: () => n };
+  }
+
+  it('恢复成功：一次调用出 tool_calls、前言保留、标记不泄漏、不触发 repair', async () => {
+    const { a, calls } = adapter(HYBRID, '不应被调用的 repair 回复');
+    const r = makeRouter(a);
+    const s = await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', '设计钢琴')], tools: TOOL, stream: true, conversation_id: 'recover-cid' });
+    const res = await drain(s as AsyncIterable<unknown>);
+    expect(res.error).toBeUndefined();
+    expect(res.names).toEqual([READ, READ]);
+    expect(res.finish).toBe('tool_calls');
+    expect(calls()).toBe(1);                                    // 恢复层直接解出，没走 repair
+    expect(res.content).not.toMatch(/DSML/i);                   // 漂移标记不泄漏
+    expect(res.content).toContain('我先看一下当前项目文件。');       // 前言照常透传
+    const asst = (r as any).d.mapper.threads.get('deepseek:recover-cid').mirror.at(-1)!;
+    expect(asst.tool_calls).toHaveLength(2);
+    expect(JSON.parse(asst.tool_calls[0].function.arguments)).toEqual({ path: 'sketch.ino' });
+  });
+});

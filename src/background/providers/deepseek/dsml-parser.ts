@@ -95,6 +95,14 @@ function isToolMarkup(text: string): boolean {
 
 export interface DsmlParseResult { calls: ToolCall[]; content: string }
 
+/** 定位第一个工具块开标签（`<` 可带漂移命名空间，标签名 tool_calls/function_calls/calls）。
+ *  2026-09-15（fix/tool-call-recovery）：供 tool-pipeline 的结构化恢复层锚定块起点——
+ *  判据与解析同源（blockStartRe），不在此处另立正则。 */
+export function firstToolBlockOpen(text: string): { start: number; end: number } | null {
+  const m = blockStartRe().exec(text);
+  return m ? { start: m.index, end: m.index + m[0].length } : null;
+}
+
 /** 非流式解析：返回结构化 tool_calls + 去掉块的文本；没有可解析调用时返回 null。 */
 export function parseDsmlToolCalls(text: string, tools: ToolDef[] = []): DsmlParseResult | null {
   if (!text) return null;

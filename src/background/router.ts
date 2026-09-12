@@ -649,7 +649,10 @@ export class Router {
         // 所以「有工具标记」的判据必须把 unparsed 一起算——否则扣下的块会被静默丢弃并判成 stop。
         const heldBack = dsml?.unparsed ?? [];
         if (toolCtx.promptSuffix !== '' && !handle.run.repairDone) {
-          const parsed = parseToolCalls(agg.content, toolCtx.tools);
+          // 2026-09-15（fix/tool-call-recovery）：扣住的块一起参与解析——恢复层可能直接解出，
+          // 不烧 repair 往返（piano 现场：repair 重问模型照样漂移）；同时修复「agg.content
+          // 可解析但 heldBack 块被静默丢弃」的部分丢失漏洞（一个可解析块 + 一个残缺块并存时）。
+          const parsed = parseToolCalls(heldBack.length ? [agg.content, ...heldBack].join('\n') : agg.content, toolCtx.tools);
           if (parsed) {
             agg.toolCalls = parsed.calls; agg.content = parsed.remainder; agg.finishReason = 'tool_calls';
             // OpenAI SSE 兼容：每个 tool_call 拆为独立 chunk，带 index，让消费者可按 index 增量拼接

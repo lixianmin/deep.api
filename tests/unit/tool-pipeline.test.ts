@@ -159,8 +159,54 @@ describe('parseToolCalls', () => {
       expect(hasToolTags(wire)).toBe(true);
     });
 
-    it('parseToolCalls 解析不出 → null（fail-closed 走 repair，不硬捞）', () => {
-      expect(parseToolCalls(wire)).toBeNull();
+    // 2026-09-15（fix/tool-call-recovery）：v0.2.5 时本用例断言 null（fail-closed 走 repair），
+    // piano 现场证明 repair 不是漂移的可靠兑底（重问后再漂 → 400 断链），且块体人眼可读可验证
+    // → 改为直接断言结构化恢复成功；fail-closed 语义保留给真正不可恢复的块体（见下方新 describe）。
+    it('解析不出 → repair；结构化恢复落地后直接解出 3 个 Grep 调用', () => {
+      const r = parseToolCalls(wire);
+      expect(r).not.toBeNull();
+      expect(r!.calls.map((c) => c.function.name)).toEqual(['Grep', 'Grep', 'Grep']);
+      expect(JSON.parse(r!.calls[0]!.function.arguments)).toEqual({ pattern: 'buzzer|tone|noTone', path: 'docs/knowledge/parts.md', ignoreCase: true, context: 2 });
+    });
+  });
+
+  // 2026-09-15（fix/tool-call-recovery）：v0.2.5 piano 现场证明 repair 不是漂移的可靠兑底——
+  // 重问后模型再次漂移（第 6 形态：arguments 未按约定 stringify、内层引号未转义），400 收场、
+  // agent 链断裂；而块体是人眼可读、可验证的（近乎）合法 OpenAI JSON。本组锁定「结构化恢复层」：
+  // 工具块开标签锚定 + 块体平衡 JSON 提取（引号/转义感知）+ arguments 内联对象修复，
+  // 全部通过严格校验才恢复；任何一步失败仍返回 null（fail-closed，走 repair/400 不变）。
+  describe('块体结构化恢复：开标签锚定 + JSON 提取 + inline args 修复（fix/tool-call-recovery）', () => {
+    // v0.2.5 piano 现场字节（spice 报告，base64 内嵌理由同上）
+    const INCIDENT_WIRE_B64 =
+      '5oiR5YWI55yL5LiA5LiL5b2T5YmN6aG555uu5paH5Lu277yM5LqG6Kej5p2/5a2Q5ZKM5qC85byP44CCCgo8dG9vbF9jYWxscz4KW3siaWQiOiIxIiwidHlwZSI6ImZ1bmN0aW9uIiwiZnVuY3Rpb24iOnsibmFtZSI6IlJlYWQiLCJhcmd1bWVudHMiOiJ7InBhdGgiOiJza2V0Y2guaW5vIn0ifX0seyJpZCI6IjIiLCJ0eXBlIjoiZnVuY3Rpb24iLCJmdW5jdGlvbiI6eyJuYW1lIjoiUmVhZCIsImFyZ3VtZW50cyI6InsicGF0aCI6ImRpYWdyYW0uanNvbiJ9In19LHsiaWQiOiIzIiwidHlwZSI6ImZ1bmN0aW9uIiwiZnVuY3Rpb24iOnsibmFtZSI6IlJlYWQiLCJhcmd1bWVudHMiOiJ7InBhdGgiOiJwcm9qZWN0Lmpzb24ifSJ9fV08L++9nO+9nERTTUzvvZzvvZwgcGFyYW1ldGVyPgo8L++9nO+9nERTTUzvvZzvvZwgaW52b2tlPgo8L++9nO+9nERTTUzvvZzvvZwgY2FsbHM+';
+    const incident = Buffer.from(INCIDENT_WIRE_B64, 'base64').toString('utf8');
+
+    it('piano 现场（inline args + 漂移闭标签）→ 恢复 3 个 Read，remainder = 前言', () => {
+      const r = parseToolCalls(incident);
+      expect(r).not.toBeNull();
+      expect(r!.calls.map((c) => c.function.name)).toEqual(['Read', 'Read', 'Read']);
+      expect(JSON.parse(r!.calls[0]!.function.arguments)).toEqual({ path: 'sketch.ino' });
+      expect(JSON.parse(r!.calls[1]!.function.arguments)).toEqual({ path: 'diagram.json' });
+      expect(JSON.parse(r!.calls[2]!.function.arguments)).toEqual({ path: 'project.json' });
+      expect(r!.remainder).toBe('我先看一下当前项目文件，了解板子和格式。\n\n');
+    });
+
+    it('闭合标准块 + inline args（包裹正常、块体坏）→ 恢复', () => {
+      const text = '<tool_calls>\n[{"id":"c1","type":"function","function":{"name":"Read","arguments":"{"path":"a.ino"}"}}]\n</tool_calls>';
+      const r = parseToolCalls(text);
+      expect(r).not.toBeNull();
+      expect(r!.calls).toHaveLength(1);
+      expect(JSON.parse(r!.calls[0]!.function.arguments)).toEqual({ path: 'a.ino' });
+      expect(r!.remainder).toBe('');
+    });
+
+    it('块体合法 JSON 但不是工具调用 → null（fail-closed 走 repair）', () => {
+      expect(parseToolCalls('前言\n<tool_calls>\n[{"a":1}]\n</｜｜DSML｜｜ calls>')).toBeNull();
+    });
+
+    it('块体无可提取 JSON / 括号不平衡 → null（fail-closed 走 repair）', () => {
+      expect(parseToolCalls('前言\n<tool_calls>\n垃圾内容\n</｜｜DSML｜｜ calls>')).toBeNull();
+      expect(parseToolCalls('前言\n<tool_calls>\n[{"id":"1","type":"function"')).toBeNull();
     });
   });
 

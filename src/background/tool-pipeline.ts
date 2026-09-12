@@ -1,5 +1,5 @@
 import type { ToolChoice, ToolDef, ToolCall } from '../shared/api-types';
-import { parseDsmlToolCalls, hasDsmlToolTags } from './providers/deepseek/dsml-parser';
+import { parseDsmlToolCalls, hasDsmlToolTags, firstToolBlockOpen } from './providers/deepseek/dsml-parser';
 
 
 /** tools 透传给调用方：DSML 解析需要工具 schema 才能把 `string="false"` 参数转成正确类型。 */
@@ -69,6 +69,12 @@ export function parseToolCalls(content: string, tools: ToolDef[] = []): { calls:
   // 见 providers/deepseek/dsml-parser.ts。优先于下面的代码块/裸 JSON 兜底（那两个形状更宽松）。
   const dsml = parseDsmlToolCalls(content, tools);
   if (dsml) return { calls: dsml.calls, remainder: dsml.content };
+  // 2026-09-15（fix/tool-call-recovery）：结构化恢复层——v0.2.5 piano 现场证明 repair 不是漂移的
+  // 可靠兑底（重问后模型再次漂移 → 400 断链），而块体是人眼可读、可严格验证的（近乎）合法
+  // OpenAI JSON。开标签锚定 + 平衡 JSON 提取 + inline args 修复，全部校验通过才恢复；
+  // 任何一步失败仍返回 null（fail-closed，走 repair/400 不变）。详见 recoverUnclosedBlock。
+  const recovered = recoverUnclosedBlock(content);
+  if (recovered) return recovered;
   // 无标签块 → fallback：模型可能用代码块包裹工具调用 JSON（本地实测 2026-09）
   const fence = findCodeFenceBlocks(content);
   if (fence.length) {
@@ -103,6 +109,105 @@ function parseBareJson(content: string): { calls: ToolCall[]; remainder: string 
   // remainder：去掉 JSON 部分（保留前后文本）
   const start = content.indexOf(trimmed);
   return { calls, remainder: content.slice(0, start) + content.slice(start + trimmed.length) };
+}
+
+// ——— 2026-09-15（fix/tool-call-recovery）结构化恢复层 ———
+// 背景：v0.2.5 piano 现场——模型开标准 <tool_calls>（prompt 教的形态）+ 块体（近乎）合法的
+// OpenAI JSON，收尾却是漂移形态的 DSML 闭标签，且 arguments 未按约定 stringify（内层引号
+// 未转义）。此形态下前面所有层都解不出 → repair 重问，而现场证明模型重问后照样漂移 →
+// 400 → agent 链断裂。原则细化（spec §4.4）：可验证的高置信恢复优先于重问——
+// 开标签锚定 + 平衡 JSON 提取 + inline args 修复，每一步都可被严格校验（最终 JSON.parse
+// 必须通过、每个元素必须 coerce 成 ToolCall），任何一步失败立即放弃走 fail-closed，
+// 不做猜测性修复。
+
+/** 从第一个工具块开标签起提取块体 JSON 并恢复调用；不可恢复返回 null（fail-closed）。
+ *  remainder = 开标签之前的文本（开标签后的标记垃圾一并丢弃——现场形态闭标签都是结尾，
+ *  块后正文与标记垃圾无法可靠区分，保守不保留）。 */
+function recoverUnclosedBlock(content: string): { calls: ToolCall[]; remainder: string } | null {
+  const open = firstToolBlockOpen(content);
+  if (!open) return null;
+  const body = content.slice(open.end);
+  const jsonStart = body.search(/[{[]/);
+  if (jsonStart === -1) return null;
+  const jsonEnd = balancedEnd(body, jsonStart);
+  if (jsonEnd === -1) return null;
+  const parsed = tryParseJsonWithInlineArgs(body.slice(jsonStart, jsonEnd + 1));
+  if (parsed === undefined) return null;
+  const arr = Array.isArray(parsed) ? parsed : [parsed];
+  const calls: ToolCall[] = [];
+  for (const item of arr) {
+    const tc = coerceToToolCall(item);
+    // 任一元素不是合法工具调用 → 整体放弃（部分恢复会静默丢调用，对齐 review-r1 原则）
+    if (!tc) return null;
+    calls.push(tc);
+  }
+  if (!calls.length) return null;
+  return { calls, remainder: content.slice(0, open.start) };
+}
+
+/** 引号/转义感知的括号配对：返回与 s[start] 配对的闭括号下标；括不平衡返回 -1。 */
+function balancedEnd(s: string, start: number): number {
+  const openCh = s[start];
+  const closeCh = openCh === '[' ? ']' : '}';
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < s.length; i++) {
+    const c = s[i];
+    if (esc) { esc = false; continue; }
+    if (c === '\\') { esc = true; continue; }
+    if (c === '"') { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (c === openCh) depth++;
+    else if (c === closeCh) { depth--; if (depth === 0) return i; }
+  }
+  return -1;
+}
+
+/** 严格 parse；失败后尝试 inline args 修复再 parse；仍失败返回 undefined（调用方 fail-closed）。 */
+function tryParseJsonWithInlineArgs(s: string): unknown | undefined {
+  try { return JSON.parse(s); } catch { /* 继续尝试修复 */ }
+  const fixed = repairInlineArguments(s);
+  if (fixed === null) return undefined;
+  try { return JSON.parse(fixed); } catch { return undefined; }
+}
+
+/** 修复 arguments 值内联对象形态（第 6 漂移形态）：模型没按约定把参数 stringify 后放
+ *  字符串字段，而是直接内联对象，内层引号未转义：
+ *    "arguments":"{"path":"a.ino"}"  →  "arguments":{"path":"a.ino"}
+ *  做法：定位 `"arguments"\s*:\s*"\{`，从 `{` 起括号配对（引号状态在对象内**重新起算**——
+ *  内层引号本来就没转义，外层字符串状态不可靠）到深度归零；要求值后紧跟收尾引号。
+ *  混合形态（部分转义部分内联）不可靠 → 配对或重建失败即整体放弃（由最终 JSON.parse 兼底验证）。 */
+function repairInlineArguments(s: string): string | null {
+  const re = /"arguments"\s*:\s*"\{/g;
+  let out = '';
+  let cursor = 0;
+  for (;;) {
+    const m = re.exec(s);
+    if (!m) break;
+    const objStart = m.index + m[0].length - 1;   // 指向 `{`
+    const objEnd = braceEnd(s, objStart);
+    if (objEnd === -1 || s[objEnd + 1] !== '"') return null;
+    out += s.slice(cursor, m.index) + '"arguments":' + s.slice(objStart, objEnd + 1);
+    cursor = objEnd + 2;                          // 跳过原 string 值的收尾引号
+    re.lastIndex = cursor;
+  }
+  if (cursor === 0) return null;                  // 一处都没匹配（调用方已先试过严格 parse）
+  return out + s.slice(cursor);
+}
+
+/** 从 `{` 起括号配对（引号状态在对象内重新起算）；深度归零返回 `}` 下标，否则 -1。 */
+function braceEnd(s: string, start: number): number {
+  let depth = 0;
+  let inStr = false;
+  for (let i = start; i < s.length; i++) {
+    const c = s[i];
+    if (inStr) { if (c === '"') inStr = false; continue; }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '{') depth++;
+    else if (c === '}') { depth--; if (depth === 0) return i; }
+  }
+  return -1;
 }
 
 /** 解析已知块（标签块或代码块）为 ToolCall 数组；返回 null 表示块内容不是合法工具调用。 */
