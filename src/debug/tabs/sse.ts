@@ -31,11 +31,21 @@ export function mountSse(pane: HTMLElement): () => void {
         ? new Date(oldestAt).toLocaleTimeString()
         : `${new Date(oldestAt).toLocaleTimeString()}–${new Date(newestAt).toLocaleTimeString()}`;
       const sample = (entries[0]!.replySample ?? '').slice(0, 200);
+      // 2026-09-11（diag/continue-thinking）：spike 期间显示响应截断定位字段——一眼看出是哪条 entry。
+      const stats = entries[0]!.sseThinkingChars !== undefined
+        ? `think=${entries[0]!.sseThinkingChars}c resp=${entries[0]!.sseResponseChars ?? 0}c status=${JSON.stringify(entries[0]!.sseStatusValues ?? [])}`
+        : '';
       return `
         <details data-group style="margin:4px 0;border:1px solid #ddd;padding:4px;">
-          <summary><b>${escapeHtml(ws.slice(0, 16))}…</b> @${range} (${entries.length} entries) — ${escapeHtml(sample)}</summary>
+          <summary><b>${escapeHtml(ws.slice(0, 16))}…</b> @${range} (${entries.length} entries) — ${escapeHtml(sample)}${stats ? ` <span style="color:#a60;">${escapeHtml(stats)}</span>` : ''}</summary>
           <div style="margin-left:16px;">
-            ${entries.map(e => `<div style="padding:2px;font-family:ui-monospace,monospace;font-size:11px;">${new Date(e.at).toLocaleTimeString()} ${escapeHtml((e.replySample ?? '').slice(0, 120))}</div>`).join('')}
+            ${entries.map(e => {
+              const tStats = e.sseThinkingChars !== undefined
+                ? `think=${e.sseThinkingChars}c status=${JSON.stringify(e.sseStatusValues ?? [])}`
+                : '';
+              const rawTail = e.sseRawTail ? `<pre style="margin:2px 0;white-space:pre-wrap;word-break:break-all;background:#f4f4f4;padding:4px;font-size:10px;">${escapeHtml(e.sseRawTail)}</pre>` : '';
+              return `<div style="padding:2px;font-family:ui-monospace,monospace;font-size:11px;">${new Date(e.at).toLocaleTimeString()} ${escapeHtml((e.replySample ?? '').slice(0, 120))}${tStats ? ` <span style="color:#a60;">${escapeHtml(tStats)}</span>` : ''}${rawTail}</div>`;
+            }).join('')}
           </div>
         </details>
       `;

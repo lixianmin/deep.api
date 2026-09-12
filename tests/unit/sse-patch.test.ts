@@ -216,3 +216,34 @@ describe('completionEvents review-r1 fixes', () => {
     expect(status! >= 500).toBe(true);
   });
 });
+
+// 2026-09-11（diag/continue-thinking）：spike 期间临时诊断字段——定位 DeepSeek thinking 截断触发点。
+describe('completionEvents continue-thinking diagnostics', () => {
+  it('stream_stats 携带 statusValues/char counts/rawTail', async () => {
+    // 造一个完整生命周期：ready → THINK 增量 → response/status=WIP → THINK 续增量 → response/status=FINISHED
+    const sse = [
+      'event: ready\ndata: {"request_message_id":1,"response_message_id":2}\n\n',
+      'data: {"p":"response/fragments","o":"add","v":{"type":"think","content":""}}\n\n',
+      'data: {"p":"response/fragments/-1/content","o":"APPEND","v":"思考文字"}\n\n',
+      'data: {"p":"response/status","o":"SET","v":"WIP"}\n\n',
+      'data: {"p":"response/fragments/-1/content","o":"APPEND","v":"后续思考"}\n\n',
+      'data: {"p":"response/status","o":"SET","v":"FINISHED"}\n\n',
+    ].join('');
+    const chunks: Uint8Array[] = [];
+    for (const block of sse.split('\n\n')) chunks.push(new TextEncoder().encode(block + '\n\n'));
+    const iter = (async function* () { for (const c of chunks) yield c; })();
+    const evs: ProviderStreamEvent[] = [];
+    for await (const ev of completionEvents(iter, 1000, () => {})) evs.push(ev);
+    const stats = evs.find(e => e.kind === 'stream_stats') as any;
+    expect(stats).toBeDefined();
+    // status 顺序保留
+    expect(stats.statusValues).toEqual(['WIP', 'FINISHED']);
+    // THINK 字符累计（'思考文字' + '后续思考' = 8 chars）
+    expect(stats.thinkingChars).toBe(8);
+    expect(stats.responseChars).toBe(0);
+    // 原始 SSE 尾部 600 字符——含最后的 response/status=FINISHED
+    expect(typeof stats.rawTail).toBe('string');
+    expect(stats.rawTail.length).toBeLessThanOrEqual(600);
+    expect(stats.rawTail).toContain('FINISHED');
+  });
+});

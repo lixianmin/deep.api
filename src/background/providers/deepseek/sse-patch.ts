@@ -137,7 +137,7 @@ export async function* completionEvents(
     // 用于诊断 Pro（model_type=expert）在 DeepSeek 网页 web API 上是否只返 thinking fragments
     // （场景 B-1：bytes > 0 但 paths 只含 'response/fragments'+type='think'）还是用了未识别 path（场景 B-2：
     // paths 含 parser 不认识的 path）。bytes = 0 表示上游本就未返任何字节。
-    yield { kind: 'stream_stats', bytes: stats.bytes, paths: [...stats.paths], rawSample: stats.raw };
+    yield { kind: 'stream_stats', bytes: stats.bytes, paths: [...stats.paths], rawSample: stats.raw, statusValues: stats.statusValues, thinkingChars: stats.thinkingChars, responseChars: stats.responseChars, rawTail: stats.rawTail };
   } finally {
     // best-effort 关闭底层迭代器；不 await：源停在未决 await 上时 spec 规定 return() 须等其完成（会死锁），故 fire-and-forget
     void iter.return?.().catch(() => {});
@@ -146,7 +146,7 @@ export async function* completionEvents(
 
 function makeProcessor(onReady: (ids: { requestMessageId: number; responseMessageId: number }) => void): {
   processBlock(block: string): ProviderStreamEvent[];
-  stats: { bytes: number; paths: Set<string>; raw: string };
+  stats: { bytes: number; paths: Set<string>; raw: string; rawTail: string; statusValues: string[]; thinkingChars: number; responseChars: number };
 } {
   const tree = new ResponseTree();
   let sentReady = false;
@@ -155,7 +155,18 @@ function makeProcessor(onReady: (ids: { requestMessageId: number; responseMessag
   // 2026-09-09（diag/pro-sse-paths）：path 集（含 ready/request_message_id/response_message_id
   // 都记）。ready event 有顶层 request_message_id/response_message_id，不走 path 路径——加
   // 哨兵 'ready' 让 stats.paths 准确反映「上游到底返了什么」。
-  const stats = { bytes: 0, paths: new Set<string>(), raw: '' as string };
+  // 2026-09-11（diag/continue-thinking）：spike 期间临时加——追踪 response/status value 列表、
+  // THINK/RESPONSE fragment 字符累计、流末原始 SSE 尾部 600 字符。设计冻结后会改为 emit
+  // 'continue_required' ProviderStreamEvent 替代。当前只观测，不消费 value。
+  const stats = {
+    bytes: 0,
+    paths: new Set<string>(),
+    raw: '' as string,
+    rawTail: '' as string,
+    statusValues: [] as string[],
+    thinkingChars: 0,
+    responseChars: 0,
+  };
   const processBlock = (block: string): ProviderStreamEvent[] => {
     const out: ProviderStreamEvent[] = [];
     for (const ev of parseSseText(block)) {
@@ -163,6 +174,12 @@ function makeProcessor(onReady: (ids: { requestMessageId: number; responseMessag
       // 返回的未知事件（unknown:xxx）的真实内容。仅记录一次（raw === '' 时）。
       if (stats.raw.length < 600 && ev.data) {
         stats.raw += (stats.raw ? '\n' : '') + ev.data.slice(0, 600 - stats.raw.length);
+      }
+      // 2026-09-11（diag/continue-thinking）：spike 期间临时记录尾部 600 字符，用于定位
+      // thinking 截断点（response/status 终值、可能的 finish 事件、finish_reason 字段）。
+      // 始终记录（不限次数，靠 ring buffer 截断），只占最后 600 字符。
+      if (ev.data) {
+        stats.rawTail = (stats.rawTail + (stats.rawTail ? '\n' : '') + ev.data).slice(-600);
       }
       let data: unknown; try { data = JSON.parse(ev.data); } catch { continue; }
       if (!sentReady) {
@@ -180,6 +197,10 @@ function makeProcessor(onReady: (ids: { requestMessageId: number; responseMessag
           const op = typeof d.o === 'string' ? d.o : 'SET';
           lastPath = path; lastOp = op;
           stats.paths.add(path);
+          // 2026-09-11（diag/continue-thinking）：记录 response/status 的所有 value——spike
+          // 期间用于探测 DeepSeek thinking 截断的真实信号（待抓包确认字面量）。其它 path 的
+          // value 不记（量级过大，且 sseRawTail 已能取证）。
+          if (path === 'response/status' && typeof d.v === 'string') stats.statusValues.push(d.v);
           out.push(...tree.apply({ op, path, value: d.v }));
         } else if ('v' in d && typeof d.v !== 'object' && lastPath !== null) {
           // 形态2：简写增量（继承上个操作的 path/op）——不重复加 path（已在形态1加过）
@@ -218,6 +239,13 @@ function makeProcessor(onReady: (ids: { requestMessageId: number; responseMessag
           }
         }
       }
+    }
+    // 2026-09-11（diag/continue-thinking）：spike 期间累计 THINK/RESPONSE fragment 字符数——
+    // 用于探测 thinking 截断阈值（如「thinking > 80K → 触发 Continue」）。每帧累加成本 O(events)
+    // 可忽略；不与 tree.fragments 同步避免双源。
+    for (const e of out) {
+      if (e.kind === 'think_delta') stats.thinkingChars += e.content.length;
+      else if (e.kind === 'content_delta') stats.responseChars += e.content.length;
     }
     return out;
   };

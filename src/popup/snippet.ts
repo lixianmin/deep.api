@@ -9,6 +9,8 @@ export const FORENSIC_FIELDS = [
   'at', 'version', 'provider', 'model', 'ok', 'ms', 'error', 'finishReason',
   'cid', 'msgsLen', 'action', 'threadFound', 'mirrorLen', 'deletedOld', 'firstDiffIdx',
   'parentMessageId', 'sseBytes', 'ssePaths', 'requestFull',
+  // 2026-09-11（diag/continue-thinking）：spike 期间临时加——thinking 截断定位用。
+  'sseStatusValues', 'sseThinkingChars', 'sseResponseChars', 'sseRawTail', 'sseRawTailB64',
   'replySample', 'reasoningSample', 'replyB64', 'rawB64', 'sseRawB64',
 ] as const;
 

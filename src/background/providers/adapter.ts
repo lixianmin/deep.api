@@ -72,5 +72,10 @@ export type ProviderStreamEvent =
   // 2026-09-09（diag/pro-sse-paths）：SSE 流字节 + 路径集。仅一次、流末由 parser emit，Router
   // 接手后写入 log.sseBytes/ssePaths——判断 Pro 模型场景 B-1（只返 thinking）与 B-2（未识别 path）
   // 的唯一依据。rawSample：原始 SSE 文本前 600 字符（诊断 unknown 事件真实内容，v0.1.73）。
-  | { kind: 'stream_stats'; bytes: number; paths: string[]; rawSample?: string };
+  // 2026-09-11（diag/continue-thinking）：spike 期间临时诊断字段——定位 DeepSeek 网页 thinking
+  // 截断（→ 触发 Continue 按钮）触发点的 wire 信号：
+  //   statusValues: response/status 路径下观察到的全部 value（如 'WIP' / 'FINISHED' / 其它）
+  //   thinkingChars / responseChars: 截至流末累计的 THINK / RESPONSE fragment 字符数（设阈值用）
+  //   rawTail: 流末最后 600 字符原始 SSE（含 status 终值与可能的 finish 事件）
+  | { kind: 'stream_stats'; bytes: number; paths: string[]; rawSample?: string; statusValues?: string[]; thinkingChars?: number; responseChars?: number; rawTail?: string };
 export { ModelInfo };

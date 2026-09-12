@@ -44,6 +44,16 @@ export interface LogEntry {
   sseBytes?: number;
   ssePaths?: string[];
   sseRaw?: string;
+  // 2026-09-11（diag/continue-thinking）：spike 期间临时诊断字段——定位 DeepSeek 网页 thinking
+  // 截断触发点。sseStatusValues 是 response/status 路径下观察到的全部 value；sseThinkingChars /
+  // sseResponseChars 是截至流末 THINK/RESPONSE fragment 字符累计（设阈值用）；sseRawTail 是流末
+  // 最后 600 字符原始 SSE（含 status 终值与可能的 finish 事件）。设计冻结后会被 continue_required
+  // 事件 + 自动续接逻辑替代。
+  sseStatusValues?: string[];
+  sseThinkingChars?: number;
+  sseResponseChars?: number;
+  sseRawTail?: string;
+  sseRawTailB64?: string;                                       // sseRawTail 的 base64（粘贴链不掉字节）
   // 2026-09-10（feat/log-b64-export）：上面三个现场字符串的 base64（纯 ASCII）。
   // 动机：DSML 标记（｜DSML｜，U+FF5C）在「聊天/终端粘贴」链路上会被吃掉——用户贴回来的样本
   // 永远看不到它，导致无法判断现场字节形态。base64 只含 A-Za-z0-9+/=，可无损跨粘贴链；

@@ -38,6 +38,11 @@ interface RunState {
   sseBytes?: number;
   ssePaths?: string[];
   sseRaw?: string;
+  // 2026-09-11（diag/continue-thinking）：spike 期间临时诊断——定位 DeepSeek thinking 截断点。
+  sseStatusValues?: string[];
+  sseThinkingChars?: number;
+  sseResponseChars?: number;
+  sseRawTail?: string;
 }
 
 /** 2026-09-11（fix/review-r1）：会话字段在拿到队列锁后可能被「排队期间线程被推进」重决策改写，
@@ -161,6 +166,7 @@ export class Router {
         at: this.d.now(), provider: provider.id, model: modelId, ok: false, ms: this.d.now() - started, error: msg, version: this.d.version,
         finishReason: undefined, parentMessageId: null,
         replySample: undefined, reasoningSample: undefined, sseBytes: undefined, ssePaths: undefined, sseRaw: undefined,
+        sseStatusValues: undefined, sseThinkingChars: undefined, sseResponseChars: undefined, sseRawTail: undefined,
         replyB64: undefined, rawB64: undefined, sseRawB64: undefined,
         messagesFull: JSON.stringify(messages),
         mirrorFull: undefined,
@@ -240,7 +246,7 @@ export class Router {
       deletedOld: handle.deletedOld,
       webSessionId: handle.session.webSessionId,
     });
-    const done = (ok: boolean, ms: number, error?: string, extra?: { finishReason?: string; parentMessageId?: string | number | null; replySample?: string; rawSample?: string; reasoningSample?: string; sseBytes?: number; ssePaths?: string[]; sseRaw?: string }) =>
+    const done = (ok: boolean, ms: number, error?: string, extra?: { finishReason?: string; parentMessageId?: string | number | null; replySample?: string; rawSample?: string; reasoningSample?: string; sseBytes?: number; ssePaths?: string[]; sseRaw?: string; sseStatusValues?: string[]; sseThinkingChars?: number; sseResponseChars?: number; sseRawTail?: string }) =>
       this.d.log.push({
         at: this.d.now(), provider: provider.id, model: modelId, ok, ms, error, version: this.d.version, ...buildDiag(),
         finishReason: extra?.finishReason, parentMessageId: extra?.parentMessageId,
@@ -249,12 +255,18 @@ export class Router {
         sseBytes: extra?.sseBytes,
         ssePaths: extra?.ssePaths,
         sseRaw: extra?.sseRaw,
+        // 2026-09-11（diag/continue-thinking）：spike 期间诊断字段。
+        sseStatusValues: extra?.sseStatusValues,
+        sseThinkingChars: extra?.sseThinkingChars,
+        sseResponseChars: extra?.sseResponseChars,
+        sseRawTail: extra?.sseRawTail,
         warnings: imageWarnings.length ? [...imageWarnings] : undefined,
         // 2026-09-10（feat/log-b64-export）：同一份现场字符串再给 base64 版本——DSML 标记（｜DSML｜）
         // 会在聊天/终端粘贴链上被吃掉，只有 base64 能把字节原样送出来。
         replyB64: toB64(extra?.replySample),
         rawB64: toB64(extra?.rawSample),
         sseRawB64: toB64(extra?.sseRaw),
+        sseRawTailB64: toB64(extra?.sseRawTail),
         firstDiffIdx,
         requestFull: buildRequestFull(),
         messagesFull: JSON.stringify(messages),
@@ -274,7 +286,7 @@ export class Router {
       await this.finalize(provider, handle, messages, agg, ctx, toolCtx);
     } catch (e) {
       // 2026-09-10：失败路径也要带现场样本——parsing 失败（400）恰恰是最需要字节证据的场景。
-      done(false, this.d.now() - started, (e as Error).message, { replySample: agg.content.slice(0, 1200), rawSample, sseBytes: handle.run.sseBytes, ssePaths: handle.run.ssePaths, sseRaw: handle.run.sseRaw });
+      done(false, this.d.now() - started, (e as Error).message, { replySample: agg.content.slice(0, 1200), rawSample, sseBytes: handle.run.sseBytes, ssePaths: handle.run.ssePaths, sseRaw: handle.run.sseRaw, sseStatusValues: handle.run.sseStatusValues, sseThinkingChars: handle.run.sseThinkingChars, sseResponseChars: handle.run.sseResponseChars, sseRawTail: handle.run.sseRawTail });
       // 2026-09-11（fix/review-r1）：失败路径必须销毁线程（spec §4.3「线程标记失败并销毁」）。
       // 旧实现只 done(false) 就抛错，incremental 路径 markBusy 后永远没有 commit —— 该 auto
       // thread 永久 busy，decide 会跳过它，直到 TTL/LRU 才被清；mirror 也永远停在旧位置。
@@ -283,7 +295,7 @@ export class Router {
       if (!(e instanceof QueueTimeoutError)) await this.d.mapper.fail(provider.id, handle.convId, ctx.requestId);
       throw this.mapErr(e);
     }
-    done(true, this.d.now() - started, undefined, { finishReason: agg.finishReason ?? 'stop', parentMessageId: handle.run.parentMessageId, replySample: agg.content.slice(0, 1200), rawSample, reasoningSample: agg.reasoning.slice(0, 200), sseBytes: handle.run.sseBytes, ssePaths: handle.run.ssePaths, sseRaw: handle.run.sseRaw });
+    done(true, this.d.now() - started, undefined, { finishReason: agg.finishReason ?? 'stop', parentMessageId: handle.run.parentMessageId, replySample: agg.content.slice(0, 1200), rawSample, reasoningSample: agg.reasoning.slice(0, 200), sseBytes: handle.run.sseBytes, ssePaths: handle.run.ssePaths, sseRaw: handle.run.sseRaw, sseStatusValues: handle.run.sseStatusValues, sseThinkingChars: handle.run.sseThinkingChars, sseResponseChars: handle.run.sseResponseChars, sseRawTail: handle.run.sseRawTail });
     return toAggregate({ id: `chatcmpl-${ctx.requestId}`, model: modelId, created: Math.floor(started / 1000) }, agg);
   }
 
@@ -460,6 +472,11 @@ export class Router {
         run.sseBytes = ev.bytes;
         run.ssePaths = ev.paths;
         run.sseRaw = ev.rawSample;
+        // 2026-09-11（diag/continue-thinking）：spike 期间诊断字段。
+        run.sseStatusValues = ev.statusValues;
+        run.sseThinkingChars = ev.thinkingChars;
+        run.sseResponseChars = ev.responseChars;
+        run.sseRawTail = ev.rawTail;
         break;
     }
   }
@@ -519,7 +536,7 @@ export class Router {
     return parseToolCalls(buf, toolCtx.tools);
   }
 
-  private encodeStream(provider: ProviderAdapter, handle: RunHandle, ctx: ProviderContext, model: string, started: number, messages: Message[], toolCtx: ToolContext, done: (ok: boolean, ms: number, error?: string, extra?: { finishReason?: string; parentMessageId?: string | number | null; replySample?: string; rawSample?: string; reasoningSample?: string; sseBytes?: number; ssePaths?: string[]; sseRaw?: string }) => void): AsyncIterable<ChatCompletionChunk> & { cancel(): Promise<void> } {
+  private encodeStream(provider: ProviderAdapter, handle: RunHandle, ctx: ProviderContext, model: string, started: number, messages: Message[], toolCtx: ToolContext, done: (ok: boolean, ms: number, error?: string, extra?: { finishReason?: string; parentMessageId?: string | number | null; replySample?: string; rawSample?: string; reasoningSample?: string; sseBytes?: number; ssePaths?: string[]; sseRaw?: string; sseStatusValues?: string[]; sseThinkingChars?: number; sseResponseChars?: number; sseRawTail?: string }) => void): AsyncIterable<ChatCompletionChunk> & { cancel(): Promise<void> } {
     const cctx: StreamContext = { id: `chatcmpl-${ctx.requestId}`, model, created: Math.floor(started / 1000) };
     const agg: StreamAggregate = { content: '', reasoning: '', toolCalls: [], finishReason: null };
     // 2026-09-10（feat/log-b64-export）：归一化**前**的模型原文。归一化器的输出才是 agg.content，
@@ -564,6 +581,11 @@ export class Router {
             handle.run.sseBytes = ev.bytes;
             handle.run.ssePaths = ev.paths;
             handle.run.sseRaw = ev.rawSample;
+            // 2026-09-11（diag/continue-thinking）：spike 期间诊断字段。
+            handle.run.sseStatusValues = ev.statusValues;
+            handle.run.sseThinkingChars = ev.thinkingChars;
+            handle.run.sseResponseChars = ev.responseChars;
+            handle.run.sseRawTail = ev.rawTail;
           }
         }
         if (dsml) {
@@ -614,11 +636,11 @@ export class Router {
         // 2026-09-09（fix/model-switch-rebuild）：commit 时同步 modelType。
         self.d.mapper.commit(provider.id, handle.convId, mirrorMessages, handle.session.webSessionId, handle.run.parentMessageId ?? handle.session.parentMessageId, handle.run.model.modelType);
         completed = true;
-        done(true, self.d.now() - started, undefined, { finishReason: agg.finishReason ?? 'stop', parentMessageId: handle.run.parentMessageId, replySample: agg.content.slice(0, 1200), rawSample: rawContent.slice(0, B64_SAMPLE_CHARS), reasoningSample: agg.reasoning.slice(0, 200), sseBytes: handle.run.sseBytes, ssePaths: handle.run.ssePaths, sseRaw: handle.run.sseRaw });
+        done(true, self.d.now() - started, undefined, { finishReason: agg.finishReason ?? 'stop', parentMessageId: handle.run.parentMessageId, replySample: agg.content.slice(0, 1200), rawSample: rawContent.slice(0, B64_SAMPLE_CHARS), reasoningSample: agg.reasoning.slice(0, 200), sseBytes: handle.run.sseBytes, ssePaths: handle.run.ssePaths, sseRaw: handle.run.sseRaw, sseStatusValues: handle.run.sseStatusValues, sseThinkingChars: handle.run.sseThinkingChars, sseResponseChars: handle.run.sseResponseChars, sseRawTail: handle.run.sseRawTail });
       } catch (e) {
         // 2026-09-10（feat/log-b64-export）：失败路径（含工具解析失败 400）也要带现场样本——
         // 这正是最需要字节证据的场景（旧实现只记 error，拿不到模型原文）。
-        done(false, self.d.now() - started, (e as Error).message, { replySample: agg.content.slice(0, 1200), rawSample: rawContent.slice(0, B64_SAMPLE_CHARS), sseBytes: handle.run.sseBytes, ssePaths: handle.run.ssePaths, sseRaw: handle.run.sseRaw });
+        done(false, self.d.now() - started, (e as Error).message, { replySample: agg.content.slice(0, 1200), rawSample: rawContent.slice(0, B64_SAMPLE_CHARS), sseBytes: handle.run.sseBytes, ssePaths: handle.run.ssePaths, sseRaw: handle.run.sseRaw, sseStatusValues: handle.run.sseStatusValues, sseThinkingChars: handle.run.sseThinkingChars, sseResponseChars: handle.run.sseResponseChars, sseRawTail: handle.run.sseRawTail });
         queueTimeout = e instanceof QueueTimeoutError;
         throw mapErrStatic(e, self.d.registry);
       } finally {
