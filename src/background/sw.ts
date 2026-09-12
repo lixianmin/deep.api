@@ -12,6 +12,8 @@ import { createRegistry } from './providers/registry';
 import { registerCatalogListener } from './register-catalog-listener';
 // 2026-09-15（fix/auth-flip-flop）：auth.sync 采纳策略收拢到 auth-sync.ts（可单测）。
 import { createAuthSync } from './auth-sync';
+// 2026-09-16（feat/relay-auto-recovery）：扩展重载/更新后向开着的标签页重注入 bridge-relay.js。
+import { createRelayRecovery } from './relay-recovery';
 
 const STORAGE = chrome.storage.local;
 const DEEPSEEK_API_BASE = 'https://chat.deepseek.com/api/v0';
@@ -249,7 +251,15 @@ async function broadcastPanelState(): Promise<void> {
   } catch (e) { console.warn('[deep.api] broadcastPanelState failed', e); }
 }
 
-chrome.runtime.onInstalled.addListener(() => { void refreshAuthAndLog(); });
+// onInstalled（install/update/reload）时恢复各标签页的 relay：孤儿上下文永不自愈，
+// 唯有重注入（新 relay 接管）能让桥免刷新恢复；接管去重由 bridge-relay 的同世代守卫保证。
+const recoverRelays = createRelayRecovery({
+  queryTabs: (q) => chrome.tabs.query(q),
+  executeScript: (inj) => chrome.scripting.executeScript(inj),
+  log: (msg) => console.log(msg),
+});
+
+chrome.runtime.onInstalled.addListener(() => { void refreshAuthAndLog(); void recoverRelays(); });
 chrome.runtime.onStartup.addListener(() => { void refreshAuthAndLog(); });
 
 // 2026-09-10（fix/sw-vision-error）：任何未捕获的 promise rejection（port.onMessage async listener

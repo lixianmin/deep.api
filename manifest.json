@@ -10,7 +10,8 @@
   ],
   "host_permissions": [
     "https://chat.deepseek.com/*",
-    "https://fe-static.deepseek.com/*"
+    "https://fe-static.deepseek.com/*",
+    "<all_urls>"
   ],
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"

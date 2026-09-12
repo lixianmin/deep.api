@@ -29,6 +29,9 @@ describe('bridge-relay 重连与副作用清理（review-r1 A3）', () => {
   beforeEach(() => {
     vi.resetModules();
     vi.useFakeTimers();
+    // 2026-09-16（feat/relay-auto-recovery）：jsdom window 跨测试持久，上一用例登记的
+    // __deepApiRelay 会触发新的同世代让位守卫，必须逐用例清掉。
+    delete (window as { __deepApiRelay?: unknown }).__deepApiRelay;
   });
   afterEach(() => {
     vi.useRealTimers();
@@ -139,5 +142,63 @@ describe('bridge-relay 重连与副作用清理（review-r1 A3）', () => {
     const postMessage = vi.spyOn(window, 'postMessage').mockImplementation(() => undefined);
     ports[0]!.state.forward?.({ __deepApi: { id: 1, kind: 'done' } });
     expect(postMessage).toHaveBeenCalledWith({ __deepApi: { id: 1, kind: 'done' } }, '*');
+  });
+});
+
+describe('bridge-relay 同世代唯一性守卫（relay-auto-recovery）', () => {
+  const relayWindow = window as { __deepApiRelay?: { isAlive(): boolean } };
+
+  beforeEach(() => {
+    vi.resetModules();
+    delete relayWindow.__deepApiRelay;
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('无在位注册表（首次注入）→ 正常连接，并登记 isAlive（活上下文返回 true）', async () => {
+    const connect = vi.fn(() => makePort().port);
+    vi.stubGlobal('chrome', { runtime: { connect, id: 'test-ext-id' } });
+    await import('../../src/content/bridge-relay');
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(relayWindow.__deepApiRelay?.isAlive()).toBe(true);
+  });
+
+  it('在位 relay 活着 → 让位：不 connect、不装 listener、不覆盖注册表', async () => {
+    const incumbent = { isAlive: () => true };
+    relayWindow.__deepApiRelay = incumbent;
+    const connect = vi.fn(() => makePort().port);
+    const addListener = vi.spyOn(window, 'addEventListener');
+    vi.stubGlobal('chrome', { runtime: { connect, id: 'test-ext-id' } });
+    await import('../../src/content/bridge-relay');
+    expect(connect).not.toHaveBeenCalled();
+    expect(addListener.mock.calls.filter((c) => c[0] === 'message')).toHaveLength(0);
+    expect(relayWindow.__deepApiRelay).toBe(incumbent);   // 注册表保持是在位者的
+  });
+
+  it('在位 relay 是孤儿（isAlive=false，chrome.runtime.id 已销毁）→ 接管：connect 并替换注册表', async () => {
+    const incumbent = { isAlive: () => false };
+    relayWindow.__deepApiRelay = incumbent;
+    const connect = vi.fn(() => makePort().port);
+    vi.stubGlobal('chrome', { runtime: { connect, id: 'test-ext-id' } });
+    await import('../../src/content/bridge-relay');
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(relayWindow.__deepApiRelay).not.toBe(incumbent);
+  });
+
+  it('在位注册表畸形（isAlive 抛错）→ 按无在位处理，正常接管', async () => {
+    relayWindow.__deepApiRelay = { isAlive: () => { throw new Error('corrupted'); } };
+    const connect = vi.fn(() => makePort().port);
+    vi.stubGlobal('chrome', { runtime: { connect, id: 'test-ext-id' } });
+    await import('../../src/content/bridge-relay');
+    expect(connect).toHaveBeenCalledTimes(1);
+  });
+
+  it('同世代二次注入（同 window 重复 import）→ 第二次让位，connect 只调一次', async () => {
+    const connect = vi.fn(() => makePort().port);
+    vi.stubGlobal('chrome', { runtime: { connect, id: 'test-ext-id' } });
+    await import('../../src/content/bridge-relay');
+    await import('../../src/content/bridge-relay');   // vi.resetModules 后同模块再跑一遍 IIFE
+    expect(connect).toHaveBeenCalledTimes(1);
   });
 });

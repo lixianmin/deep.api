@@ -39,8 +39,23 @@ export function createRelay(target: Window, port: RelayPort): () => void {
 }
 
 // 内容脚本入口：连 MV3 SW；SW 重载/失效时自动重连
+// 2026-09-16（feat/relay-auto-recovery）：同世代唯一性守卫。扩展重载/更新后 SW 会向所有开着的
+// http/https 标签页重注入本脚本（relay-recovery.ts）；同世代隔离 world 共享 window，
+// 在位 relay 活着（isAlive=true）时新注入直接让位，避免双 relay 把每个页面请求转发两遍。
+// 孤儿（上下文已销毁，chrome.runtime.id 缺失）isAlive 必为 false → 新 relay 无缝接管，
+// 桥免刷新自动恢复；旧孤儿的 window listener 仍在但转发进死 port（被吞），无害。
+declare global { interface Window { __deepApiRelay?: { isAlive(): boolean } } }
 (function startRelay() {
   if (typeof chrome === 'undefined' || !chrome.runtime?.connect) return;
+  let incumbentAlive = false;
+  try { incumbentAlive = window.__deepApiRelay?.isAlive() === true; } catch { /* 注册表畸形：按无在位处理 */ }
+  if (incumbentAlive) {
+    console.log('[deep.api bridge-relay] live relay already owns this page, skip');
+    return;
+  }
+  window.__deepApiRelay = {
+    isAlive: () => { try { return !!chrome.runtime?.id; } catch { return false; } },
+  };
   const RELAY_PORT_NAME = 'deepapi';
   const BASE_RETRY_MS = 1000;
   const MAX_RETRY_MS = 30_000;
