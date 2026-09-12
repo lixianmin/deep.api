@@ -73,6 +73,10 @@ export interface LogEntry {
   // 2026-09-11（fix/vision-poll-timeout）：非致命警告（如「图片轮询超时未确认就绪，已继续发送」）。
   // 继续发 completion 是刻意设计（对齐参考实现 llmweb2api），但操作员必须在日志里看到这个事实。
   warnings?: string[];
+  // 2026-09-15（feat/log-copy-slim）：请求侧现场——最后一条 user 消息前 200 字。
+  // 动机：user 消息此前只在 messagesFull 全量里（popup UI 不显示、取证白名单不带），
+  // 排查时「模型到底收到了什么问题」看不见。截断 200 字兼顾可见性与体积。
+  lastUserSample?: string;
 }
 
 /**

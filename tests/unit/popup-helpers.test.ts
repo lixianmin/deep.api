@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path';
 import { formatAuthState } from '../../src/popup/snippet';
 import { pickForensic } from '../../src/popup/snippet';
 import { pickForensicTail } from '../../src/popup/snippet';
+import { slimFullCopy } from '../../src/popup/snippet';
 
 describe('formatAuthState', () => {
   it('logged_in → ok', () => {
@@ -40,6 +41,11 @@ describe('pickForensic（feat/log-b64-export）', () => {
     expect(p.messagesFull).toBeUndefined();
     expect(p.mirrorFull).toBeUndefined();
     expect(p.at).toBe(1);
+  });
+
+  it('带出 lastUserSample（最后一条 user 消息样本）', () => {
+    const p = pickForensic({ at: 1, lastUserSample: '帮我改成 async' });
+    expect(p.lastUserSample).toBe('帮我改成 async');
   });
 
   it('未定义输入返回空对象（不抛）', () => {
@@ -80,6 +86,44 @@ describe('pickForensicTail（fix/forensic-tail）', () => {
   });
 });
 
+// 2026-09-15（feat/log-copy-slim）：「复制(全部)」按钮的去重逻辑（复制层，不动 LogEntry 写入，
+// debug 页每条完整 JSON 不受影响）。跨条目历史重复是最大重复源：第 N 轮 messages = 第 N-1 轮
+// messages + 新消息，200 条里同一会话历史重复 O(N²)；mirrorFull ≈ 本轮 messages（commit 后
+// mirror = messages + assistant），同条内双份大字段并存。
+describe('slimFullCopy（feat/log-copy-slim）', () => {
+  const mk = (at: number, extra: Record<string, unknown> = {}): Record<string, unknown> => ({ at, ...extra });
+
+  it('mirrorFull 全部排除（体积杀手，可由 messages + assistant 推导）', () => {
+    const out = slimFullCopy([mk(1, { cid: 'a', mirrorFull: 'M1' }), mk(2, { cid: 'a', mirrorFull: 'M2' })]);
+    expect(out.map((e) => e.mirrorFull)).toEqual([undefined, undefined]);
+  });
+
+  it('messagesFull 仅每条 cid 最后一条保留（跨条目历史重复的去重）', () => {
+    const out = slimFullCopy([
+      mk(1, { cid: 'a', messagesFull: 'A1' }),
+      mk(2, { cid: 'a', messagesFull: 'A2' }),
+      mk(3, { cid: 'b', messagesFull: 'B1' }),
+      mk(4, { cid: 'a', messagesFull: 'A3' }),
+    ]);
+    expect(out.map((e) => e.messagesFull)).toEqual([undefined, undefined, 'B1', 'A3']);
+  });
+
+  it('无 cid 的条目各算一组（错误路径无 cid，现场不丢）', () => {
+    const out = slimFullCopy([mk(1, { messagesFull: 'X' }), mk(2, { messagesFull: 'Y' })]);
+    expect(out.map((e) => e.messagesFull)).toEqual(['X', 'Y']);
+  });
+
+  it('空/未定义输入返回空数组（不抛）', () => {
+    expect(slimFullCopy([])).toEqual([]);
+    expect(slimFullCopy(undefined)).toEqual([]);
+  });
+
+  it('其余字段原样保留（含取证字段）', () => {
+    const out = slimFullCopy([mk(1, { cid: 'a', ok: false, error: 'x', rawB64: 'QUJD', requestFull: '{}' })]);
+    expect(out[0]).toMatchObject({ ok: false, error: 'x', rawB64: 'QUJD', requestFull: '{}' });
+  });
+});
+
 // 2026-09-10（feat/log-b64-export）：popup.ts 在模块顶层就 `getElementById(...)!.addEventListener`，
 // ID 缺一个 = 打开 popup 直接 TypeError（整个弹窗不渲染）。静态比对两边 ID，防接线错位。
 // jsdom 跑 popup.ts 需要 chrome/fetch/setInterval 一整套脚手架，投入产出比低——这条守的是真正会坏的环节。
@@ -97,5 +141,10 @@ describe('popup DOM 接线一致性（feat/log-b64-export）', () => {
   it('「复制取证」按钮两边已接线', () => {
     expect(src).toContain("getElementById('btn-copy-forensic')");
     expect(html).toContain('id="btn-copy-forensic"');
+  });
+
+  it('「复制 (尾5条)」/「复制(全部)」双按钮标签落位（feat/log-copy-slim）', () => {
+    expect(html).toContain('复制 (尾5条)');
+    expect(html).toContain('复制(全部)');
   });
 });

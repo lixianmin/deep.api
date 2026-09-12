@@ -69,11 +69,27 @@ const NO_PROGRESS_MS = 600_000;          // spec §4.5 兜底断流
 // （定位不了形态，见 memory 的 200→1200 教训），故取证字段放宽到 4000（base64 约 5.3KB/条，
 // 只落在带工具标记的日志条目上）。
 const B64_SAMPLE_CHARS = 4000;
+// 2026-09-15（feat/log-copy-slim）：lastUserSample 截断上限。日志现场只需看出「问了什么」，
+// 200 字足够定位问题主题，又不致把大 prompt 全量搬进每条日志（全量已有 messagesFull）。
+const LAST_USER_SAMPLE_CHARS = 200;
 const REPAIR_INSTRUCTION = '你的上一条回复包含无法解析的工具调用 JSON。请重新输出，且只输出修复后的 JSON（不要解释、不要代码块）。';
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
 function isContentEvent(e: ProviderStreamEvent): boolean {
   return e.kind === 'content_delta' || e.kind === 'think_delta';   // 重试只发生在任何内容增量之前（spec §6.4）
+}
+
+/** 2026-09-15（feat/log-copy-slim）：最后一条 user 消息的前 200 字（日志现场字段 lastUserSample）。
+ *  array content（vision）先渲染成 string（image_url 块变 '[image]'，不泄 data URL）；
+ *  无 user 消息或 content 为 null/空时返回 undefined（不写空字段）。 */
+export function lastUserSampleOf(messages: Message[]): string | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!;
+    if (m.role !== 'user') continue;
+    const text = (typeof m.content === 'string' ? m.content : renderMessageContent(m)).slice(0, LAST_USER_SAMPLE_CHARS);
+    return text || undefined;
+  }
+  return undefined;
 }
 
 export class Router {
@@ -174,6 +190,7 @@ export class Router {
         replyB64: undefined, rawB64: undefined, sseRawB64: undefined,
         messagesFull: JSON.stringify(messages),
         mirrorFull: undefined,
+        lastUserSample: lastUserSampleOf(messages),
       });
       if (e instanceof BridgeError) throw e;
       // 2026-09-11（fix/vision-poll-timeout）：错误分类。可重试类（限流/登过期/WAF/网络）走统一映射；
@@ -280,6 +297,7 @@ export class Router {
           ? JSON.stringify(preDecide.action === 'incremental' ? preDecide.thread.mirror
             : preDecide.action === 'rebuild' && preDecide.existing ? preDecide.existing.mirror : [])
           : undefined,
+        lastUserSample: lastUserSampleOf(messages),
       });
     if (p.stream === true) return this.encodeStream(provider, handle, ctx, modelId, started, messages, toolCtx, done);
     const agg: StreamAggregate = { content: '', reasoning: '', toolCalls: [], finishReason: null };

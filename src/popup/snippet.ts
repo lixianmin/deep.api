@@ -9,6 +9,8 @@ export const FORENSIC_FIELDS = [
   'at', 'version', 'provider', 'model', 'ok', 'ms', 'error', 'finishReason',
   'cid', 'msgsLen', 'action', 'threadFound', 'mirrorLen', 'deletedOld', 'firstDiffIdx',
   'parentMessageId', 'sseBytes', 'ssePaths', 'requestFull',
+  // 2026-09-15（feat/log-copy-slim）：请求侧现场——最后一条 user 消息前 200 字。
+  'lastUserSample',
   // 2026-09-11（diag/continue-thinking）：spike 期间临时加——thinking 截断定位用。
   'sseStatusValues', 'sseThinkingChars', 'sseResponseChars', 'sseRawTail', 'sseRawTailB64',
   'sseAutoResume', 'sseHasPendingFragment',
@@ -39,6 +41,26 @@ export function pickForensicTail(entries: Record<string, unknown>[] | undefined,
   return entries.slice(-n).map(pickForensic);
 }
 
+/**
+ * 2026-09-15（feat/log-copy-slim）：「复制(全部)」按钮的去重（复制层，不改 LogEntry 写入，
+ * debug 页每条完整 JSON 不受影响）。两个重复源：
+ * ① mirrorFull ≈ 本轮 messages（commit 后 mirror = messages + assistant）——同条内双份大字段，
+ *   可推导，全排除；
+ * ② messagesFull 每条带全量历史——第 N 轮 = 第 N-1 轮 + 新消息，跨条目重复 O(N²)。
+ *   仅每条 cid 的最后一条保留（该会话最新全量）；无 cid 条目各算一组（错误路径现场不丢）。
+ */
+export function slimFullCopy(entries: Record<string, unknown>[] | undefined): Record<string, unknown>[] {
+  if (!entries?.length) return [];
+  const lastFullIdx = new Map<string, number>();   // key: cid（无 cid 用条目自身下标）→ 该组保留 messagesFull 的条目下标
+  entries.forEach((e, i) => lastFullIdx.set(String(e.cid ?? `#${i}`), i));
+  return entries.map((e, i) => {
+    const out = { ...e };
+    delete out.mirrorFull;
+    if (lastFullIdx.get(String(out.cid ?? `#${i}`)) !== i) delete out.messagesFull;
+    return out;
+  });
+}
+
 export function formatAuthState(s: AuthStatus): { label: string; cls: 'ok' | 'warn' | 'bad' } {
   if (s.state === 'logged_in') return { label: '已登录', cls: 'ok' };
   if (s.state === 'expired') return { label: `登录失效：${s.message ?? ''}`, cls: 'warn' };
@@ -63,6 +85,9 @@ export interface PopupLogEntry {
   parentMessageId?: string | number | null;
   finishReason?: string;
   firstDiffIdx?: number;
+  // 2026-09-15（feat/log-copy-slim）：请求参数现场行（popup 日志列表 UI 显示）。
+  requestFull?: string;
+  lastUserSample?: string;
 }
 
 /** HTML 转义。
@@ -100,6 +125,12 @@ export function renderLogListHtml(entries: PopupLogEntry[]): string {
     if (e.finishReason) detailParts.push(`finish=${escapeHtml(e.finishReason)}`);
     if (e.error) detailParts.push(`<span class="err">err=${escapeHtml(e.error.slice(0, 80))}</span>`);
     if (e.firstDiffIdx !== undefined) detailParts.push(`<span class="err">diff@${e.firstDiffIdx}</span>`);
-    return `<li><span class="${okCls}">${okMark}</span> ${new Date(e.at).toLocaleTimeString()} ${escapeHtml(e.provider)}/${escapeHtml(e.model)} ${e.ms}ms ${actionBadge} <span class="small">${detailParts.join(' ')}</span></li>`;
+    // 2026-09-15（feat/log-copy-slim）：请求参数现场（requestFull 早已记录 reasoning/search 等，
+    // lastUserSample 新增）——此前只进复制 JSON，UI 从未显示。值可能含页面/模型可控文本，必须转义。
+    const sampleLines = [
+      e.requestFull !== undefined ? `req=${escapeHtml(e.requestFull)}` : '',
+      e.lastUserSample !== undefined ? `user=${escapeHtml(e.lastUserSample)}` : '',
+    ].filter(Boolean).map((s) => `<div class="small">${s}</div>`).join('');
+    return `<li><span class="${okCls}">${okMark}</span> ${new Date(e.at).toLocaleTimeString()} ${escapeHtml(e.provider)}/${escapeHtml(e.model)} ${e.ms}ms ${actionBadge} <span class="small">${detailParts.join(' ')}</span>${sampleLines}</li>`;
   }).join('');
 }

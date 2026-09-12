@@ -64,6 +64,22 @@ describe('popup review-r1: 渲染转义（B1）', () => {
     expect(html).toContain('&lt;img');
   });
 
+  // 2026-09-15（feat/log-copy-slim）：请求参数现场（requestFull 早已记录 reasoning/search 等，
+  // lastUserSample 新增）——之前只进复制 JSON，UI 从未显示。
+  it('renderLogListHtml：requestFull / lastUserSample 渲染为 req=/user= 行且转义', () => {
+    const html = renderLogListHtml([logEntry({ requestFull: '{"search":true}', lastUserSample: '<img src=u>' }) as never]);
+    expect(html).toContain('req=');
+    expect(html).toContain('user=');
+    expect(html).toContain('&lt;img src=u&gt;');
+    expect(html).not.toContain('<img');
+  });
+
+  it('renderLogListHtml：无 requestFull/lastUserSample 时不渲染 req=/user= 行', () => {
+    const html = renderLogListHtml([logEntry() as never]);
+    expect(html).not.toContain('req=');
+    expect(html).not.toContain('user=');
+  });
+
   it('renderModelListHtml：description 里的 HTML 被转义', () => {
     const html = renderModelListHtml([{ id: 'm1', description: '<img src=d>' }]);
     expect(html).not.toContain('<img');
@@ -147,12 +163,13 @@ describe('popup review-r1: 初始登录态与按钮文案（B4/B5）', () => {
     expect(auth.className).not.toContain('bad');
   });
 
-  it('复制取证按钮 title 标注「最近 5 条」', () => {
+  it('复制 (尾5条) 按钮 title 标注「最近 5 条」', () => {
     const btn = /id="btn-copy-forensic"[^>]*title="([^"]+)"/.exec(popupHtml);
     expect(btn?.[1]).toContain('5 条');
   });
 
-  it('1.5s 内连点两次复制取证，按钮文案最终恢复为「复制取证」', async () => {
+  // 2026-09-15（feat/log-copy-slim）：按钮改名后同步回归——连点防闪现文案被当成原文的逻辑不变。
+  it('1.5s 内连点两次复制 (尾5条)，按钮文案最终恢复为「复制 (尾5条)」', async () => {
     await boot();
     (globalThis as unknown as { navigator: { clipboard: unknown } }).navigator.clipboard = { writeText: async () => undefined };
     emit({ providers: { deepseek: { poolSize: 2, ttlMinutes: 30, models: [] } }, log: [logEntry()] });
@@ -161,7 +178,7 @@ describe('popup review-r1: 初始登录态与按钮文案（B4/B5）', () => {
     await new Promise(r => setTimeout(r, 30));
     btn.click();                       // 第一次的闪现文案还没恢复就再点
     await new Promise(r => setTimeout(r, 1600));
-    expect(btn.textContent).toBe('复制取证');
+    expect(btn.textContent).toBe('复制 (尾5条)');
   });
 });
 

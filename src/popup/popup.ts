@@ -1,5 +1,5 @@
 // popup.ts - 通过 port 与 SW 通信；只在 MV3 popup 内执行（chrome.* 在此文件中）
-import { formatAuthState, pickForensicTail, renderLogListHtml, renderModelListHtml, type PopupLogEntry } from './snippet';
+import { formatAuthState, pickForensicTail, renderLogListHtml, renderModelListHtml, slimFullCopy, type PopupLogEntry } from './snippet';
 
 type LogEntry = PopupLogEntry;
 type PanelState = {
@@ -141,12 +141,16 @@ document.getElementById('auto-delete')!.addEventListener('change', (e) => {
 
 // 2026-09-11（fix/review-r1）：按钮文案用常量，不从「可能已被上次闪现改写」的 textContent 读回
 // （1.5s 内连点两次会把闪现文案当成原文恢复，按钮永久显示「已复制 N 条」）。
-const COPY_LOG_LABEL = '复制';
-const COPY_FORENSIC_LABEL = '复制取证';
+// 2026-09-15（feat/log-copy-slim）：双按钮更名——「复制 (尾5条)」（原「复制取证」，逻辑不变）
+// +「复制(全部)」（原「复制」，改为全量去重，见 slimFullCopy）。
+const COPY_LOG_LABEL = '复制(全部)';
+const COPY_FORENSIC_LABEL = '复制 (尾5条)';
 
-// 2026-09-09（feat/diagnostic-logging）：复制最近 200 条日志为 JSON，贴给 AI / 自己排查
+// 2026-09-15（feat/log-copy-slim）：「复制(全部)」取 popup 全部日志（ring ≤500 条）并去重：
+// mirrorFull 全排除、messagesFull 仅每 cid 最后一条（重复历史是旧「复制」体积 O(N²) 的主因）。
+// 不再 slice(-200)：去重后体积可控，ring 里有多少给多少。
 document.getElementById('btn-copy-log')!.addEventListener('click', () => {
-  const entries = (state.log ?? []).slice(-200);
+  const entries = slimFullCopy((state.log ?? []) as unknown as Record<string, unknown>[]);
   const text = JSON.stringify(entries, null, 2);
   navigator.clipboard.writeText(text).then(() => {
     const btn = document.getElementById('btn-copy-log') as HTMLButtonElement;
@@ -157,10 +161,10 @@ document.getElementById('btn-copy-log')!.addEventListener('click', () => {
   });
 });
 
-// 2026-09-10（feat/log-b64-export + fix/forensic-tail）：复制**最近 5 条**的取证字段。
+// 2026-09-10（feat/log-b64-export + fix/forensic-tail）：「复制 (尾5条)」——最近 5 条的取证字段。
 // 不用「最新一条」：Spice 一轮会发多次请求（聊天调用之后还有「生成会话标题」辅助调用），
 // 最新一条往往不是出问题的那一条（v0.1.100 实测取到标题调用，里面根本没有 DSML）。
-// 也不用「复制」按钮的 200 条完整日志（含 messagesFull / mirrorFull，可达 MB，贴给 AI 不现实）。
+// 也不用「复制(全部)」的全量（含 messagesFull 历史，去重前可达 MB，贴给 AI 不现实）。
 document.getElementById('btn-copy-forensic')!.addEventListener('click', () => {
   const btn = document.getElementById('btn-copy-forensic') as HTMLButtonElement;
   const flash = (msg: string): void => {
