@@ -167,6 +167,9 @@ export interface DsmlStreamNormalizer {
   flush(): string;
   /** 归一化失败的工具标记块原文（**绝不透传**给使用方；router 拿它作 repair 输入）。 */
   unparsed: string[];
+  /** 2026-09-12（fix/empty-tool-block）：配对且块体为空的空调用块原文（已丢弃，不透传；
+   *  与 unparsed 分流：DSML 形态空块仍走 unparsed → repair，只有无命名空间的退化形态直接丢）。 */
+  dropped: string[];
 }
 
 /**
@@ -181,6 +184,7 @@ export interface DsmlStreamNormalizer {
  */
 export function createDsmlStreamNormalizer(tools: ToolDef[] = []): DsmlStreamNormalizer {
   const unparsed: string[] = [];
+  const dropped: string[] = [];
   let pending = '';
   let open: { startText: string; endRe: RegExp } | null = null;
   let blockBody = '';
@@ -215,8 +219,16 @@ export function createDsmlStreamNormalizer(tools: ToolDef[] = []): DsmlStreamNor
       blockBody += pending.slice(0, em.index);
       pending = pending.slice(em.index + em[0].length);
       const raw = open.startText + blockBody + em[0];
-      const normalized = normalizeBlock(blockBody, tools);
-      out += normalized ?? discardOrPassThrough(raw);
+      // 2026-09-12（fix/empty-tool-block）：配对且块体为空的空调用块 = 退化调用，丢弃（零信息损失）。
+      // 散文豁免判据（无 invoke/parameter）对它同样成立，但配对本身证明不是散文引用——
+      // 透传会污染下游 LLM 上下文（spice trace #260 空调用 + 幻觉正文）。
+      // DSML 形态空块仍走 unparsed → repair（行为不变）；未配对的散文提及也照旧透传。
+      if (!blockBody.trim() && !isToolMarkup(raw)) {
+        dropped.push(raw);
+      } else {
+        const normalized = normalizeBlock(blockBody, tools);
+        out += normalized ?? discardOrPassThrough(raw);
+      }
       open = null;
       blockBody = '';
     }
@@ -232,7 +244,7 @@ export function createDsmlStreamNormalizer(tools: ToolDef[] = []): DsmlStreamNor
     return normalizeBlock(inner, tools) ?? discardOrPassThrough(startText + inner);
   }
 
-  return { feed, flush, unparsed };
+  return { feed, flush, unparsed, dropped };
 }
 
 /**

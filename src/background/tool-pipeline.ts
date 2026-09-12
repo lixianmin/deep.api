@@ -15,6 +15,11 @@ export function buildToolPrompt(tools: ToolDef[], toolChoice: ToolChoice): ToolC
   const defsBlock = `### 工具定义\n${defs}`;
   const instruction = toolChoice === 'auto'
     ? '当需要工具时调用；可以零次或多次调用；最后给出一段自然语言总结。'
+      // 2026-09-12（fix/no-announcement-without-tools）：宣言体纯文本收尾是合法形态（auto 可不调用），
+      // 但下游 agent 会把「Now I'll rewrite…」这种宣言当最终答复而停摆（spice trace #260/#275）。
+      // 协议层减噪：宣言必须同消息携带块；无块纯文本收敛到总结/提问两种合法形态。
+      + '不允许只输出行动计划或宣言（如「我现在去改代码」「接下来我会更新电路」）而不携带 <tool_calls> 块'
+      + '——要行动就在同一条消息里给出 <tool_calls>；不携带工具块的纯文本只允许两种：最终总结，或向用户提问。'
     : toolChoice === 'required'
       ? '必须调用至少一个工具；不允许只给出纯文本回答（仅工具调用、不附总结也可）。'
       : typeof toolChoice === 'object'

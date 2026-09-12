@@ -16,6 +16,16 @@ describe('buildToolPrompt', () => {
     expect(r.promptSuffix).toContain('必须调用至少一个工具');
     expect(r.promptSuffix).toContain('f');  // 工具定义仍然透传
   });
+
+  // 2026-09-12（fix/no-announcement-without-tools，spec docs/superpowers/specs/2026-09-12-no-announcement-without-tools-design.md）：
+  // spice trace #260/#275 现场——模型输出「Now I'll rewrite…」宣言体纯文本（零工具调用）干净收尾，
+  // 下游 agent 停摆。协议层减噪：宣言必须同消息携带块；无块纯文本只允许总结/提问。
+  it('auto 分支禁止无工具调用的行动宣言（fix/no-announcement-without-tools）', () => {
+    const r = buildToolPrompt(tools, 'auto');
+    expect(r.promptSuffix).toContain('宣言');
+    expect(r.promptSuffix).toContain('<tool_calls>');
+    expect(r.promptSuffix).toContain('最终总结');
+  });
 });
 
 describe('parseToolCalls', () => {

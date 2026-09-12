@@ -514,3 +514,48 @@ describe('现场字节形态：标准开标签 + DSML 闭标签收尾（fix/dsml
     expect(hasDsmlToolTags('调用结束后用 </tool_calls> 收尾')).toBe(false);
   });
 });
+
+// 2026-09-12（fix/empty-tool-block）：spice trace #260 现场——模型输出 <tool_calls></tool_calls>
+// 空调用块 + 幻觉正文。旧逻辑：块体无 invoke/parameter 标记 → 判「散文提及」原样透传 →
+// 空标签污染 spice 端 LLM 上下文（few-shot 教模型模仿残缺形态）。配对且块体为空 = 退化调用
+// （零信息损失），唯一正确处理是丢弃；散文提及（未配对）豁免不变。
+describe('空工具调用块（fix/empty-tool-block）', () => {
+  it('配对空块 <tool_calls></tool_calls> → 丢弃，不透传；记录进 dropped', () => {
+    const n = createDsmlStreamNormalizer();
+    const out = n.feed('我来帮你查询天气。让我搜索一下最新信息。<tool_calls></tool_calls>') + n.flush();
+    expect(out).toBe('我来帮你查询天气。让我搜索一下最新信息。');
+    expect(n.dropped).toHaveLength(1);
+    expect(n.dropped[0]).toContain('<tool_calls>');
+  });
+
+  it('空块被 delta 切断也不泄漏', () => {
+    const n = createDsmlStreamNormalizer();
+    const out = n.feed('前文。') + n.feed('<tool_call') + n.feed('s></tool_calls>') + n.flush();
+    expect(out).toBe('前文。');
+    expect(n.dropped).toHaveLength(1);
+  });
+
+  it('散文提及（未配对）仍原样透传（豁免不回归）', () => {
+    const n = createDsmlStreamNormalizer();
+    const out = n.feed('调用结束后用 <tool_calls> 标签收尾。') + n.flush();
+    expect(out).toContain('<tool_calls>');
+    expect(n.dropped).toHaveLength(0);
+  });
+
+  it('DSML 空块仍走 unparsed → repair（行为不变）', () => {
+    const n = createDsmlStreamNormalizer();
+    const out = n.feed('<｜DSML｜tool_calls><｜｜DSML｜｜>') + n.flush();
+    expect(out).toBe('');
+    expect(n.dropped).toHaveLength(0);
+    expect(n.unparsed).toHaveLength(1);
+  });
+
+  it('空块与真实调用块并存 → 空块丢弃，真实块照常归一化', () => {
+    const n = createDsmlStreamNormalizer();
+    const out = n.feed('<tool_calls></tool_calls>')
+      + n.feed('<tool_calls>\n{"id":"c1","type":"function","function":{"name":"Read","arguments":"{\\"path\\":\\"a\\"}"}}\n</tool_calls>')
+      + n.flush();
+    expect(n.dropped).toHaveLength(1);
+    expect(out).toContain('"name":"Read"');
+  });
+});
