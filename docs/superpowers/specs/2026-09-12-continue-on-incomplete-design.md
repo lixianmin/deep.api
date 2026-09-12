@@ -70,7 +70,7 @@ continueStream?(ctx: ProviderContext, session: ProviderSession, messageId: numbe
 
 - **计数器**：`run.emittedThinkChars` / `run.emittedContentChars` 按**当前 response message** 累计已发出的**原始**字符数（`think_delta`/`content_delta` 的 `content.length`，先于消费侧 DSML 归一化）。由**续接 wrapper（§3.4，单点）**在事件流经时统一累加——两条消费路径零改动，口径天然一致；
   - **per-message 而非 per-request**：wrapper **自持 `currentMessageId`**（事件流经时就地记录 `ev.id` 后比较，**不依赖消费侧写 `run.parentMessageId` 的时序**），新 id ≠ 自持值时**清零**计数。fallback 降级换 message 后，下一次续接的 skip 必须只含新 message 的已发字符，否则会把新消息的快照内容整段吞掉（缺口）；
-  - **为何必须用原始数**：快照重发的是服务端原始文本流；断流时 DSML 归一化器可能扣着一段未 emit 的尾部缓冲（如收到 `"abc<"`，emit 了 `"abc"`、缓冲了 `"<"`）。按原始数（4）裁剪后，续接流补齐的恰是缓冲所缺的后续字符（`"tool_calls>…"`），归一化器缓冲（`"<"`）+ 新输入 = `"<tool_calls>…"`，与单条连续流完全等价；若按可见数（3）裁剪，快照会重发 `"<tool_calls>…"`，与缓冲拼成 `"<<tool_calls>…"`，归一化输出错乱。**本口径为最终裁决**——`.research/spike-design.md` 末尾旧表述（「扣住未发的字符不算已发」）作废；
+  - **为何必须用原始数**：快照重发的是服务端原始文本流；断流时 DSML 归一化器可能扣着一段未 emit 的尾部缓冲（如收到 `"abc<"`，emit 了 `"abc"`、缓冲了 `"<"`）。按原始数（4）裁剪后，续接流补齐的恰是缓冲所缺的后续字符（`"tool_calls>…"`），归一化器缓冲（`"<"`）+ 新输入 = `"<tool_calls>…"`，与单条连续流完全等价；若按可见数（3）裁剪，快照会重发 `"<tool_calls>…"`，与缓冲拼成 `"<<tool_calls>…"`，归一化输出错乱。**本口径为最终裁决**（早期调研草稿中的相反口径已作废）；
 - parser 的 `makeProcessor` 接收 skip（`{thinkingChars, responseChars, expectMessageId?}`），**只裁剪来自快照（`applySnapshot`）事件的内容**：
   - 快照内容 ≤ skip → 整段吞掉，不 emit；快照内容 > skip → 裁掉 skip 长度，余下 emit（覆盖「服务端多生成了但未送达」的边界，天然补齐）；skip 归零后不再裁剪；
   - **裁剪只作用于事件内容，不参与状态判定**：`if (snap.length > 0)` 必须用**裁剪前**的原始数组长度判断——「快照恰被全部吞掉」是本设计的**正常情形**（F5），若用裁剪后长度判断，`snapshot:fragments` / `lastPath` / `lastOp` 不会设置，紧随的简写增量（形态 2）会落进 unknown 兜底被**静默丢弃**；
@@ -172,7 +172,7 @@ continueStream?(ctx: ProviderContext, session: ProviderSession, messageId: numbe
 15. **fallback 换 message 的 skip 基线**：首段 msg4 断流 → 第 1 次续接 ready id=5（该段禁用裁剪）发出部分内容后再断流 → **第 2 次续接收到的 `skip` 只计 msg5 已发字符**（断言记录下来的 skip 数值，而非只看最终文本——「漏清零」只会多吞快照，而 appends 不被裁，常规构造下两种实现输出逐字相同）；fixture 让 msg5 快照**长于**其已发字符（服务端多生成未送达），漏清零实现会把尾部一并吞掉，断言可直接观察到缺口；
 16. **空续接不假成功**：续接返回 200 空流 → 计失败，attempts 用尽后 503（不是 `finish_reason=stop` 的部分回复）。
 
-**合成 fixture 说明**：`.research/spike-design.md` 的抓包原文是**省略稿（含 `…`）**，只能作形态依据，不能直接当字符级 fixture；测试用**自洽合成**的 SSE（字符数与断言严格对齐）。
+**合成 fixture 说明**：抓包记录是**省略稿（含 `…`）**，只能作形态依据，不能直接当字符级 fixture；测试用**自洽合成**的 SSE（字符数与断言严格对齐）。
 
 ---
 
