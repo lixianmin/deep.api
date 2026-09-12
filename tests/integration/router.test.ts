@@ -7,6 +7,7 @@ import type { ProviderAdapter, ProviderCompletion, ProviderContext, ProviderSess
 import type { Message } from '../../src/shared/api-types';
 import { resolveModel as clientResolveModel } from '../../src/background/providers/deepseek/client';
 import { DSML_TOKEN } from '../../src/background/providers/deepseek/dsml-parser';
+import { completionEvents } from '../../src/background/providers/deepseek/sse-patch';
 
 const MODELS = [
   { id: 'deepseek-v4-flash', provider: 'deepseek', description: 'v4-flash' },
@@ -915,5 +916,262 @@ describe('流式：杂交形态结构化恢复，不烧 repair（fix/tool-call-r
     const asst = (r as any).d.mapper.threads.get('deepseek:recover-cid').mirror.at(-1)!;
     expect(asst.tool_calls).toHaveLength(2);
     expect(JSON.parse(asst.tool_calls[0].function.arguments)).toEqual({ path: 'sketch.ino' });
+  });
+});
+
+// 2026-09-12（feat/continue-on-incomplete）：断流自动续接（spec §3.1/§3.3/§3.4）。
+// 续接段用**真实 parser**（completionEvents）消费自洽合成 SSE——裁剪/终态都在被测路径上。
+describe('断流自动续接（feat/continue-on-incomplete）', () => {
+  const sseOf = (text: string) => (async function* () { yield new TextEncoder().encode(text); })();
+
+  it('fail-to-pass：断流 → 续接（真实 parser）→ 单次成功、无重复', async () => {
+    const resumeSse = [
+      'event: ready\ndata: {"request_message_id":3,"response_message_id":4}\n\n',
+      'data: {"v":{"response":{"message_id":4,"fragments":[{"id":2,"type":"THINK","content":"想"},{"id":3,"type":"RESPONSE","content":"ab"}]}}}\n\n',
+      'data: {"p":"response/fragments/-1/content","o":"APPEND","v":"cd"}\n\n',
+      'data: {"p":"response/status","o":"SET","v":"FINISHED"}\n\n',
+    ].join('');
+    const calls: Array<{ messageId: unknown; skip: { thinkingChars: number; responseChars: number } }> = [];
+    const a = stubAdapter({
+      streamCompletion: async function* () {
+        yield { kind: 'message_id', id: 4 };
+        yield { kind: 'think_delta', content: '想' };
+        yield { kind: 'content_delta', content: 'ab' };
+        yield { kind: 'stream_stats', bytes: 100, paths: ['ready'], statusValues: ['INCOMPLETE'] };
+        yield { kind: 'stream_error', message: 'Server is temporarily unavailable.', reason: 'generation_err' };
+      },
+      continueStream: async function* (_ctx, _session, messageId, skip) {
+        calls.push({ messageId, skip: { thinkingChars: skip.thinkingChars, responseChars: skip.responseChars } });
+        yield* completionEvents(sseOf(resumeSse) as AsyncIterable<Uint8Array>, 1000, () => {}, { ...skip, expectMessageId: messageId });
+      },
+    });
+    const r = makeRouter(a);
+    const res: any = await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'hi')] });
+    expect(res.choices[0].message.content).toBe('abcd');          // 'ab' + 快照裁掉 + 'cd'
+    expect(res.choices[0].message.reasoning_content).toBe('想');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.messageId).toBe(4);
+    expect(calls[0]!.skip).toEqual({ thinkingChars: 1, responseChars: 2 });
+    const e: any = r['d'].log.list().at(-1)!;
+    expect(e.continueAttempts).toBe(1);
+    expect(e.sseStatusValues).toEqual(['INCOMPLETE', 'FINISHED']);   // 按段拼接
+  });
+
+  it('连续两次断流 → 两次续接成功（attempts=2）', async () => {
+    const cont1 = [
+      'event: ready\ndata: {"request_message_id":3,"response_message_id":4}\n\n',
+      'data: {"v":{"response":{"message_id":4,"fragments":[{"id":3,"type":"RESPONSE","content":"ab"}]}}}\n\n',
+      'data: {"p":"response/fragments/-1/content","o":"APPEND","v":"cd"}\n\n',
+      'data: {"p":"response/status","o":"SET","v":"INCOMPLETE"}\n\n',
+      'data: {"type":"error","content":"Server is temporarily unavailable.","finish_reason":"generation_err"}\n\n',
+    ].join('');
+    const cont2 = [
+      'event: ready\ndata: {"request_message_id":3,"response_message_id":4}\n\n',
+      'data: {"v":{"response":{"message_id":4,"fragments":[{"id":3,"type":"RESPONSE","content":"abcd"}]}}}\n\n',
+      'data: {"p":"response/fragments/-1/content","o":"APPEND","v":"ef"}\n\n',
+      'data: {"p":"response/status","o":"SET","v":"FINISHED"}\n\n',
+    ].join('');
+    const calls: any[] = [];
+    const a = stubAdapter({
+      streamCompletion: async function* () {
+        yield { kind: 'message_id', id: 4 };
+        yield { kind: 'content_delta', content: 'ab' };
+        yield { kind: 'stream_error', message: 'boom', reason: 'generation_err' };
+      },
+      continueStream: async function* (_c, _s, messageId, skip) {
+        calls.push({ messageId, skip: { ...skip } });
+        yield* completionEvents(sseOf(calls.length === 1 ? cont1 : cont2) as AsyncIterable<Uint8Array>, 1000, () => {}, { ...skip, expectMessageId: messageId });
+      },
+    });
+    const r = makeRouter(a);
+    const res: any = await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'hi')] });
+    expect(res.choices[0].message.content).toBe('abcdef');
+    expect(calls).toHaveLength(2);
+    expect(calls[1].skip.responseChars).toBe(4);                    // 'ab' + 'cd'
+    expect((r['d'].log.list().at(-1) as any).continueAttempts).toBe(2);
+  });
+
+  it('三次续接仍断流 → 503（上限收敛）', async () => {
+    const bad = [
+      'event: ready\ndata: {"request_message_id":3,"response_message_id":4}\n\n',
+      'data: {"p":"response/status","o":"SET","v":"INCOMPLETE"}\n\n',
+    ].join('');
+    const calls: any[] = [];
+    const a = stubAdapter({
+      streamCompletion: async function* () {
+        yield { kind: 'message_id', id: 4 };
+        yield { kind: 'content_delta', content: 'ab' };
+        yield { kind: 'stream_error', message: 'boom', reason: 'generation_err' };
+      },
+      continueStream: async function* (_c, _s, messageId, skip) {
+        calls.push({ messageId, skip });
+        yield* completionEvents(sseOf(bad) as AsyncIterable<Uint8Array>, 1000, () => {}, { ...skip, expectMessageId: messageId });
+      },
+    });
+    const r = makeRouter(a);
+    await expect(r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'hi')] }))
+      .rejects.toMatchObject({ status: 503, error: { error: { code: 'provider_unavailable' } } });
+    expect(calls).toHaveLength(3);
+  });
+
+  it('unsupported_client_by_model → 不调 continueStream，直接 503', async () => {
+    let called = 0;
+    const a = stubAdapter({
+      streamCompletion: async function* () {
+        yield { kind: 'message_id', id: 4 };
+        yield { kind: 'stream_error', message: 'Update to the latest version to use Expert.', reason: 'unsupported_client_by_model' };
+      },
+      continueStream: async function* () { called += 1; yield { kind: 'content_delta', content: 'x', finish_reason: 'stop' }; },
+    });
+    const r = makeRouter(a);
+    await expect(r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'hi')] }))
+      .rejects.toMatchObject({ status: 503 });
+    expect(called).toBe(0);
+  });
+
+  it('stream:true 路径：续接成功、分块连续、正常 finish', async () => {
+    const resumeSse = [
+      'event: ready\ndata: {"request_message_id":3,"response_message_id":4}\n\n',
+      'data: {"v":{"response":{"message_id":4,"fragments":[{"id":3,"type":"RESPONSE","content":"ab"}]}}}\n\n',
+      'data: {"p":"response/fragments/-1/content","o":"APPEND","v":"cd"}\n\n',
+      'data: {"p":"response/status","o":"SET","v":"FINISHED"}\n\n',
+    ].join('');
+    const a = stubAdapter({
+      streamCompletion: async function* () {
+        yield { kind: 'message_id', id: 4 };
+        yield { kind: 'content_delta', content: 'ab' };
+        yield { kind: 'stream_error', message: 'boom', reason: 'generation_err' };
+      },
+      continueStream: async function* (_c, _s, messageId, skip) {
+        yield* completionEvents(sseOf(resumeSse) as AsyncIterable<Uint8Array>, 1000, () => {}, { ...skip, expectMessageId: messageId });
+      },
+    });
+    const r = makeRouter(a);
+    const s = await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'hi')], stream: true });
+    const chunks: any[] = [];
+    for await (const c of s as AsyncIterable<any>) chunks.push(c);
+    const content = chunks.map((c) => c.choices[0].delta.content ?? '').join('');
+    expect(content).toBe('abcd');
+    expect(chunks.at(-1)!.choices[0].finish_reason).toBe('stop');
+  });
+
+  it('回归：正常流零续接；单段日志取证字段不变', async () => {
+    let called = 0;
+    const a = stubAdapter({
+      streamCompletion: async function* () {
+        yield { kind: 'message_id', id: 1 };
+        yield { kind: 'content_delta', content: 'ok', finish_reason: 'stop' };
+        yield { kind: 'stream_stats', bytes: 42, paths: ['ready'], rawSample: 'RS', rawTail: 'RT', autoResume: false, hasPendingFragment: true, statusValues: ['FINISHED'] };
+      },
+      continueStream: async function* () { called += 1; yield { kind: 'content_delta', content: 'x', finish_reason: 'stop' }; },
+    });
+    const r = makeRouter(a);
+    await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'hi')] });
+    expect(called).toBe(0);
+    const e: any = r['d'].log.list().at(-1)!;
+    expect(e.sseRaw).toBe('RS');
+    expect(e.sseRawTail).toBe('RT');
+    expect(e.sseAutoResume).toBe(false);
+    expect(e.sseHasPendingFragment).toBe(true);
+    expect(e.continueAttempts).toBe(0);
+  });
+
+  it('DSML 跨段对齐：skip 用原始字符数（含归一化器扣住的尾部）', async () => {
+    const TOOL2 = [{ type: 'function' as const, function: { name: 'Read', description: 'read', parameters: { type: 'object', properties: {} } } }];
+    const cont = [
+      'event: ready\ndata: {"request_message_id":3,"response_message_id":4}\n\n',
+      'data: {"v":{"response":{"message_id":4,"fragments":[{"id":3,"type":"RESPONSE","content":"ab<"}]}}}\n\n',
+      'data: {"p":"response/fragments/-1/content","o":"APPEND","v":"x"}\n\n',
+      'data: {"p":"response/status","o":"SET","v":"FINISHED"}\n\n',
+    ].join('');
+    const calls: any[] = [];
+    const a = stubAdapter({
+      streamCompletion: async function* () {
+        yield { kind: 'message_id', id: 4 };
+        yield { kind: 'content_delta', content: 'ab<' };   // 归一化器 emit 'ab'、扣住 '<'
+        yield { kind: 'stream_error', message: 'boom', reason: 'generation_err' };
+      },
+      continueStream: async function* (_c, _s, messageId, skip) {
+        calls.push({ skip: { ...skip } });
+        yield* completionEvents(sseOf(cont) as AsyncIterable<Uint8Array>, 1000, () => {}, { ...skip, expectMessageId: messageId });
+      },
+    });
+    const r = makeRouter(a);
+    const s = await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'hi')], tools: TOOL2, stream: true });
+    const chunks: any[] = [];
+    for await (const c of s as AsyncIterable<any>) chunks.push(c);
+    const content = chunks.map((c) => c.choices[0].delta.content ?? '').join('');
+    expect(calls[0].skip.responseChars).toBe(3);   // 原始数（可见数只有 2）
+    expect(content).toBe('ab<x');                  // 缓冲 '<' + 'x' 对齐，无重复 '<'
+  });
+
+  it('未拿到 message_id（ready 前断流）→ 不续接，直接 503', async () => {
+    let called = 0;
+    const a = stubAdapter({
+      streamCompletion: async function* () {
+        yield { kind: 'stream_error', message: 'boom', reason: 'generation_err' };
+      },
+      continueStream: async function* () { called += 1; yield { kind: 'content_delta', content: 'x', finish_reason: 'stop' }; },
+    });
+    const r = makeRouter(a);
+    await expect(r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'hi')] }))
+      .rejects.toMatchObject({ status: 503 });
+    expect(called).toBe(0);
+  });
+
+  it('fallback 换 message：计数按 message 清零，skip 基线不跨 message', async () => {
+    const cont1 = [
+      'event: ready\ndata: {"request_message_id":3,"response_message_id":5}\n\n',   // fallback：id 5 ≠ 4
+      'data: {"v":{"response":{"message_id":5,"fragments":[{"id":2,"type":"RESPONSE","content":"AB"}]}}}\n\n',
+      'data: {"p":"response/fragments/-1/content","o":"APPEND","v":"CD"}\n\n',
+      'data: {"p":"response/status","o":"SET","v":"INCOMPLETE"}\n\n',
+      'data: {"type":"error","content":"boom","finish_reason":"generation_err"}\n\n',
+    ].join('');
+    const cont2 = [
+      'event: ready\ndata: {"request_message_id":3,"response_message_id":5}\n\n',
+      'data: {"v":{"response":{"message_id":5,"fragments":[{"id":2,"type":"RESPONSE","content":"ABCDEF"}]}}}\n\n',   // 4 已发 + EF 未送达
+      'data: {"p":"response/fragments/-1/content","o":"APPEND","v":"GH"}\n\n',
+      'data: {"p":"response/status","o":"SET","v":"FINISHED"}\n\n',
+    ].join('');
+    const calls: any[] = [];
+    const a = stubAdapter({
+      streamCompletion: async function* () {
+        yield { kind: 'message_id', id: 4 };
+        yield { kind: 'content_delta', content: 'P' };
+        yield { kind: 'stream_error', message: 'boom', reason: 'generation_err' };
+      },
+      continueStream: async function* (_c, _s, messageId, skip) {
+        calls.push({ messageId, skip: { ...skip } });
+        yield* completionEvents(sseOf(calls.length === 1 ? cont1 : cont2) as AsyncIterable<Uint8Array>, 1000, () => {}, { ...skip, expectMessageId: messageId });
+      },
+    });
+    const r = makeRouter(a);
+    const res: any = await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'hi')] });
+    // seg1 'P' + cont1 'AB'+'CD'（id 不匹配 → 不裁剪） + cont2 裁掉 'ABCD' 后发 'EF' + append 'GH'
+    expect(res.choices[0].message.content).toBe('PABCDEFGH');
+    expect(calls).toHaveLength(2);
+    expect(calls[0].messageId).toBe(4);
+    expect(calls[1].messageId).toBe(5);                                        // 换 message 后指向新 id
+    expect(calls[1].skip).toEqual({ thinkingChars: 0, responseChars: 4 });     // 漏清零会是 5 → 吞掉 'E'
+  });
+
+  it('续接返回 200 空流 → 计失败，上限后 503（不假成功）', async () => {
+    let calls = 0;
+    const a = stubAdapter({
+      streamCompletion: async function* () {
+        yield { kind: 'message_id', id: 4 };
+        yield { kind: 'content_delta', content: 'ab' };
+        yield { kind: 'stream_error', message: 'boom', reason: 'generation_err' };
+      },
+      continueStream: async function* (_c, _s, messageId, skip) {
+        calls += 1;
+        const empty = (async function* () {})();
+        yield* completionEvents(empty as AsyncIterable<Uint8Array>, 1000, () => {}, { ...skip, expectMessageId: messageId });
+      },
+    });
+    const r = makeRouter(a);
+    await expect(r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'hi')] }))
+      .rejects.toMatchObject({ status: 503, error: { error: { code: 'provider_unavailable' } } });
+    expect(calls).toBe(3);
   });
 });
