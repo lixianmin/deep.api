@@ -93,6 +93,26 @@ export function completionPayload(
   return payload;
 }
 
+/** 2026-09-12（feat/continue-on-incomplete）：续接请求体（spec §3.2 / §2 F2 实测）。
+ *  POST /api/v0/chat/continue {chat_session_id, message_id, fallback_to_resume:true}——
+ *  无 prompt / model_type / parent_message_id；服务端按 message_id 找回生成状态。 */
+export function continuePayload(session: ProviderSession, messageId: number | string): Record<string, unknown> {
+  return { chat_session_id: session.webSessionId, message_id: messageId, fallback_to_resume: true };
+}
+
+/** completion 与 continue 共用的 x-client 指纹头（**不含 PoW**——continue 端点不要求）。
+ *  2026-09-12（feat/continue-on-incomplete）：自 adapter.withPowHeaders 拆出。 */
+export function continueHeaders(token: string): Record<string, string> {
+  return {
+    ...baseHeaders(token),
+    'x-client-version': '2.4.0',
+    'x-client-bundle-id': 'com.deepseek.chat',
+    'x-client-platform': 'web',
+    'x-client-locale': 'en_US',
+    'x-client-timezone-offset': '28800',
+  };
+}
+
 export // 与 SW 侧 authHeaders/probeHeaders 对齐：DeepSeek 对带 X-Client-* 的请求返回 HTML/401（用户 curl 实测）
 function baseHeaders(token: string): Record<string, string> {
   return {

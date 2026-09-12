@@ -1,7 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createDeepSeekAdapter, type AdapterDeps } from '../../src/background/providers/deepseek/adapter';
 import { PowSolver } from '../../src/background/providers/deepseek/pow';
-import type { AuthStatus, ProviderCompletion, ProviderContext } from '../../src/background/providers/adapter';
+import type { AuthStatus, ProviderCompletion, ProviderContext, ProviderStreamEvent } from '../../src/background/providers/adapter';
+import { continuePayload, continueHeaders } from '../../src/background/providers/deepseek/client';
 
 function mkDeps(over: Partial<AdapterDeps> = {}): AdapterDeps {
   return {
@@ -120,5 +121,50 @@ describe('DeepSeekAdapter', () => {
     const status = await a.auth.getAuthStatus({ token: 'tok', requestId: 'r' });
     expect(status.state).toBe('expired');
     expect((status as { state: 'expired'; message?: string }).message).toMatch(/401/);
+  });
+});
+
+// 2026-09-12（feat/continue-on-incomplete）：续接端点（spec §3.2/§2 F2）。
+describe('continueStream（feat/continue-on-incomplete）', () => {
+  it('continuePayload/continueHeaders：实测形状、无 PoW', () => {
+    const p = continuePayload({ providerId: 'deepseek', webSessionId: 's1', parentMessageId: 3 } as any, 4);
+    expect(p).toEqual({ chat_session_id: 's1', message_id: 4, fallback_to_resume: true });
+    const h = continueHeaders('tok');
+    expect(h.Authorization).toBe('Bearer tok');
+    expect(h['Content-Type']).toBe('application/json');
+    expect(h['x-client-version']).toBe('2.4.0');
+    expect(h['X-Ds-Pow-Response']).toBeUndefined();   // continue 不要求 PoW
+  });
+
+  it('fail-to-pass: continueStream 请求 /chat/continue、不调 PoW、SSE 事件接线', async () => {
+    let path = '';
+    let sent: Record<string, string> = {};
+    const sse = [
+      'event: ready\ndata: {"request_message_id":3,"response_message_id":4}\n\n',
+      'data: {"p":"response/fragments/-1/content","o":"APPEND","v":"hi"}\n\n',
+      'data: {"p":"response/status","o":"SET","v":"FINISHED"}\n\n',
+    ].join('');
+    const a = createDeepSeekAdapter(mkDeps({
+      fetchStream: vi.fn(async (p: string, h: Record<string, string>) => {
+        path = p; sent = h;
+        return {
+          status: 200, headers: new Headers(),
+          body: (async function* () { yield new TextEncoder().encode(sse); })() as unknown as AsyncIterable<Uint8Array>,
+        };
+      }),
+      // pow 被调用即抛 —— continue 路径不得触碰 PoW
+      pow: { getChallenge: vi.fn(async () => { throw new Error('continue must not call pow'); }), solve: vi.fn() } as any,
+    }));
+    const evs: ProviderStreamEvent[] = [];
+    for await (const ev of a.continueStream!(
+      { token: 'tok', requestId: 'r' },
+      { providerId: 'deepseek', webSessionId: 's1', parentMessageId: 3 } as any,
+      4,
+      { thinkingChars: 0, responseChars: 0 },
+    )) evs.push(ev);
+    expect(path).toBe('/chat/continue');               // 无双前缀
+    expect(sent['X-Ds-Pow-Response']).toBeUndefined();
+    expect(evs.some((e) => e.kind === 'message_id' && e.id === 4)).toBe(true);
+    expect(evs.some((e) => e.kind === 'content_delta' && e.content === 'hi')).toBe(true);
   });
 });

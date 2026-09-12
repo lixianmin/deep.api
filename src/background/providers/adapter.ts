@@ -57,6 +57,9 @@ export interface ProviderAdapter {
   uploadFile?(ctx: ProviderContext, bytes: Uint8Array, mime: string, filename: string): Promise<UploadFileResult>;
   pollFileReady?(ctx: ProviderContext, fileId: string, options?: PollFileReadyOptions): Promise<PollFileReadyResult>;
   streamCompletion(ctx: ProviderContext, req: ProviderCompletion): AsyncIterable<ProviderStreamEvent>;
+  // 2026-09-12（feat/continue-on-incomplete）：断流自动续接（spec §3.2）。可选方法（与
+  // uploadFile/pollFileReady 同例）——未实现的 provider 不参与续接（router 检查存在性）。
+  continueStream?(ctx: ProviderContext, session: ProviderSession, messageId: number | string, skip: ContinueSkip): AsyncIterable<ProviderStreamEvent>;
   readonly models: ModelInfo[];
   resolveModel(modelId: string): ResolvedModel | null;
   isRateLimited(err: unknown): boolean;

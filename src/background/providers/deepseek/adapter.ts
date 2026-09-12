@@ -1,5 +1,5 @@
 import type { ProviderAdapter, ProviderCompletion, ProviderContext, ProviderSession, UploadFileResult, PollFileReadyOptions, PollFileReadyResult } from '../adapter';
-import { completionPayload, baseHeaders, classify, MODELS, resolveModel } from './client';
+import { completionPayload, baseHeaders, classify, MODELS, resolveModel, continuePayload, continueHeaders } from './client';
 import { getAuthStatus, DEEPSEEK_LOGIN_PAGE, DEEPSEEK_COOKIE_NAMES } from './auth';
 import { completionEvents } from './sse-patch';
 
@@ -43,13 +43,8 @@ export function createDeepSeekAdapter(deps: AdapterDeps): ProviderAdapter {
     // UI 提示，deep.api 已跳过不进模型输出）；对齐抓包用 en_US 与网页行为一致。
     // User-Agent/Referer 在浏览器 fetch 是 forbidden header 不能设（服务端不校验。
     return {
-      ...baseHeaders(ctx.token),
+      ...continueHeaders(ctx.token),
       'X-Ds-Pow-Response': header,
-      'x-client-version': '2.4.0',
-      'x-client-bundle-id': 'com.deepseek.chat',
-      'x-client-platform': 'web',
-      'x-client-locale': 'en_US',
-      'x-client-timezone-offset': '28800',
     };
   }
 
@@ -180,6 +175,17 @@ export function createDeepSeekAdapter(deps: AdapterDeps): ProviderAdapter {
         throw classifyErr(Object.assign(new Error(`completion http ${res.status}`), { status: res.status, headers: res.headers }));
       }
       for await (const ev of completionEvents(res.body, NO_PROGRESS_MS, () => {})) yield ev;
+    },
+
+    // 2026-09-12（feat/continue-on-incomplete）：续接断流生成（spec §3.2 实测）。
+    // POST /chat/continue（相对路径——sw.ts 拼 base；**不带 /api/v0 前缀**，FILE_FETCH_PATH 双前缀事故史）；
+    // 无 PoW；响应流与 completion 同构，复用 completionEvents + skip 裁剪。
+    async *continueStream(ctx, session, messageId, skip) {
+      const res = await fetchStreamSafe('/chat/continue', continueHeaders(ctx.token), continuePayload(session, messageId));
+      if (res.status !== 200) {
+        throw classifyErr(Object.assign(new Error(`continue http ${res.status}`), { status: res.status, headers: res.headers }));
+      }
+      for await (const ev of completionEvents(res.body, NO_PROGRESS_MS, () => {}, { ...skip, expectMessageId: messageId })) yield ev;
     },
 
     models: MODELS,
