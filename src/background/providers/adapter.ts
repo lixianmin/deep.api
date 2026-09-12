@@ -84,4 +84,12 @@ export type ProviderStreamEvent =
   // （INCOMPLETE/WIP）。旧实现当流正常结束 → finish_reason='stop' + 空回复（silent bug）；
   // Router 收到本事件记录后于流末抛 503 provider_unavailable。
   | { kind: 'stream_error'; message: string; reason?: string };
+/** 2026-09-12（feat/continue-on-incomplete）：续接段的快照裁剪参数（spec §3.3）。
+ *  thinkingChars/responseChars = 当前 response message 已发出的**原始**字符数（DSML 归一化前）；
+ *  expectMessageId = 请求续接的 message id（ready id 不匹配时禁用裁剪——fail-safe）。 */
+export interface ContinueSkip {
+  thinkingChars: number;
+  responseChars: number;
+  expectMessageId?: number | string;
+}
 export { ModelInfo };

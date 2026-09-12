@@ -1,4 +1,4 @@
-import type { ProviderStreamEvent } from '../adapter';
+import type { ContinueSkip, ProviderStreamEvent } from '../adapter';
 
 export interface SseEvent { event?: string; data: string }
 export function parseSseText(text: string): SseEvent[] {
@@ -101,9 +101,10 @@ export class ResponseTree {
 export async function* completionEvents(
   body: AsyncIterable<Uint8Array>, timeoutMs: number,
   onReady: (ids: { requestMessageId: number; responseMessageId: number }) => void,
+  skip?: ContinueSkip,
 ): AsyncIterable<ProviderStreamEvent> {
   const dec = new TextDecoder();
-  const { processBlock, stats } = makeProcessor(onReady);
+  const { processBlock, stats } = makeProcessor(onReady, skip);
   const iter = body[Symbol.asyncIterator]();
   let buf = '';
   try {
@@ -141,6 +142,10 @@ export async function* completionEvents(
       const terminal = stats.lastStatus ?? stats.lastQuasi;
       if (terminal !== null && terminal !== 'FINISHED') {
         yield { kind: 'stream_error', message: `DeepSeek stream incomplete (status=${terminal})`, reason: 'incomplete_status' };
+      } else if (skip !== undefined && terminal === null) {
+        // 2026-09-12（feat/continue-on-incomplete）：续接段要求终态（spec §3.4）——空 200 /
+        // 非 SSE / 无终态断连都不得被当成功。首段（skip 缺省）不受约束，行为不变。
+        yield { kind: 'stream_error', message: 'resume ended without terminal status', reason: 'incomplete_status' };
       }
     }
     // 2026-09-09（diag/pro-sse-paths）：流末 emit stream_stats 事件，Router 接手后写入 log。
@@ -154,7 +159,10 @@ export async function* completionEvents(
   }
 }
 
-function makeProcessor(onReady: (ids: { requestMessageId: number; responseMessageId: number }) => void): {
+function makeProcessor(
+  onReady: (ids: { requestMessageId: number; responseMessageId: number }) => void,
+  skip?: ContinueSkip,
+): {
   processBlock(block: string): ProviderStreamEvent[];
   stats: {
     bytes: number; paths: Set<string>; raw: string; rawTail: string;
@@ -196,6 +204,31 @@ function makeProcessor(onReady: (ids: { requestMessageId: number; responseMessag
     else if (path === 'response/quasi_status' && typeof value === 'string') { stats.lastQuasi = value; }
     else if (path === 'response/has_pending_fragment' && typeof value === 'boolean') { stats.hasPendingFragment = value; }
   };
+  // 2026-09-12（feat/continue-on-incomplete）：续接段快照裁剪（spec §3.3）。
+  // 只裁剪来自快照的事件内容；allowTrim 为 fail-safe——ready 出现且 id 与请求一致才开裁剪。
+  let remainingThink = skip?.thinkingChars ?? 0;
+  let remainingContent = skip?.responseChars ?? 0;
+  let allowTrim = false;
+  const trimSnapshot = (events: ProviderStreamEvent[]): ProviderStreamEvent[] => {
+    if (!allowTrim) return events;
+    const kept: ProviderStreamEvent[] = [];
+    for (const e of events) {
+      if (e.kind === 'think_delta' && remainingThink > 0) {
+        const drop = Math.min(remainingThink, e.content.length);
+        remainingThink -= drop;
+        const rest = e.content.slice(drop);
+        if (rest !== '') kept.push({ ...e, content: rest });
+      } else if (e.kind === 'content_delta' && remainingContent > 0) {
+        const drop = Math.min(remainingContent, e.content.length);
+        remainingContent -= drop;
+        const rest = e.content.slice(drop);
+        if (rest !== '') kept.push({ ...e, content: rest });
+      } else {
+        kept.push(e);
+      }
+    }
+    return kept;
+  };
   const processBlock = (block: string): ProviderStreamEvent[] => {
     const out: ProviderStreamEvent[] = [];
     for (const ev of parseSseText(block)) {
@@ -213,7 +246,18 @@ function makeProcessor(onReady: (ids: { requestMessageId: number; responseMessag
       let data: unknown; try { data = JSON.parse(ev.data); } catch { continue; }
       if (!sentReady) {
         const ids = extractReadyIds(data);
-        if (ids) { sentReady = true; onReady(ids); stats.paths.add('ready'); out.push({ kind: 'message_id', id: ids.responseMessageId }); continue; }
+        if (ids) {
+          sentReady = true;
+          onReady(ids);
+          stats.paths.add('ready');
+          // 续接裁剪开关：仅当 ready id 与请求的 expectMessageId 一致（fail-safe，spec §3.3）。
+          if (skip !== undefined && skip.expectMessageId !== undefined
+            && String(ids.responseMessageId) === String(skip.expectMessageId)) {
+            allowTrim = true;
+          }
+          out.push({ kind: 'message_id', id: ids.responseMessageId });
+          continue;
+        }
       }
       if (typeof data === 'object' && data !== null) {
         // 实测 SSE 格式：{"p":"response/content","o":"APPEND","v":"你好"} 完整操作；
@@ -290,7 +334,9 @@ function makeProcessor(onReady: (ids: { requestMessageId: number; responseMessag
               // fragment 的 /-1/content（与形态2继承逻辑一致）；快照本身没有 p/o 上下文。
               lastPath = 'response/fragments/-1/content';
               lastOp = 'APPEND';
-              out.push(...snap);
+              // 2026-09-12（feat/continue-on-incomplete）：裁剪只作用于事件内容，不参与状态判定——
+              // 用裁剪前的 snap.length 判断（「快照恰被全吞」是续接的正常情形，spec §3.3）。
+              out.push(...trimSnapshot(snap));
             } else {
               // 形态3 没匹配上：记录未知顶层 key 以便诊断 Pro 是否有新 path
               const unknownKey = Object.keys(d)[0] ?? 'unknown';

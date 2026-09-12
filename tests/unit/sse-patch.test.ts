@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { parseSseText, extractReadyIds, ResponseTree, completionEvents } from '../../src/background/providers/deepseek/sse-patch';
-import type { ProviderStreamEvent } from '../../src/background/providers/adapter';
+import type { ProviderStreamEvent, ContinueSkip } from '../../src/background/providers/adapter';
 
 // 合成片段（fixture 就绪后替换为 sse-normal.json 内容，结构同型）
 const synthetic = [
@@ -254,12 +254,12 @@ const incidentSse = [
   'data: {"click_behavior":"none","auto_resume":false}\n\n',
 ].join('');
 
-async function collectSse(text: string): Promise<ProviderStreamEvent[]> {
+async function collectSse(text: string, skip?: ContinueSkip): Promise<ProviderStreamEvent[]> {
   const chunks: Uint8Array[] = [];
   for (const block of text.split('\n\n')) chunks.push(new TextEncoder().encode(block + '\n\n'));
   const iter = (async function* () { for (const c of chunks) yield c; })();
   const evs: ProviderStreamEvent[] = [];
-  for await (const ev of completionEvents(iter, 1000, () => {})) evs.push(ev);
+  for await (const ev of completionEvents(iter, 1000, () => {}, skip)) evs.push(ev);
   return evs;
 }
 
@@ -349,5 +349,91 @@ describe('completionEvents continue-thinking diagnostics', () => {
     expect(typeof stats.rawTail).toBe('string');
     expect(stats.rawTail.length).toBeLessThanOrEqual(600);
     expect(stats.rawTail).toContain('FINISHED');
+  });
+});
+
+// 2026-09-12（feat/continue-on-incomplete）：续接段快照裁剪（spec §3.3）。
+// 快照会重发断流前已发出的内容——按「当前 message 已发原始字符数」裁剪，否则客户端收到重复文本。
+describe('续接段快照裁剪（feat/continue-on-incomplete）', () => {
+  it('skip 恰等：快照内容零 emit；紧随的简写增量不因裁剪丢帧', async () => {
+    const sse = [
+      'event: ready\ndata: {"request_message_id":1,"response_message_id":4}\n\n',
+      'data: {"v":{"response":{"message_id":4,"fragments":[{"id":2,"type":"THINK","content":"一二三四五六七八九十"},{"id":3,"type":"RESPONSE","content":"Both"}]}}}\n\n',
+      'data: {"v":" more"}\n\n',
+      'data: {"p":"response/status","o":"SET","v":"FINISHED"}\n\n',
+    ].join('');
+    const evs = await collectSse(sse, { thinkingChars: 10, responseChars: 4, expectMessageId: 4 });
+    expect(evs.filter((e) => e.kind === 'think_delta')).toHaveLength(0);
+    expect(evs.filter((e) => e.kind === 'content_delta').map((e: any) => e.content)).toEqual([' more']);
+    // 状态按裁剪前快照设置：简写走形态 2，不落 unknown 兜底
+    const stats = evs.find((e) => e.kind === 'stream_stats') as any;
+    expect(stats.paths).not.toContain('unknown:v');
+    expect(stats.paths).toContain('snapshot:fragments');
+  });
+
+  it('部分送达补齐：skip response=2，快照 "Both" → emit "th"', async () => {
+    const sse = [
+      'event: ready\ndata: {"request_message_id":1,"response_message_id":4}\n\n',
+      'data: {"v":{"response":{"message_id":4,"fragments":[{"id":2,"type":"RESPONSE","content":"Both"}]}}}\n\n',
+      'data: {"p":"response/status","o":"SET","v":"FINISHED"}\n\n',
+    ].join('');
+    const evs = await collectSse(sse, { thinkingChars: 0, responseChars: 2, expectMessageId: 4 });
+    expect(evs.filter((e) => e.kind === 'content_delta').map((e: any) => e.content)).toEqual(['th']);
+  });
+
+  it('无快照的续接流：skip 不消耗，带 p 的 appends 原样 emit', async () => {
+    const sse = [
+      'event: ready\ndata: {"request_message_id":1,"response_message_id":4}\n\n',
+      'data: {"p":"response/fragments/-1/content","o":"APPEND","v":" new"}\n\n',
+      'data: {"p":"response/status","o":"SET","v":"FINISHED"}\n\n',
+    ].join('');
+    const evs = await collectSse(sse, { thinkingChars: 10, responseChars: 4, expectMessageId: 4 });
+    expect(evs.filter((e) => e.kind === 'content_delta').map((e: any) => e.content)).toEqual([' new']);
+  });
+
+  it('fallback 保护（fail-safe）：expectMessageId 不匹配 / ready 缺席 → 不裁剪', async () => {
+    const sse = [
+      'event: ready\ndata: {"request_message_id":1,"response_message_id":4}\n\n',
+      'data: {"v":{"response":{"message_id":4,"fragments":[{"id":2,"type":"RESPONSE","content":"Both"}]}}}\n\n',
+      'data: {"p":"response/status","o":"SET","v":"FINISHED"}\n\n',
+    ].join('');
+    const mismatch = await collectSse(sse, { thinkingChars: 0, responseChars: 4, expectMessageId: 99 });
+    expect(mismatch.filter((e) => e.kind === 'content_delta').map((e: any) => e.content)).toEqual(['Both']);
+    const matched = await collectSse(sse, { thinkingChars: 0, responseChars: 4, expectMessageId: 4 });
+    expect(matched.filter((e) => e.kind === 'content_delta')).toHaveLength(0);
+    // ready 缺席（无 id 可比）→ 同样不裁剪
+    const noReady = await collectSse(
+      'data: {"v":{"response":{"fragments":[{"id":2,"type":"RESPONSE","content":"Both"}]}}}\n\n',
+      { thinkingChars: 0, responseChars: 4, expectMessageId: 4 },
+    );
+    expect(noReady.filter((e) => e.kind === 'content_delta').map((e: any) => e.content)).toEqual(['Both']);
+  });
+});
+
+// 2026-09-12（feat/continue-on-incomplete）：续接段成功判据（spec §3.4）——
+// 空 200 / 非 SSE / 无终态断连不得被当成功（否则客户端拿到被截断的部分回复）。
+describe('续接段终态要求（feat/continue-on-incomplete）', () => {
+  it('带 skip 的流末无终态 → 合成 stream_error；有 FINISHED → 无错误', async () => {
+    const noTerminal = await collectSse(
+      'event: ready\ndata: {"request_message_id":1,"response_message_id":4}\n\n',
+      { thinkingChars: 0, responseChars: 0, expectMessageId: 4 },
+    );
+    const errs = noTerminal.filter((e) => (e as any).kind === 'stream_error');
+    expect(errs).toHaveLength(1);
+    expect(errs[0]).toMatchObject({ reason: 'incomplete_status', message: 'resume ended without terminal status' });
+
+    const finished = await collectSse(
+      [
+        'event: ready\ndata: {"request_message_id":1,"response_message_id":4}\n\n',
+        'data: {"p":"response/status","o":"SET","v":"FINISHED"}\n\n',
+      ].join(''),
+      { thinkingChars: 0, responseChars: 0, expectMessageId: 4 },
+    );
+    expect(finished.some((e) => (e as any).kind === 'stream_error')).toBe(false);
+  });
+
+  it('回归：skip 缺省 + 无终态 → 不合成 stream_error（首段行为不变）', async () => {
+    const evs = await collectSse('event: ready\ndata: {"request_message_id":1,"response_message_id":4}\n\n');
+    expect(evs.some((e) => (e as any).kind === 'stream_error')).toBe(false);
   });
 });
