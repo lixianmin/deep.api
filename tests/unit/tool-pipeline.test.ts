@@ -145,4 +145,23 @@ describe('parseToolCalls', () => {
     });
   });
 
+  // 2026-09-15（fix/dsml-close-tag-detect）：spice 现场——模型开**标准** <tool_calls>（prompt 教的
+  // 形态）+ 块内合法 OpenAI JSON，收尾却是漂移形态的 DSML **闭标签**（</｜｜DSML｜｜ …）。
+  // 检测正则只认开标签（< 后紧跟竖线，闭标签的 / 挡住全部模式）→ hasToolTags=false → router
+  // 判「模型没调工具」→ 原文透传 + stop。检测层必须认出它（解析保持严格 → repair/400）。
+  describe('标准开标签 + DSML 闭标签收尾（fix/dsml-close-tag-detect）', () => {
+    // 与 dsml-parser.test.ts 同一 fixture（spice 现场字节，base64 内嵌理由同彼处）
+    const HYBRID_WIRE_B64 =
+      'SSdsbCBmaXJzdCBjaGVjayB0aGUga25vd2xlZGdlIGJhc2UgZm9yIGhvdyB0aGUgYnV6emVyIGlzIGRyaXZlbiBhbmQgd2hldGhlciBwdXNoYnV0dG9ucyBzdXBwb3J0IGEgY29sb3IgYXR0cmlidXRlLgoKPHRvb2xfY2FsbHM+Clt7ImlkIjoiZzEiLCJ0eXBlIjoiZnVuY3Rpb24iLCJmdW5jdGlvbiI6eyJuYW1lIjoiR3JlcCIsImFyZ3VtZW50cyI6IntcInBhdHRlcm5cIjpcImJ1enplcnx0b25lfG5vVG9uZVwiLFwicGF0aFwiOlwiZG9jcy9rbm93bGVkZ2UvcGFydHMubWRcIixcImlnbm9yZUNhc2VcIjp0cnVlLFwiY29udGV4dFwiOjJ9In19LHsiaWQiOiJnMiIsInR5cGUiOiJmdW5jdGlvbiIsImZ1bmN0aW9uIjp7Im5hbWUiOiJHcmVwIiwiYXJndW1lbnRzIjoie1wicGF0dGVyblwiOlwicHVzaGJ1dHRvbnxidXR0b25cIixcInBhdGhcIjpcImRvY3Mva25vd2xlZGdlL3BhcnRzLm1kXCIsXCJpZ25vcmVDYXNlXCI6dHJ1ZSxcImNvbnRleHRcIjoyfSJ9fSx7ImlkIjoiZzMiLCJ0eXBlIjoiZnVuY3Rpb24iLCJmdW5jdGlvbiI6eyJuYW1lIjoiR3JlcCIsImFyZ3VtZW50cyI6IntcInBhdHRlcm5cIjpcImNvbG9yXCIsXCJpZ25vcmVDYXNlXCI6dHJ1ZSxcImNvbnRleHRcIjoxfSJ9fV0KPC/vvZzvvZxEU01M772c772cIHBhcmFtZXRlcj4KPC/vvZzvvZxEU01M772c772cIGludm9rZT4KPC/vvZzvvZxEU01M772c772cIGNhbGxzPg==';
+    const wire = Buffer.from(HYBRID_WIRE_B64, 'base64').toString('utf8');
+
+    it('hasToolTags 认混合形态（否则 router 静默 stop、原文透传）', () => {
+      expect(hasToolTags(wire)).toBe(true);
+    });
+
+    it('parseToolCalls 解析不出 → null（fail-closed 走 repair，不硬捞）', () => {
+      expect(parseToolCalls(wire)).toBeNull();
+    });
+  });
+
 });

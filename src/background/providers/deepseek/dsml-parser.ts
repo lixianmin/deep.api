@@ -25,6 +25,11 @@
  *      两侧各 2 个 ｜、DSML 与标签名之间多一个空格、包裹名是 `calls`（`tool_` 整段不在）。
  *      网页 API 没有 guided decoding（官方服务端有），模型是在自己学的分布上复现这个特殊标记，
  *      所以形态会持续漂移——因此**检测判据刻意宽于解析判据**，解析不出的仍走 repair/400，绝不静默透传。
+ *   5. 2026-09-15（fix/dsml-close-tag-detect）：**检测认闭标签形态**。v0.2.4 spice 现场：模型开
+ *      标准 <tool_calls>（prompt 教的形态）+ 合法 OpenAI JSON，收尾却幻觉出漂移形态的 DSML
+ *      **闭标签**（`</｜｜DSML｜｜ parameter>` 等，`<` 与竖线之间有 `/`）。旧检测模式要求
+ *      `<` 后紧跟竖线，全部脱靶 → hasToolTags=false → 判「没调工具」→ 静默 stop + 原文透传。
+ *      修法：仅检测正则 `<` 放宽为 `</?`；解析正则不变（仍严格），解析不出照旧 repair/400。
  */
 
 import type { ToolCall, ToolDef } from '../../../shared/api-types';
@@ -58,13 +63,15 @@ function blockStartRe(): RegExp {
   return new RegExp(`<${NS}${BLOCK_TAG}>`, 'i');
 }
 /**
- * DSML 命名空间标记本体：`<` + 1+ 竖线 + DSML + 1+ 竖线。**只用于检测**（解析走上面的严格正则）。
- * 检测必须宽于解析：现场字节的竖线个数、其后空白乃至标签名都会漂移，检测一旦漏掉，
- * DSML 就会被当普通散文静默透传（v0.1.100 现场就是这么漏的）。
- * `call` + `s` 这类普通英文词不会出现 `<` + 竖线 + `DSML` 的组合，所以不会误判。
+ * DSML 命名空间标记本体：`<` 或 `</` + 1+ 竖线 + DSML + 1+ 竖线。**只用于检测**（解析走上面的严格正则）。
+ * 检测必须宽于解析：现场字节的竖线个数、其后空白、乃至标签名都会漂移，检测一旦漏掉，
+ * DSML 就会被当普通散文静默透传（v0.1.100 开标签、v0.2.4 闭标签现场都是这么漏的）。
+ * `call` + `s` 这类普通英文词不会出现 `<`（或 `</`）+ 竖线 + `DSML` 的组合，所以不会误判。
  */
 function dsmlMarkerRe(): RegExp {
-  return new RegExp(`<${BARS}DSML${BARS}`, 'i');
+  // 2026-09-15（fix/dsml-close-tag-detect）：`</?` —— 闭标签形态（`</｜｜DSML｜｜ …>`，
+  // `<` 与竖线之间有 `/`）旧模式全部脱靶（详见文件头偏差 5）。
+  return new RegExp(`</?${BARS}DSML${BARS}`, 'i');
 }
 function invokeRe(): RegExp {
   return new RegExp(`<${NS}invoke\\s+name="([^"]+)"\\s*>([\\s\\S]*?)</${NS}invoke>`, 'gi');
@@ -77,7 +84,9 @@ function paramRe(): RegExp {
 }
 /** 无命名空间的裸工具标记（`<invoke name=` / `<parameter name=`），命名空间可选。 */
 function invokeMarkRe(): RegExp {
-  return new RegExp(`<${NS}(?:invoke|parameter)\\s+name=`, 'i');
+  // 2026-09-15（fix/dsml-close-tag-detect）：`</?` 与 dsmlMarkerRe 同理——闭标签残片
+  // （如 `</｜DSML｜invoke name="X">`）也要能被检测认出。
+  return new RegExp(`</?${NS}(?:invoke|parameter)\\s+name=`, 'i');
 }
 /** 文本是否含「工具调用」形状的标记（DSML 命名空间 或 裸 invoke/parameter）。 */
 function isToolMarkup(text: string): boolean {

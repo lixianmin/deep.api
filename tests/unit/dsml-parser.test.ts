@@ -459,3 +459,58 @@ describe('dsml-parser review-r2 fixes', () => {
     expect(JSON.parse(res!.calls[0]!.function.arguments)).toEqual({ path: 'a' });
   });
 });
+
+// 2026-09-15（fix/dsml-close-tag-detect）：v0.2.4 spice 现场——**第 5 种漂移形态**：模型开
+// **标准** <tool_calls>（prompt 教的形态）、块内是合法 OpenAI JSON，收尾却幻觉出漂移形态的
+// DSML **闭标签** </｜｜DSML｜｜ parameter> / </｜｜DSML｜｜ invoke> / </｜｜DSML｜｜ calls>
+// （两侧各 2 竖线 + DSML 后空格 + 包裹名 calls——与 v0.1.100 开标签漂移同形，但在闭合位置）。
+// 检测正则 dsmlMarkerRe / invokeMarkRe 都要求 `<` 后紧跟竖线，闭标签的 `/` 挡住全部模式：
+// hasDsmlToolTags=false → hasToolTags=false → router 判「模型没调工具」→ 原文当正文透传 +
+// finishReason=stop → spice 收到一段假工具调用文本，整轮停死。违反 spec §4.4「绝不静默透传」。
+// 修法（**仅检测层**）：`<` 放宽为 `</?`；解析保持严格——本形态解析不出 → repair/400
+// （router.test.ts 既有 fail-to-pass 分支），不试图枚举形态把块内 JSON 捞出来。
+// fixture 以 base64 内嵌（字节级比对，理由同 fix/dsml-bar-run）。
+const HYBRID_WIRE_B64 =
+  'SSdsbCBmaXJzdCBjaGVjayB0aGUga25vd2xlZGdlIGJhc2UgZm9yIGhvdyB0aGUgYnV6emVyIGlzIGRyaXZlbiBhbmQgd2hldGhlciBwdXNoYnV0dG9ucyBzdXBwb3J0IGEgY29sb3IgYXR0cmlidXRlLgoKPHRvb2xfY2FsbHM+Clt7ImlkIjoiZzEiLCJ0eXBlIjoiZnVuY3Rpb24iLCJmdW5jdGlvbiI6eyJuYW1lIjoiR3JlcCIsImFyZ3VtZW50cyI6IntcInBhdHRlcm5cIjpcImJ1enplcnx0b25lfG5vVG9uZVwiLFwicGF0aFwiOlwiZG9jcy9rbm93bGVkZ2UvcGFydHMubWRcIixcImlnbm9yZUNhc2VcIjp0cnVlLFwiY29udGV4dFwiOjJ9In19LHsiaWQiOiJnMiIsInR5cGUiOiJmdW5jdGlvbiIsImZ1bmN0aW9uIjp7Im5hbWUiOiJHcmVwIiwiYXJndW1lbnRzIjoie1wicGF0dGVyblwiOlwicHVzaGJ1dHRvbnxidXR0b25cIixcInBhdGhcIjpcImRvY3Mva25vd2xlZGdlL3BhcnRzLm1kXCIsXCJpZ25vcmVDYXNlXCI6dHJ1ZSxcImNvbnRleHRcIjoyfSJ9fSx7ImlkIjoiZzMiLCJ0eXBlIjoiZnVuY3Rpb24iLCJmdW5jdGlvbiI6eyJuYW1lIjoiR3JlcCIsImFyZ3VtZW50cyI6IntcInBhdHRlcm5cIjpcImNvbG9yXCIsXCJpZ25vcmVDYXNlXCI6dHJ1ZSxcImNvbnRleHRcIjoxfSJ9fV0KPC/vvZzvvZxEU01M772c772cIHBhcmFtZXRlcj4KPC/vvZzvvZxEU01M772c772cIGludm9rZT4KPC/vvZzvvZxEU01M772c772cIGNhbGxzPg==';
+
+describe('现场字节形态：标准开标签 + DSML 闭标签收尾（fix/dsml-close-tag-detect）', () => {
+  const WIRE = decodeB64(HYBRID_WIRE_B64);
+  const B = '｜';
+  const TAG = 'DSML';
+
+  it('fixture 自证：标准 <tool_calls> 开头 + 3 个漂移形态 DSML 闭标签，全文无 DSML 开标签', () => {
+    expect(WIRE).toContain('<tool_calls>');
+    expect(WIRE).not.toContain(`<${B}${TAG}`);
+    expect(WIRE).toContain(`</${B}${B}${TAG}${B}${B} parameter>`);
+    expect(WIRE).toContain(`</${B}${B}${TAG}${B}${B} invoke>`);
+    expect(WIRE).toContain(`</${B}${B}${TAG}${B}${B} calls>`);
+  });
+
+  it('hasDsmlToolTags：闭标签形态必须算工具标记（否则 router 走静默 stop 分支）', () => {
+    expect(hasDsmlToolTags(WIRE)).toBe(true);
+  });
+
+  it('孤立闭标签（无任何块开标签）也算工具标记', () => {
+    expect(hasDsmlToolTags(`我看看 </${B}${B}${TAG}${B}${B} calls> 长什么样`)).toBe(true);
+  });
+
+  it('parseDsmlToolCalls：解析不出 → null（fail-closed 走 repair，不静默透传）', () => {
+    expect(parseDsmlToolCalls(WIRE)).toBeNull();
+  });
+
+  it('流式：块外正文照常透传，假工具块整体扣进 unparsed，不泄漏任何标记字节', () => {
+    const n = createDsmlStreamNormalizer();
+    let out = '';
+    for (const ch of WIRE) out += n.feed(ch);
+    out += n.flush();
+    expect(out).toContain("I'll first check");
+    expect(out).not.toMatch(/dsml/i);
+    expect(out).not.toContain('"Grep"');
+    expect(n.unparsed.join('')).toContain('"Grep"');
+    expect(n.unparsed.join('')).toContain(`</${B}${B}${TAG}${B}${B} calls>`);
+  });
+
+  it('不误判：普通闭标签 </tool_calls>（无 DSML 命名空间）不算工具标记', () => {
+    expect(hasDsmlToolTags('调用结束后用 </tool_calls> 收尾')).toBe(false);
+  });
+});
