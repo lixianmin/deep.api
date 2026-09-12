@@ -100,14 +100,14 @@ interface ThreadState {
    - `tail` 为空（**完整重放**：同一前缀同一末轮 —— 视为客户端重试，全新会话 + 全量转录重新回答，保持语义纯净）。
    - 动作：`adapter.createSession()` → `prompt = renderTranscript(M)` → `parentMessageId = null`。
 4. 完成后：`mirror = M`（按请求的完整消息序列推进）、`parentMessageId = 响应消息 id`、`idleSince = now`。
-5. 失败/中断：线程标记失败并销毁（`deleteSession` best-effort），不污染镜像。
+5. 失败/中断：线程标记失败并销毁，不污染镜像。销毁是否真调 `deleteSession` 删除 DeepSeek 网页会话，由「自动删除网页 Chat Thread」设置（`autoDeleteWebThreads`，默认**关**）控制（2026-09-15 变更：关=只解除本地映射，网页会话保留）。
 
 并发与资源：
 
 - 每线程同一时刻最多 1 个在途请求；超出队列。
 - 每 provider 线程池上限 `poolSize`（默认 2，面板可调 1–5）。队列等待上限 60s，超时 → 429 `rate_limited`（message 说明"忙于其他请求"）。
-- 淘汰：`kind='auto'` 按 LRU；全部线程 TTL 空闲 30 分钟（面板可调）；淘汰时 best-effort `deleteSession`，保持 DeepSeek 网页侧干净。
-- `conversation_id`（可选参数，默认关闭）：显式命名线程，客户端可省略历史但必须至少传最后一条 user 消息（省略全部 messages → 400 `invalid_request_error`，message 明确"无新消息"）；带消息且与镜像不符 → 在该命名线程内重建（`deleteSession` 旧会话 → `createSession` → 全量转录，key 与 mirror 就地更新）。命名线程只受 TTL 淘汰。
+- 淘汰：`kind='auto'` 按 LRU；全部线程 TTL 空闲 30 分钟（面板可调）。淘汰时是否 best-effort `deleteSession` 由「自动删除网页 Chat Thread」设置控制：**默认关**——只解除本地映射，DeepSeek 网页侧会话保留（2026-09-15 用户拍板：网页 Chat Thread 被自动删除不符合预期，孤儿会话堆积是可接受代价）；开启后删除，保持网页侧干净。
+- `conversation_id`（可选参数，默认关闭）：显式命名线程，客户端可省略历史但必须至少传最后一条 user 消息（省略全部 messages → 400 `invalid_request_error`，message 明确"无新消息"）；带消息且与镜像不符 → 在该命名线程内重建（旧会话弃用 → `createSession` → 全量转录，key 与 mirror 就地更新；旧会话是否真调 `deleteSession` 同样受「自动删除网页 Chat Thread」设置控制，默认关=网页旧会话保留）。命名线程只受 TTL 淘汰。
 
 统计事实（来自 ds-free-api 源码，spike 复核）：DeepSeek 单会话串行产出、多会话并行可行但受限流控制；ds-free-api 建议并发 ≈ 账号数/2。因此默认池 2 是收敛值，日志面板可见未铺满时的排队情况。
 
@@ -270,7 +270,7 @@ type Params = { model: string; messages: Message[]; stream?: boolean;
 
 ### 8.2 面板（popup）
 
-区块：Provider 状态卡（v1：DeepSeek；登录/已过期/未登录 + "登录"按钮开 `loginPageUrl`，tab 完成后自动检测）、API Key（生成/复制/重置）、接入 snippet 一键复制（apiKey 预填）、模型列表（含说明）、池大小（1–5，默认 2）、TTL（默认 30 分钟）、请求日志（最近 20 条：时间/provider/model/状态/耗时/error）。UI 按注册表渲染 provider 列表（为多 provider 预留结构，v1 单卡）。
+区块：Provider 状态卡（v1：DeepSeek；登录/已过期/未登录 + "登录"按钮开 `loginPageUrl`，tab 完成后自动检测）、API Key（生成/复制/重置）、接入 snippet 一键复制（apiKey 预填）、模型列表（含说明）、池大小（1–5，默认 2）、TTL（默认 30 分钟）、自动删除网页 Chat Thread（默认关；关=淘汰/失败/重建只解除本地映射，网页会话保留；开=真调 `delete_session` 删除）、请求日志（最近 20 条：时间/provider/model/状态/耗时/error）。UI 按注册表渲染 provider 列表（为多 provider 预留结构，v1 单卡）。
 
 ## 9. 存储 schema（chrome.storage.local）
 
