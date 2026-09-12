@@ -69,6 +69,9 @@ describe('DeepSeekAdapter', () => {
     expect(sentHeaders?.['x-client-version']).toBe('2.4.0');
     expect(sentHeaders?.['x-client-bundle-id']).toBe('com.deepseek.chat');
     expect(sentHeaders?.['x-client-locale']).toBe('en_US');
+    // 2026-09-12（fix/final-review）：withPowHeaders 重构后（复用 continueHeaders）必须仍带 PoW 头——
+    // 重构前是内联字面量、无断言；漏掉这条则「completion 不再带 PoW」会静默上线。
+    expect(sentHeaders?.['X-Ds-Pow-Response']).toBe('pow-ok');
   });
 
   it('classifies errors: 429 → rate-limited', () => {
@@ -139,8 +142,12 @@ describe('continueStream（feat/continue-on-incomplete）', () => {
   it('fail-to-pass: continueStream 请求 /chat/continue、不调 PoW、SSE 事件接线', async () => {
     let path = '';
     let sent: Record<string, string> = {};
+    // 2026-09-12（fix/final-review）：续接 SSE 带快照重发 + 真实 skip——
+    // 若 adapter 漏传 expectMessageId（或 skip 展开顺序变了），allowTrim 不会打开，
+    // 快照 'ab' 会被原样重发（重复文本 bug 复活）而套件仍绿。
     const sse = [
       'event: ready\ndata: {"request_message_id":3,"response_message_id":4}\n\n',
+      'data: {"v":{"response":{"message_id":4,"fragments":[{"id":3,"type":"RESPONSE","content":"ab"}]}}}\n\n',
       'data: {"p":"response/fragments/-1/content","o":"APPEND","v":"hi"}\n\n',
       'data: {"p":"response/status","o":"SET","v":"FINISHED"}\n\n',
     ].join('');
@@ -160,11 +167,13 @@ describe('continueStream（feat/continue-on-incomplete）', () => {
       { token: 'tok', requestId: 'r' },
       { providerId: 'deepseek', webSessionId: 's1', parentMessageId: 3 } as any,
       4,
-      { thinkingChars: 0, responseChars: 0 },
+      { thinkingChars: 0, responseChars: 2 },   // 已发 'ab' → 快照 'ab' 应被裁掉
     )) evs.push(ev);
     expect(path).toBe('/chat/continue');               // 无双前缀
     expect(sent['X-Ds-Pow-Response']).toBeUndefined();
     expect(evs.some((e) => e.kind === 'message_id' && e.id === 4)).toBe(true);
+    // 快照内容不得重发（expectMessageId 生效），追加内容照常
+    expect(evs.some((e) => e.kind === 'content_delta' && e.content.includes('ab'))).toBe(false);
     expect(evs.some((e) => e.kind === 'content_delta' && e.content === 'hi')).toBe(true);
   });
 });

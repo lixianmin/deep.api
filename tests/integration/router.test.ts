@@ -988,7 +988,13 @@ describe('断流自动续接（feat/continue-on-incomplete）', () => {
     expect(res.choices[0].message.content).toBe('abcdef');
     expect(calls).toHaveLength(2);
     expect(calls[1].skip.responseChars).toBe(4);                    // 'ab' + 'cd'
-    expect((r['d'].log.list().at(-1) as any).continueAttempts).toBe(2);
+    const e: any = r['d'].log.list().at(-1)!;
+    expect(e.continueAttempts).toBe(2);
+    // 2026-09-12（fix/final-review）：多段 stream_stats 累计（spec §3.7）——bytes 跨段求和；
+    // rawTail 取最后非空段（cont2 的 data 行拼接；若取首段会含 cont1 的 generation_err）。
+    const tailOf = (sse: string) => sse.split('\n').filter((l) => l.startsWith('data:')).map((l) => l.slice(5).trimStart()).join('\n').slice(-600);
+    expect(e.sseBytes).toBe(new TextEncoder().encode(cont1).length + new TextEncoder().encode(cont2).length);
+    expect(e.sseRawTail).toBe(tailOf(cont2));
   });
 
   it('三次续接仍断流 → 503（上限收敛）', async () => {
@@ -1012,6 +1018,8 @@ describe('断流自动续接（feat/continue-on-incomplete）', () => {
     await expect(r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'hi')] }))
       .rejects.toMatchObject({ status: 503, error: { error: { code: 'provider_unavailable' } } });
     expect(calls).toHaveLength(3);
+    // 2026-09-12（fix/final-review）：spec §7.4——失败日志的 continueAttempts 必须与事实一致
+    expect((r['d'].log.list().at(-1) as any).continueAttempts).toBe(3);
   });
 
   it('unsupported_client_by_model → 不调 continueStream，直接 503', async () => {
