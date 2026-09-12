@@ -95,6 +95,18 @@ describe('extractReadyIds', () => {
     const ids = extractReadyIds({ request_message_id: 123, response_message_id: 456, message_id: 456 });
     expect(ids).toEqual({ requestMessageId: 123, responseMessageId: 456 });
   });
+
+  it.each([
+    null,
+    undefined,
+    'not an object',
+    42,
+    [],
+    { request_message_id: '123', response_message_id: 456 },
+    { request_message_id: 123 },
+  ])('returns null for invalid ready data: %j', (data) => {
+    expect(extractReadyIds(data)).toBeNull();
+  });
 });
 describe('completionEvents', () => {
   it('streams chunks split across boundaries', async () => {

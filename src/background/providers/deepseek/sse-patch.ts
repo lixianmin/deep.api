@@ -13,6 +13,7 @@ export function parseSseText(text: string): SseEvent[] {
 }
 
 export function extractReadyIds(data: unknown): { requestMessageId: number; responseMessageId: number } | null {
+  if (typeof data !== 'object' || data === null || Array.isArray(data)) return null;
   const o = data as Record<string, unknown>;
   const a = o.request_message_id, b = o.response_message_id;
   if (typeof a === 'number' && typeof b === 'number') return { requestMessageId: a, responseMessageId: b };
