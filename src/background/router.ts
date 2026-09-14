@@ -7,7 +7,7 @@ import { SessionMapper, type ThreadEntry } from './session-mapper';
 import { Queue, QueueTimeoutError } from './queue';
 import { renderTranscript, renderTail, limitCharsFor } from './transcript-renderer';
 import { eventToChunks, finalChunk, toAggregate, toolCallDeltaChunks, type StreamAggregate, type StreamContext } from './chunk-encoder';
-import { buildToolPrompt, parseToolCalls, hasToolTags, type ToolContext } from './tool-pipeline';
+import { buildToolPrompt, parseToolCalls, hasToolTags, toolSpecFingerprint, type ToolContext } from './tool-pipeline';
 import { createDsmlStreamNormalizer } from './providers/deepseek/dsml-parser';
 import type { RingLog } from './log';
 import { toB64 } from './log';
@@ -51,6 +51,9 @@ interface RunState {
   continueAttempts: number;
   emittedThinkChars: number;
   emittedContentChars: number;
+  // 2026-09-14（feat/spec-compact-incremental）：本轮实际用到的工具 spec 变体（全量/精简），
+  // 进 requestFull 诊断——验证优化是否生效、漂移事件可按 specMode 关联（spec 评审 R5）。
+  specMode: 'full' | 'compact';
 }
 
 /** 2026-09-11（fix/review-r1）：会话字段在拿到队列锁后可能被「排队期间线程被推进」重决策改写，
@@ -270,6 +273,8 @@ export class Router {
       tools: ((p.tools as ToolDef[] | undefined) ?? []).map((t) => t.function?.name),
       refFileIds: refFileIds.length,
       promptLen: handle.run.promptLen,
+      // 2026-09-14（feat/spec-compact-incremental）：工具 spec 变体诊断（full/compact）。
+      specMode: handle.run.specMode,
     });
     const buildDiag = () => ({
       cid: handle.convId, msgsLen: messages.length, action: handle.action,
@@ -352,6 +357,9 @@ export class Router {
     const decision = this.d.mapper.decide(pid, messages, conversationId, resolved.modelType);
     if (decision.action === 'error') throw err(decision.code, decision.message, 400);
     let session: ProviderSession; let convId: string; let thread: ThreadEntry; let prompt: string;
+    // 2026-09-14（feat/spec-compact-incremental）：本轮实际用的 spec 变体。局部变量先行——
+    // `run` 对象在 prompt 构建之后才创建（spec 评审 R8），由下方初始化带入；afterLock 重决策处再同步。
+    let specMode: 'full' | 'compact' = 'full';
     if (decision.action === 'rebuild') {
       if (decision.existing && this.d.mapper.autoDeleteWebThreads) {
         // 2026-09-15（feat/auto-delete-web-threads）：默认关——rebuild 只弃用旧 web session，不删网页会话。
@@ -367,6 +375,7 @@ export class Router {
       prompt = renderTranscript(stringMessages).ok
         ? (renderTranscript(stringMessages) as { ok: true; prompt: string }).prompt + toolCtx.promptSuffix
         : '';   // 超限在下方统一检查
+      specMode = 'full';   // rebuild = 全新线程，全量 spec 必须随首轮转录进线程
     } else {
       thread = decision.thread; convId = decision.thread.conversationId;
       session = { providerId: pid, webSessionId: decision.thread.webSessionId, parentMessageId: decision.thread.parentMessageId };
@@ -376,14 +385,20 @@ export class Router {
         ...m,
         content: typeof m.content === 'string' || m.content === null ? m.content : renderMessageContent(m),
       }));
-      prompt = renderTail(tail, messages) + toolCtx.promptSuffix;
+      // 2026-09-14（feat/spec-compact-incremental）：增量轮只读比较指纹（**不在预锁期写**，spec 评审 R2：
+      // 队列超时场景 full spec 未落线，写指纹会留「假已含」标记）。匹配=线程已含同工具集全量 spec →
+      // compact；undefined（旧持久化）/不匹配 → 全量回补，commit 时才更新指纹。
+      const fp = toolSpecFingerprint(toolCtx.tools);
+      specMode = thread.toolSpecFingerprint === fp ? 'compact' : 'full';
+      const suffix = specMode === 'compact' ? toolCtx.compactSuffix : toolCtx.promptSuffix;
+      prompt = renderTail(tail, messages) + suffix;
       this.d.mapper.markBusy(pid, convId, ctx.requestId);
     }
     if (prompt.length > resolved.limitChars) {
       await this.d.mapper.fail(pid, convId, ctx.requestId);
       throw err('invalid_request_error', `transcript too long: ${prompt.length} > ${resolved.limitChars}（建议缩短历史或分批）`, 400);
     }
-    const run: RunState = { parentMessageId: null, repairDone: false, model: resolved, promptLen: prompt.length, continueAttempts: 0, emittedThinkChars: 0, emittedContentChars: 0 };
+    const run: RunState = { parentMessageId: null, repairDone: false, model: resolved, promptLen: prompt.length, continueAttempts: 0, emittedThinkChars: 0, emittedContentChars: 0, specMode };
     const req: ProviderCompletion = { session, prompt, model: { modelType: resolved.modelType, thinking: resolved.thinking }, overrides, requestId: ctx.requestId, ...(refFileIds.length ? { refFileIds } : {}) };
     const handle: RunHandle = {
       stream: null as unknown as AsyncIterable<ProviderStreamEvent>,
@@ -414,7 +429,12 @@ export class Router {
           ...m,
           content: typeof m.content === 'string' || m.content === null ? m.content : renderMessageContent(m),
         }));
-        const nextPrompt = renderTail(tail, messages) + toolCtx.promptSuffix;
+        // 2026-09-14（feat/spec-compact-incremental）：重决策按**当时**线程指纹再选变体——
+        // 并发的另一请求可能已 commit 更新指纹（线程确实已含新全量 spec），比较必须重来。
+        const fp = toolSpecFingerprint(toolCtx.tools);
+        handle.run.specMode = d2.thread.toolSpecFingerprint === fp ? 'compact' : 'full';
+        const suffix = handle.run.specMode === 'compact' ? toolCtx.compactSuffix : toolCtx.promptSuffix;
+        const nextPrompt = renderTail(tail, messages) + suffix;
         if (nextPrompt.length > resolved.limitChars) {
           await this.d.mapper.fail(pid, d2.thread.conversationId, ctx.requestId);
           throw err('invalid_request_error', `transcript too long: ${nextPrompt.length} > ${resolved.limitChars}（建议缩短历史或分批）`, 400);
@@ -444,6 +464,7 @@ export class Router {
       handle.session = req.session; handle.convId = newConvId; handle.thread = t2;
       handle.action = 'rebuild'; handle.mirrorLen = t2.mirror.length; handle.deletedOld = d2.existing !== null; handle.threadFound = true;
       handle.run.promptLen = nextPrompt.length;
+      handle.run.specMode = 'full';   // 重建 = 全新线程，全量 spec 随首轮转录进线程
     });
     return handle;
   }
@@ -612,7 +633,9 @@ export class Router {
     // tail 首条是 user → 命中 incremental → 复用同一 DeepSeek 会话与 parent_message_id 链（上下文不丢）。
     const mirrorMessages: Message[] = [...messages, { role: 'assistant', content: agg.content, ...(toolCalls.length ? { tool_calls: toolCalls } : {}) }];
     // 2026-09-09（fix/model-switch-rebuild）：commit 时同步 modelType，让 mapper 跟踪 cid ↔ 模型。
-    this.d.mapper.commit(provider.id, handle.convId, mirrorMessages, handle.session.webSessionId, handle.run.parentMessageId ?? handle.session.parentMessageId, handle.run.model.modelType);
+    // 2026-09-14（feat/spec-compact-incremental）：commit 携指纹（唯一写入点，spec 评审 R2）——
+    // 本轮全量/compact 的 prompt 已落线，标「线程已含该工具集全量 spec」。
+    this.d.mapper.commit(provider.id, handle.convId, mirrorMessages, handle.session.webSessionId, handle.run.parentMessageId ?? handle.session.parentMessageId, handle.run.model.modelType, toolSpecFingerprint(toolCtx.tools));
     agg.toolCalls = toolCalls;
     agg.finishReason = agg.finishReason ?? 'stop';
   }
@@ -752,7 +775,8 @@ export class Router {
         // 修：mirror 用剥前原始文本（sentRawContent），与 SSE 发出的 content 保持一致。
         const mirrorMessages: Message[] = [...messages, { role: 'assistant', content: sentRawContent, ...(agg.toolCalls.length ? { tool_calls: agg.toolCalls } : {}) }];
         // 2026-09-09（fix/model-switch-rebuild）：commit 时同步 modelType。
-        self.d.mapper.commit(provider.id, handle.convId, mirrorMessages, handle.session.webSessionId, handle.run.parentMessageId ?? handle.session.parentMessageId, handle.run.model.modelType);
+        // 2026-09-14（feat/spec-compact-incremental）：commit 携指纹（唯一写入点，spec 评审 R2）。
+        self.d.mapper.commit(provider.id, handle.convId, mirrorMessages, handle.session.webSessionId, handle.run.parentMessageId ?? handle.session.parentMessageId, handle.run.model.modelType, toolSpecFingerprint(toolCtx.tools));
         completed = true;
         done(true, self.d.now() - started, undefined, { finishReason: agg.finishReason ?? 'stop', parentMessageId: handle.run.parentMessageId, replySample: agg.content.slice(0, 1200), rawSample: rawContent.slice(0, B64_SAMPLE_CHARS), reasoningSample: agg.reasoning.slice(0, 200), sseBytes: handle.run.sseBytes, ssePaths: handle.run.ssePaths, sseRaw: handle.run.sseRaw, sseStatusValues: handle.run.sseStatusValues, sseThinkingChars: handle.run.sseThinkingChars, sseResponseChars: handle.run.sseResponseChars, sseRawTail: handle.run.sseRawTail, sseAutoResume: handle.run.sseAutoResume, sseHasPendingFragment: handle.run.sseHasPendingFragment, continueAttempts: handle.run.continueAttempts });
       } catch (e) {

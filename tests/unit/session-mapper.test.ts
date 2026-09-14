@@ -229,6 +229,34 @@ describe('SessionMapper 周期 sweep（fix/evict-expired）', () => {
   });
 });
 
+// 2026-09-14（feat/spec-compact-incremental）：ThreadEntry.toolSpecFingerprint——
+// 唯一写入点为 commit（评审 R2：预锁期写入会留“假已含”标记）；
+// 旧持久化无字段 → undefined；serialize/restore 自然带走；commit 兜底 register 转发。
+describe('toolSpecFingerprint 落线（spec-compact-incremental）', () => {
+  it('commit 写入指纹；serialize→restore 保留', () => {
+    const { mapper } = mk();
+    mapper.register('deepseek', 'conv-1', 's1', [m('user', 'a')]);
+    mapper.commit('deepseek', 'conv-1', [m('user', 'a'), m('assistant', 'b')], 's1', 7, 'default', 'fp-abc');
+    expect((mapper as any).threads.get('deepseek:conv-1').toolSpecFingerprint).toBe('fp-abc');
+    const snap = (mapper as any).serialize();
+    const m2 = (() => { const { mapper: mm } = mk(); (mm as any).restore(snap); return mm; })();
+    expect((m2 as any).threads.get('deepseek:conv-1').toolSpecFingerprint).toBe('fp-abc');
+  });
+
+  it('缺省不写（旧数据无字段 → undefined）', () => {
+    const { mapper } = mk();
+    mapper.register('deepseek', 'conv-1', 's1', [m('user', 'a')]);
+    mapper.commit('deepseek', 'conv-1', [m('user', 'a')], 's1', 1, 'default');
+    expect((mapper as any).threads.get('deepseek:conv-1').toolSpecFingerprint).toBeUndefined();
+  });
+
+  it('commit 缺线程 → 兜底 register 转发指纹', () => {
+    const { mapper } = mk();
+    mapper.commit('deepseek', 'conv-2', [m('user', 'a')], 's1', 1, 'default', 'fp-zz');
+    expect((mapper as any).threads.get('deepseek:conv-2').toolSpecFingerprint).toBe('fp-zz');
+  });
+});
+
 describe('SessionMapper persist debounce（fix/persist-debounce，2026-09-09）', () => {
   it('fail-to-pass: 100ms 内连续 commit 只触发一次 onPersist', async () => {
     vi.useFakeTimers();

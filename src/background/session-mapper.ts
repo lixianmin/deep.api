@@ -51,6 +51,11 @@ export interface ThreadEntry {
   // 写入，decide 时比对，不一致 → rebuild 走 deleteSession+createSession+renderTranscript。
   // 未设置（undefined）：旧持久化 thread 走「不约束」路径，避免 SW 重启后首轮误 rebuild。
   modelType?: 'default' | 'expert' | 'vision';
+  // 2026-09-14（feat/spec-compact-incremental）：线程已含的全量工具 spec 指纹（tool-pipeline
+  // toolSpecFingerprint，基于 toolCtx.tools）。**唯一写入点 = commit**（spec 评审 R2：prompt
+  // 构建期/register 写入会在队列超时场景留下「假已含」标记——full spec 实际未落线）。
+  // router 增量轮据此决定发 compact 还是全量；undefined（旧持久化/未 commit）→ 首轮全量回补。
+  toolSpecFingerprint?: string;
 }
 
 export type Decision =
@@ -167,7 +172,7 @@ export class SessionMapper {
     return { action: 'rebuild', existing: null };
   }
 
-  register(providerId: string, conversationId: string, webSessionId: string, mirror: Message[], modelType?: 'default' | 'expert' | 'vision'): ThreadEntry {
+  register(providerId: string, conversationId: string, webSessionId: string, mirror: Message[], modelType?: 'default' | 'expert' | 'vision', toolSpecFingerprint?: string): ThreadEntry {
     const t: ThreadEntry = {
       providerId, conversationId, webSessionId, parentMessageId: null,
       mirror: mirror.map(x => ({ ...x })),
@@ -175,6 +180,7 @@ export class SessionMapper {
       kind: conversationId.startsWith('auto:') ? 'auto' : 'named',
       idleSince: this.deps.now(), lastUsedAt: this.deps.now(), busy: false,
       modelType,
+      toolSpecFingerprint,
     };
     if (this.threads.has(this.key(providerId, conversationId))) this.threads.delete(this.key(providerId, conversationId));
     this.threads.set(this.key(providerId, conversationId), t);
@@ -223,13 +229,16 @@ export class SessionMapper {
     return this.threads.get(this.key(providerId, conversationId));
   }
 
-  commit(providerId: string, conversationId: string, messages: Message[], webSessionId: string, parentMessageId: number | string | null, modelType?: 'default' | 'expert' | 'vision') {
+  commit(providerId: string, conversationId: string, messages: Message[], webSessionId: string, parentMessageId: number | string | null, modelType?: 'default' | 'expert' | 'vision', toolSpecFingerprint?: string) {
     const t = this.threads.get(this.key(providerId, conversationId));
-    if (!t) { this.register(providerId, conversationId, webSessionId, messages, modelType); return; }
+    if (!t) { this.register(providerId, conversationId, webSessionId, messages, modelType, toolSpecFingerprint); return; }
     t.mirror = messages.map(x => ({ ...x }));
     t.mirrorHash = hashMirror(t.mirror);
     t.parentMessageId = parentMessageId;
     if (modelType !== undefined) t.modelType = modelType;   // commit 调用者总是带新 modelType，覆盖以保证该轮成功后状态一致
+    // 2026-09-14（feat/spec-compact-incremental）：指纹唯一写入点。缺省（undefined）不回写——
+    // 老持久化/既有调用路径不传，保持 undefined 语义（route 侧首轮按不匹配走全量）。
+    if (toolSpecFingerprint !== undefined) t.toolSpecFingerprint = toolSpecFingerprint;
     t.busy = false;
     t.busyToken = undefined;
     t.lastUsedAt = this.deps.now();

@@ -2,11 +2,14 @@ import type { ToolChoice, ToolDef, ToolCall } from '../shared/api-types';
 import { parseDsmlToolCalls, hasDsmlToolTags, firstToolBlockOpen } from './providers/deepseek/dsml-parser';
 
 
-/** tools 透传给调用方：DSML 解析需要工具 schema 才能把 `string="false"` 参数转成正确类型。 */
-export interface ToolContext { promptSuffix: string; tools: ToolDef[] }
+/** tools 透传给调用方：DSML 解析需要工具 schema 才能把 `string="false"` 参数转成正确类型。
+ *  2026-09-14（feat/spec-compact-incremental）：双后缀——promptSuffix 是全量 spec（首轮 rebuild
+ *  用，非空 = 工具激活，现有判断不变）；compactSuffix 是增量轮精简提醒（工具定义已随首轮写入
+ *  有状态网页线程，不再重复；见 spec docs/superpowers/specs/2026-09-14-spec-compact-incremental-design.md）。 */
+export interface ToolContext { promptSuffix: string; compactSuffix: string; tools: ToolDef[] }
 
 export function buildToolPrompt(tools: ToolDef[], toolChoice: ToolChoice): ToolContext {
-  if (!tools?.length || toolChoice === 'none') return { promptSuffix: '', tools: [] };
+  if (!tools?.length || toolChoice === 'none') return { promptSuffix: '', compactSuffix: '', tools: [] };
   const defs = tools.map(t => `- ${t.function.name}${t.function.description ? `: ${t.function.description}` : ''}\n  参数 JSON Schema: ${JSON.stringify(t.function.parameters ?? {})}`).join('\n');
   const formatBlock = `### 格式规范
 将工具调用输出为 JSON 数组，包裹在 <tool_calls>…</tool_calls> 内，每个元素形如：
@@ -26,7 +29,42 @@ export function buildToolPrompt(tools: ToolDef[], toolChoice: ToolChoice): ToolC
         ? `仅可调用工具 ${toolChoice.function.name}。`
         : '按需调用。';
   const instructionBlock = `### 调用指令\n${instruction}`;
-  return { promptSuffix: `\n\n${formatBlock}\n\n${defsBlock}\n\n${instructionBlock}\n`, tools };
+  // 2026-09-14（feat/spec-compact-incremental）：compact 提醒只用于增量轮——首轮 rebuild 的
+  // 全量 spec（含完整参数 Schema）已随转录写入线程，增量轮重发是纯浪费（30 轮积 ~40K tokens
+  // 样板副本）。compact 不含 Schema，但逐模式约束行与 09-12 instruction 硬化语义等价：
+  // auto 的「无块纯文本只允许总结/提问」、required 的「必须调用工具」、named 的「仅可调用 X」
+  // 全部保留在即时上下文（spec §修法/1 与「与 09-12 spec 的关系」）。
+  const names = tools.map((t) => t.function.name).join(', ');
+  const formatLine = '调用格式不变：<tool_calls> 内输出 JSON 数组，每元素形如 {"id":"<id>","type":"function","function":{"name":"<name>","arguments":"<args-json-string>"}}，arguments 必须是 JSON 字符串（外层先 stringify）。';
+  const compactInstruction = toolChoice === 'auto'
+    ? '不携带工具块的纯文本只允许两种：最终总结，或向用户提问。'
+    : toolChoice === 'required'
+      ? '必须调用至少一个工具；不允许只给出纯文本回答。'
+      : typeof toolChoice === 'object'
+        ? `仅可调用工具 ${toolChoice.function.name}。`
+        : '按需调用。';
+  const compactSuffix = `\n\n### 工具调用提醒\n工具集与本会话前文一致（完整参数 Schema 见前文，不重复）。可用工具：${names}\n${formatLine}\n${compactInstruction}\n`;
+  return { promptSuffix: `\n\n${formatBlock}\n\n${defsBlock}\n\n${instructionBlock}\n`, compactSuffix, tools };
+}
+
+// 2026-09-14（feat/spec-compact-incremental）：工具集指纹——FNV-1a 64-bit（与 session-mapper
+// 同一算法思路，此处内置实现避免反向依赖）。按 function.name 排序后再 stringify：harness 顺序
+// 抖动不误判全量（spec 评审 R3）。基于 toolCtx.tools（buildToolPrompt 归一化后的集合，
+// none/空集强制为 []），无工具 → '' 稳定常量（spec 评审 R6，与 undefined 的「旧持久化缺失」
+// 区分——都走全量，但语义精确）。 */
+function fnv1a64(str: string): string {
+  let hash = 0xcbf29ce484222325n;
+  for (let i = 0; i < str.length; i++) {
+    hash = (hash ^ BigInt(str.charCodeAt(i))) & 0xffffffffffffffffn;
+    hash = (hash * 0x100000001b3n) & 0xffffffffffffffffn;
+  }
+  return hash.toString(16).padStart(16, '0');
+}
+
+export function toolSpecFingerprint(tools: ToolDef[]): string {
+  if (!tools?.length) return '';
+  const sorted = [...tools].sort((a, b) => (a.function.name < b.function.name ? -1 : a.function.name > b.function.name ? 1 : 0));
+  return fnv1a64(JSON.stringify(sorted));
 }
 
 /** 内容中是否存在"可能为工具调用"的标签块（用于区分"模型未调用工具"与"调用了但 JSON 解析失败"）。

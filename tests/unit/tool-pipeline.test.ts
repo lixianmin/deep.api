@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildToolPrompt, parseToolCalls, hasToolTags } from '../../src/background/tool-pipeline';
+import { buildToolPrompt, parseToolCalls, hasToolTags, toolSpecFingerprint } from '../../src/background/tool-pipeline';
 import type { ToolDef } from '../../src/shared/api-types';
 
 describe('buildToolPrompt', () => {
@@ -220,4 +220,46 @@ describe('parseToolCalls', () => {
     });
   });
 
+});
+
+// 2026-09-14（feat/spec-compact-incremental，spec docs/superpowers/specs/2026-09-14-spec-compact-incremental-design.md）：
+// 增量轮不再重发全量工具 spec（已随首轮 rebuild 进线程），改发 compact 提醒。
+// 本组锁定：compact 不含完整 Schema、含逐模式约束行（保住 09-12 instruction 硬化）、
+// 指纹顺序不敏感。
+describe('buildToolPrompt compactSuffix（spec-compact-incremental）', () => {
+  const tools: ToolDef[] = [{ type: 'function', function: { name: 'f', description: 'd', parameters: { type: 'object' } } }];
+  it('auto compact：提醒/格式行/工具名/约束齐全，不含完整 Schema', () => {
+    const c = buildToolPrompt(tools, 'auto').compactSuffix;
+    expect(c).toContain('工具调用提醒');
+    expect(c).toContain('工具集与本会话前文一致');
+    expect(c).toContain('f');
+    expect(c).toContain('<tool_calls>');
+    expect(c).toContain('arguments 必须是 JSON 字符串');
+    expect(c).toContain('最终总结，或向用户提问');
+    expect(c).not.toContain('参数 JSON Schema');
+  });
+
+  it('required compact 含必调约束；named 含仅可调用', () => {
+    expect(buildToolPrompt(tools, 'required').compactSuffix).toContain('必须调用至少一个工具');
+    expect(buildToolPrompt(tools, { type: 'function', function: { name: 'f' } }).compactSuffix).toContain('仅可调用工具 f');
+  });
+
+  it('无工具 / none → compactSuffix 为空，且全量 promptSuffix 含 Schema（不回归）', () => {
+    expect(buildToolPrompt([], 'auto').compactSuffix).toBe('');
+    expect(buildToolPrompt(tools, 'none').compactSuffix).toBe('');
+    expect(buildToolPrompt(tools, 'auto').promptSuffix).toContain('参数 JSON Schema');
+  });
+});
+
+describe('toolSpecFingerprint（spec-compact-incremental）', () => {
+  it('同工具集不同顺序 → 相同指纹', () => {
+    const a: ToolDef[] = [{ type: 'function', function: { name: 'b', parameters: { type: 'object' } } }, { type: 'function', function: { name: 'a' } }];
+    const b: ToolDef[] = [{ type: 'function', function: { name: 'a' } }, { type: 'function', function: { name: 'b', parameters: { type: 'object' } } }];
+    expect(toolSpecFingerprint(a)).toBe(toolSpecFingerprint(b));
+  });
+
+  it('集合变化 → 指纹不同；无工具 → \'\'', () => {
+    expect(toolSpecFingerprint([{ type: 'function', function: { name: 'a' } }])).not.toBe(toolSpecFingerprint([{ type: 'function', function: { name: 'b' } }]));
+    expect(toolSpecFingerprint([])).toBe('');
+  });
 });

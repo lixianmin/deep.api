@@ -17,7 +17,7 @@ const MODELS = [
 
 type StubExtras = Partial<ProviderAdapter> & { prompts?: string[] };
 
-function stubAdapter(over: StubExtras = {}): ProviderAdapter {
+function stubAdapter(over: StubExtras = {}): ProviderAdapter & { prompts: string[] } {
   const prompts: string[] = [];
   let seq = 0;
   const base: ProviderAdapter = {
@@ -1181,5 +1181,59 @@ describe('断流自动续接（feat/continue-on-incomplete）', () => {
     await expect(r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'hi')] }))
       .rejects.toMatchObject({ status: 503, error: { error: { code: 'provider_unavailable' } } });
     expect(calls).toBe(3);
+  });
+});
+
+// 2026-09-14（feat/spec-compact-incremental，spec docs/superpowers/specs/2026-09-14-spec-compact-incremental-design.md）：
+// 增量轮不再重发全量工具 spec（首轮 rebuild 已随转录进线程）。
+// 本组锁定：round1 全量；同工具 incremental → compact；换工具 → 全量并更新指纹；
+// afterLock 重决策变体跟随行动；requestFull.specMode 诊断字段。
+describe('spec-compact-incremental：增量轮精简工具 spec', () => {
+  const TOOLS_A = [{ type: 'function', function: { name: 'Read', description: 'read', parameters: { type: 'object' } } }];
+  const TOOLS_B = [{ type: 'function', function: { name: 'Write', description: 'write', parameters: { type: 'object' } } }];
+  const A = '参数 JSON Schema';
+  const B = '工具调用提醒';
+
+  it('fail-to-pass: round1 rebuild 全量；round2 同工具 incremental → compact；round3 换工具 → 全量；round4 同新工具 → compact', async () => {
+    const a = stubAdapter(); const r = makeRouter(a);
+    await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'q1')], tools: TOOLS_A });
+    expect(a.prompts[0]).toContain(A);
+
+    await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'q1'), m('assistant', 'ok'), m('user', 'q2')], tools: TOOLS_A });
+    expect(a.prompts[1]).not.toContain(A);
+    expect(a.prompts[1]).toContain(B);
+
+    await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'q1'), m('assistant', 'ok'), m('user', 'q2'), m('assistant', 'ok'), m('user', 'q3')], tools: TOOLS_B });
+    expect(a.prompts[2]).toContain(A);
+
+    await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'q1'), m('assistant', 'ok'), m('user', 'q2'), m('assistant', 'ok'), m('user', 'q3'), m('assistant', 'ok'), m('user', 'q4')], tools: TOOLS_B });
+    expect(a.prompts[3]).not.toContain(A);
+    expect(a.prompts[3]).toContain(B);
+  });
+
+  it('fail-to-pass: afterLock 重决策 incremental→rebuild → 重建 prompt 用全量（变体跟随行动）', async () => {
+    const a = stubAdapter(); const r = makeRouter(a);
+    const s1 = await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'q1')], tools: TOOLS_A, stream: true, conversation_id: 'cid' });
+    for await (const _c of s1 as AsyncIterable<unknown>) { void _c; }
+    expect(a.prompts[0]).toContain(A);
+
+    const s2 = await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'q1'), m('assistant', 'ok'), m('user', 'q2')], tools: TOOLS_A, stream: true, conversation_id: 'cid' });
+    // 拉流前：并发请求把镜像改写为不匹配内容 → afterLock 重决策落 rebuild
+    (r as any).d.mapper.commit('deepseek', 'cid', [m('user', 'unrelated')], 'sX', 999, 'default');
+    for await (const _c of s2 as AsyncIterable<unknown>) { void _c; }
+    expect(a.prompts[1]).toContain(A);
+    expect(a.prompts[1]).not.toContain(B);
+  });
+
+  it('fail-to-pass: requestFull.specMode 随轮次记录 full/compact（诊断字段）', async () => {
+    const a = stubAdapter(); const r = makeRouter(a);
+    await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'q1')], tools: TOOLS_A });
+    await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'q1'), m('assistant', 'ok'), m('user', 'q2')], tools: TOOLS_A });
+    await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'q1'), m('assistant', 'ok'), m('user', 'q2'), m('assistant', 'ok'), m('user', 'q3')], tools: TOOLS_B });
+    const logs = r['d'].log.list();
+    const specOf = (i: number) => JSON.parse((logs.at(i) as any).requestFull!).specMode;
+    expect(specOf(-3)).toBe('full');
+    expect(specOf(-2)).toBe('compact');
+    expect(specOf(-1)).toBe('full');
   });
 });
