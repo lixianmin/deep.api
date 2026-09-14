@@ -177,12 +177,35 @@
 
 ## 13. 代码变更流程
 
-涉及代码变更的调整（如：修 bug、新功能），必须在主目录之外创建 git worktree 开发。编码期间禁止修改主目录任何文件，以支持 coding agent 与人类同时修改同一个项目。完成后：
+涉及代码变更的调整（如：修 bug、新功能），必须在主目录之外创建 git worktree 开发（仓外兄弟路径 `~/me/code/deep-api-<branch>`）。编码期间禁止修改主目录任何文件。
 
-1. 在 worktree 内开发并提交，测试通过后进入下一步。
-2. git fetch origin，在 worktree 内把当前分支 rebase 到 origin/main（用 rebase 保持线性历史，第 4 步才能 fast-forward 合并）；冲突则停下询问；重跑测试，通过后进入下一步。
-3. 回到主目录：git fetch origin，把 main 快进到 origin/main；失败说明主目录有本地未推的改动，停下询问。
-4. 在主目录把 worktree 分支快进合并进 main；无法快进说明分支未基于最新 main，回到第 2 步；重跑全部测试，通过后 push 到 origin/main。
-5. 删除 worktree。
+合并一律走 `scripts/merge.sh`（在 worktree 内运行），禁止手敲 rebase/merge/push 序列：
 
-文档类修改（docs/、注释、错别字）、纯机械代码改动（错别字、局部变量改名、加日志行，同 §11 例外，须跑通相关测试）及记忆维护（docs/01.memory.md、docs/02.todo.md）不走此流程。
+1. worktree 内开发并提交，提交前跑通相关测试。
+2. 跑 `scripts/spice-merge.sh`。它分三段：
+   - A 前置检查：工作树干净（含未跟踪文件）、非 main 分支、根 node_modules 就绪。
+   - B 临界区（持 `<git-common-dir>/deep-api-merge.lock`）：`fetch` → `rebase origin/main`
+     → `bunx vitest run` → `bunx tsc --noEmit`（根目录）→ `push origin HEAD:refs/heads/main`。
+   - C 主目录跟随：仅当主目录签出 main、工作树干净、且无 `origin/main` 之外的分叉提交时
+     `merge --ff-only origin/main`（失败仅告警）。
+3. 按退出码决策：2 前置不满足；3 等待锁超时；4 rebase 冲突（脚本已 abort 并释放锁，
+   在 worktree 内解决后重跑）；5 测试或类型检查失败（修代码后重跑）；6 push 被拒（有进程
+   绕过脚本推送了 main，报告人类）；7 环境/基础设施失败（网络、凭据、锁文件不可创建，
+   直接重试）；130/143 被中断。
+4. 合并成功后删除 worktree。
+
+并发：多 session 同时合并由文件锁串行化，等待者打印等待进度。锁由内核持有，持有者进程树
+消亡即释放，无陈旧锁（不需 PID 文件 / 心跳 / TTL）。
+
+主目录永不作为集成检出：不 rebase、不非 ff 合并。若主目录出现 origin/main 之外的本地提交，
+脚本告警，由人类处理。
+
+**派发的子代理禁止执行 merge / push / rebase / 删除 worktree**——子代理只能在 worktree 内
+`git add` + `git commit`；合并与推送由发起会话的 agent 或人类执行。（2026-09-15 实证：
+曾有实施者子代理擅自把分支合入 main、推送到 origin、并删掉 worktree。）
+
+e2e 验收禁止无条件 kill 端口占用者（如 `lsof -ti:<port> | xargs kill -9`）——它跨 session 有效，
+会杀掉他人正在运行的 dev server。改为先探测端口，被占用则报错退出并提示。
+
+文档类修改（docs/、注释、错别字）、纯机械代码改动（错别字、局部变量改名、加日志行，同 §11
+例外，须跑通相关测试）及记忆维护（docs/01.memory.md、docs/02.todo.md）不走此流程。
