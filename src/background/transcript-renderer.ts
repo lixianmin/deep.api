@@ -26,10 +26,10 @@ function renderOne(msg: Message): string {
 }
 
 // 2026-09-09（fix/full-tool-prompt）：tool_call_id → 函数名，用于「【工具结果 <name>】」标注。
-// 反查同批 messages 里 assistant.tool_calls（OpenAI 形状）的 function.name；找不到就回退 unknown。
-function toolNameFor(messages: Message[], toolMsg: Message): string {
+// 反查 labelContext（默认 = 本批 messages，即 OpenAI 形状里 assistant.tool_calls 的 function.name）；找不到就回退 unknown。
+function toolNameFor(labelContext: Message[], toolMsg: Message): string {
   if (!toolMsg.tool_call_id) return 'unknown';
-  for (const msg of messages) {
+  for (const msg of labelContext) {
     if (msg.role === 'assistant' && msg.tool_calls) {
       const tc = msg.tool_calls.find((t) => t.id === toolMsg.tool_call_id);
       if (tc) return tc.function.name;
@@ -40,6 +40,7 @@ function toolNameFor(messages: Message[], toolMsg: Message): string {
 
 export function renderTranscript(
   messages: Message[],
+  labelContext?: Message[],
 ): { ok: true; prompt: string } | { ok: false; reason: 'too-long'; limitChars: number; actualChars: number } {
   const merged = mergeAdjacent(messages);
   // system 折叠：拼到首条 user 消息前（用户决策：保留 system 效果的最小注入）
@@ -54,14 +55,16 @@ export function renderTranscript(
   for (const msg of merged) {
     if (msg.role === 'system' || msg.role === 'assistant') continue;
     if (msg.role === 'user') parts.push(renderOne(msg));
-    else if (msg.role === 'tool') parts.push(`【工具结果 ${toolNameFor(merged, msg)}】\n${renderOne(msg)}`);
+    else if (msg.role === 'tool') parts.push(`【工具结果 ${toolNameFor(labelContext ?? messages, msg)}】\n${renderOne(msg)}`);
   }
   const content = parts.join('\n\n');
   const sys = systems.length ? '【系统指令】\n' + systems.join('\n\n') + '\n\n' : '';
   return { ok: true, prompt: sys + content };
 }
 
-export function renderTail(tail: Message[]): string {
-  const r = renderTranscript(tail);
+// 2026-09-11（fix/toollabel-incremental）：增量路径 tail 里没有 assistant(tool_calls)（已 commit 进 mirror），
+// 反查函数名必须用完整 messages（labelContext）；否则每个工具结果都标成 unknown。content 仍只渲染 tail 本身。
+export function renderTail(tail: Message[], labelContext?: Message[]): string {
+  const r = renderTranscript(tail, labelContext);
   return r.ok ? r.prompt : '';
 }

@@ -58,3 +58,35 @@ describe('renderTranscript with tool results (fix/full-tool-prompt)', () => {
     expect(r.prompt).toMatch(/【工具[^】]*Read[^】]*】/);
   });
 });
+
+// 2026-09-11（fix/toollabel-incremental）：agent loop 第二轮走 incremental，tail 只含本轮新增的
+// tool 消息（assistant(tool_calls) 已在上一轮 commit 进 mirror，不在 tail 里）——旧实现 renderTail(tail)
+// 只在自己的数组里反查，永远回退 'unknown'。修：renderTail 增加 labelContext，用完整 messages 反查。
+describe('renderTail with label context (fix/toollabel-incremental)', () => {
+  it('fail-to-pass: 增量 tail 只有 tool 消息时，仍用完整 messages 反查出函数名', () => {
+    const tail = [
+      m('tool', '{"version":1,"parts":[]}', { tool_call_id: 'c1' }),
+      m('tool', 'void setup() {}', { tool_call_id: 'c2' }),
+    ];
+    // 模拟 round 2 调用方的完整 messages：assistant(tool_calls) 在 mirror 里，本轮只新增了 tool 结果
+    const context = [
+      m('user', '帮我修改电路图加5个LED'),
+      m('assistant', '', { tool_calls: [
+        { id: 'c1', type: 'function', function: { name: 'Read', arguments: '{"path":"diagram.json"}' } },
+        { id: 'c2', type: 'function', function: { name: 'Write', arguments: '{"path":"sketch.ino"}' } },
+      ] }),
+    ];
+    const r = renderTail(tail, context);
+    expect(r).toContain('【工具结果 Read】');
+    expect(r).toContain('【工具结果 Write】');
+    expect(r).not.toContain('unknown');
+  });
+
+  it('不传 context 时回退到 tail 自身（兼容旧调用）', () => {
+    const r = renderTail([
+      m('assistant', '', { tool_calls: [{ id: 'c1', type: 'function', function: { name: 'F', arguments: '{}' } }] }),
+      m('tool', 'result', { tool_call_id: 'c1' }),
+    ]);
+    expect(r).toContain('【工具结果 F】');
+  });
+});

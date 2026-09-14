@@ -376,7 +376,7 @@ export class Router {
         ...m,
         content: typeof m.content === 'string' || m.content === null ? m.content : renderMessageContent(m),
       }));
-      prompt = renderTail(tail) + toolCtx.promptSuffix;
+      prompt = renderTail(tail, messages) + toolCtx.promptSuffix;
       this.d.mapper.markBusy(pid, convId, ctx.requestId);
     }
     if (prompt.length > resolved.limitChars) {
@@ -414,7 +414,7 @@ export class Router {
           ...m,
           content: typeof m.content === 'string' || m.content === null ? m.content : renderMessageContent(m),
         }));
-        const nextPrompt = renderTail(tail) + toolCtx.promptSuffix;
+        const nextPrompt = renderTail(tail, messages) + toolCtx.promptSuffix;
         if (nextPrompt.length > resolved.limitChars) {
           await this.d.mapper.fail(pid, d2.thread.conversationId, ctx.requestId);
           throw err('invalid_request_error', `transcript too long: ${nextPrompt.length} > ${resolved.limitChars}（建议缩短历史或分批）`, 400);
