@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- **验收基线：`bun run test` 现有 494 个测试全绿，且不得修改任何现有断言。** 这是本阶段唯一的正确性判据——重构必须外部行为不变。
+- **验收基线：`bun run test` 现有 535 个测试全绿，且不得修改任何现有断言。** 这是本阶段唯一的正确性判据——重构必须外部行为不变。
 - 提交走 `scripts/merge.sh`（worktree 内发起），不手敲 rebase/merge/push。
 - 每个方法不超过 50 行；每个 magic number 注释说明为什么是该值。
 - 新增/修改代码注释用中文，解释「为什么」而非「做了什么」。
@@ -133,7 +133,7 @@ Expected: PASS（4 个用例）
 - [ ] **Step 10: 跑全量确认无回归**
 
 Run: `bun run test`
-Expected: 494 + 4 = 498 passed，无失败。**若有用例失败，说明本任务改变了 DeepSeek 行为 —— 停下来查，不要改断言。**
+Expected: 535 + 4 = 539 passed，无失败。**若有用例失败，说明本任务改变了 DeepSeek 行为 —— 停下来查，不要改断言。**
 
 - [ ] **Step 11: 提交**
 
@@ -182,7 +182,7 @@ Expected: PASS
 - [ ] **Step 5: 跑全量 + 类型检查**
 
 Run: `bun run test && bunx tsc --noEmit`
-Expected: 498 passed，tsc 0 错误。tsc 报错说明有隐藏读取点，顺着报错找到并判断是真依赖（则**回滚本任务**并写进 spec）还是漏删。
+Expected: 539 passed，tsc 0 错误。tsc 报错说明有隐藏读取点，顺着报错找到并判断是真依赖（则**回滚本任务**并写进 spec）还是漏删。
 
 - [ ] **Step 6: 提交**
 
@@ -266,7 +266,7 @@ export function limitCharsFor(_variant: ModelVariant): number {
 - [ ] **Step 7: 跑全量 + 类型检查**
 
 Run: `bun run test && bunx tsc --noEmit`
-Expected: 498 + 2 = 500 passed，tsc 0 错误。
+Expected: 539 + 2 = 541 passed，tsc 0 错误。
 
 - [ ] **Step 8: 确认存储键没被改动**
 
