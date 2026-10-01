@@ -49,6 +49,8 @@ function setup(adapter: ProviderAdapter, storageGet: (k: string) => Promise<unkn
     log: new RingLog(50),
     now,
     version: '0.0.0-test',
+    // 2026-10-01（feat/rate-limit）：本文件用固定时钟连发多轮，关掉上游 1 req/s 节流。
+    minRequestIntervalMs: 0,
   });
   return { router, mapper };
 }
@@ -212,6 +214,7 @@ describe('Router review-r2 fixes', () => {
       log: new RingLog(50),
       now,
       version: '0.0.0-test',
+      minRequestIntervalMs: 0,   // 同上：用例只关心队列并发，不关心上游节流
     });
     await router.create(TOKEN, { model: 'deepseek-flash', messages: [m('user', 'u1')], conversation_id: 'conv-1' }) as ChatCompletion;
     const x = await router.create(TOKEN, { model: 'deepseek-flash', messages: [m('user', 'u1'), m('assistant', 'ok'), m('user', 'u2')], conversation_id: 'conv-1', stream: true });

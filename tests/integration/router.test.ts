@@ -51,8 +51,8 @@ function stubAdapter(over: StubExtras = {}): ProviderAdapter & { prompts: string
 const m = (role: Message['role'], content: string, extra: Partial<Message> = {}): Message => ({ role, content, ...extra });
 const msg = m;
 
-function makeRouter(adapter: ProviderAdapter) {
-  const now = vi.fn(() => 1000);
+function makeRouter(adapter: ProviderAdapter, opts: { now?: () => number; minRequestIntervalMs?: number } = {}) {
+  const now = vi.fn(opts.now ?? (() => 1000));
   const mapper = new SessionMapper(
     { createSession: async () => ({ webSessionId: 's1' }), deleteSession: async () => {}, now },
     { poolSize: 2, ttlMs: 60_000 },
@@ -67,6 +67,9 @@ function makeRouter(adapter: ProviderAdapter) {
     // 2026-09-09（diag/version-stamp）：log 条目自证构建版本。Debug 页「复制完整 JSON」
     // 时直接看到 version，不用再问用户装的是哪个版本。
     version: '0.0.0-test',
+    // 2026-10-01（feat/rate-limit）：单测默认关掉上游 1 req/s 节流——多数用例用固定时钟
+    // 连发多轮，开着会全被 429。限流本身见 rate-limit.test.ts 与文件末尾的 describe。
+    minRequestIntervalMs: opts.minRequestIntervalMs ?? 0,
   });
   return router;
 }
@@ -1235,5 +1238,43 @@ describe('spec-compact-incremental：增量轮精简工具 spec', () => {
     expect(specOf(-3)).toBe('full');
     expect(specOf(-2)).toBe('compact');
     expect(specOf(-1)).toBe('full');
+  });
+});
+
+// 2026-10-01（feat/rate-limit）：用户要求「走同一个网站的请求每秒最多一次，跨 session、跨 thread
+// 一起算」——动机是防止 DeepSeek 反自动化把并发对话识别成脚本。判定点在 router.create 入口，
+// 只有调用方发起的 chat 请求计数；PoW / create_session / delete_session / 断流续接 / vision 上传
+// 这些内部出站调用不计数（真人发一条消息就是这个连发节奏，且它们没有调用方可以接收 429）。
+describe('Router 上游限流（feat/rate-limit）', () => {
+  it('fail-to-pass: 同 provider 1s 内第二次请求（不同 conversation_id）→ 429 rate_limited，不触及上游', async () => {
+    const a = stubAdapter();
+    let t = 0;
+    const r = makeRouter(a, { now: () => t, minRequestIntervalMs: 1000 });
+
+    const res: any = await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'hi')], conversation_id: 'cid-A' });
+    expect(res.choices[0].message.content).toBe('ok');
+
+    // 999ms 后另一个 thread（模拟 spice 多会话并发）→ 拒绝，且第二个 prompt 从未发给 provider
+    t = 999;
+    await expect(r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'hi2')], conversation_id: 'cid-B' })).rejects.toMatchObject({
+      status: 429,
+      error: { error: { code: 'rate_limited', message: expect.stringContaining('ms 后重试') } },
+    });
+    expect(a.prompts).toHaveLength(1);
+
+    // 距上次**放行**满 1000ms → 放行，被拒请求没有把窗口往后推
+    t = 1000;
+    const res2: any = await r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'hi3')], conversation_id: 'cid-B' });
+    expect(res2.choices[0].message.content).toBe('ok');
+    expect(a.prompts).toHaveLength(2);
+  });
+
+  it('fail-to-pass: 非法参数 400 不占用窗口（垃圾请求不能把正常请求挤掉）', async () => {
+    const a = stubAdapter();
+    let t = 0;
+    const r = makeRouter(a, { now: () => t, minRequestIntervalMs: 1000 });
+    await expect(r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [] })).rejects.toMatchObject({ status: 400 });
+    await expect(r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'hi')] })).resolves.toBeDefined();
+    expect(a.prompts).toHaveLength(1);
   });
 });

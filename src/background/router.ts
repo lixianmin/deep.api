@@ -5,6 +5,7 @@ import { extractImageRefs, renderMessageContent } from './vision-pipeline';
 import { labelToModelId } from '../content/models-sync';
 import { SessionMapper, type ThreadEntry } from './session-mapper';
 import { Queue, QueueTimeoutError } from './queue';
+import { ProviderRateLimiter } from './rate-limit';
 import { renderTranscript, renderTail, limitCharsFor } from './transcript-renderer';
 import { eventToChunks, finalChunk, toAggregate, toolCallDeltaChunks, type StreamAggregate, type StreamContext } from './chunk-encoder';
 import { buildToolPrompt, parseToolCalls, hasToolTags, toolSpecFingerprint, type ToolContext } from './tool-pipeline';
@@ -21,6 +22,9 @@ export interface RouterDeps {
   now(): number;
   // 2026-09-09（diag/version-stamp）：扩展版本号（来自 manifest.json），写入每条 log 自证构建。
   version: string;
+  // 2026-10-01（feat/rate-limit）：上游站点节流间隔（ms）。生产不传 → 用下面的默认值；
+  // 单测传 0 关闭（多数路由用例用固定时钟连发多轮，开着会全被 429）。
+  minRequestIntervalMs?: number;
 }
 
 function err(code: ApiErrorCode, message: string, status: number): BridgeError {
@@ -71,6 +75,10 @@ interface RunHandle {
 }
 
 const NO_PROGRESS_MS = 600_000;          // spec §4.5 兜底断流
+// 2026-10-01（feat/rate-limit）：同一 provider（上游网站）两次**调用方发起的**对话请求之间
+// 的最小间隔。取值 1000ms 来自用户要求「每秒最多一次」；这是反自动化的固定基线，做成可调
+// 只会让「调快」变成误操作，故不做 popup 开关。
+const DEFAULT_MIN_REQUEST_INTERVAL_MS = 1000;
 // 2026-09-12（feat/continue-on-incomplete）：断流续接（spec §3.4）——上限 3 次、间隔 500ms；
 // 仅这两类是「可恢复断流」（generation_err 实测网页给 Continue 按钮；incomplete_status 是
 // parser 对非 FINISHED 终态/无终态的合成原因）。
@@ -106,7 +114,15 @@ export function lastUserSampleOf(messages: Message[]): string | undefined {
 }
 
 export class Router {
-  constructor(private d: RouterDeps) {}
+  private readonly limiter: ProviderRateLimiter;
+  private readonly minRequestIntervalMs: number;
+
+  constructor(private d: RouterDeps) {
+    this.minRequestIntervalMs = d.minRequestIntervalMs ?? DEFAULT_MIN_REQUEST_INTERVAL_MS;
+    // 窗口是 SW 进程内存态：MV3 SW 被杀重启会清零。实践上不影响——请求在途时 SW 被保活，
+    // 1 秒内的第二次请求不可能跨一次 SW 死亡，故不落 storage。
+    this.limiter = new ProviderRateLimiter(this.minRequestIntervalMs, d.now);
+  }
 
 
   async models(): Promise<{ object: 'list'; data: ModelInfo[] }> {
@@ -135,6 +151,19 @@ export class Router {
     const resolved = provider.resolveModel(modelId)!;
     const messages = p.messages as Message[] | undefined;
     if (!Array.isArray(messages) || messages.length === 0) throw err('invalid_request_error', 'messages array required', 400);
+    // 2026-10-01（feat/rate-limit）：上游站点节流。位置有三重含义：
+    //  ① 在 messages 校验之后 —— 参数错的请求不占窗口；
+    //  ② 在一切出站调用之前（含 vision 上传）—— 被拒请求不产生任何上游流量；
+    //  ③ 只在 create 入口计数 —— PoW / create_session / delete_session / 断流续接 continue /
+    //     vision 上传都不计数（真人在网页上发一条消息本就是这些请求连发，且它们没有调用方
+    //     可以接收 429）。反过来说，节流覆盖的是「会话消息」这一最像自动化行为的信号。
+    // 拒绝：立即 429、不排队、不推进窗口。
+    // 已知瑕疵（有意接受）：走完 gate 后仍可能 400（图片 + 不支持图片的模型）——它会占掉一格
+    // 窗口。方向是「自己更慢」，不会让上游看到更多流量，故不上提纯校验块。
+    const gate = this.limiter.tryAcquire(provider.id);
+    if (!gate.ok) {
+      throw err('rate_limited', `上游站点请求过于频繁（每 ${this.minRequestIntervalMs}ms 最多 1 次），请 ${gate.retryAfterMs}ms 后重试`, 429);
+    }
     const ctx = { token, requestId: `req-${started}-${Math.random().toString(36).slice(2, 8)}` };
     // 2026-09-11（fix/vision-poll-timeout）：图片轮询超时是非致命警告，随请求日志一起给操作员看
     // （LogEntry.warnings）；不阻断 completion。
