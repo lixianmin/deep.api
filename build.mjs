@@ -20,6 +20,11 @@ await Promise.all([
 
 await cp('src/popup/popup.html', 'extension/popup.html');
 await cp('src/popup/popup.css', 'extension/popup.css');
+// 图标：MV3 manifest 不接受 SVG，icons/default_icon 必须是 PNG。SVG 源文件在
+// src/icons/icon.svg，4 个尺寸的 PNG 已生成并入库（scripts/gen-icons.mjs 可重新生成），
+// 这里只负责拷进 extension/。不把光栅化放进 build：PNG 是静态产物，多加一个光栅化器
+// 依赖不值得——只有改 SVG 时才需要重跑 gen-icons.mjs。
+await cp('src/icons/png', 'extension/icons', { recursive: true });
 // manifest.json 从仓库根复制到 extension/：Chrome 加载 extension/ 时以这里为准。
 // 仓库根 manifest.json 也保留，方便 diff/查看；bundle/version 走脚本同步两端。
 await cp('manifest.json', 'extension/manifest.json');
