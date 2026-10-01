@@ -534,8 +534,8 @@ describe('SessionMapper review-r2 fixes', () => {
 // 2026-10-01（stage-a2/debt-task1）：modelType → variant 改名时的护栏测试——
 // 钉住「ThreadEntry.modelType 是 chrome.storage 持久化键（键名冻结）」「decide/register/commit
 // 的形参已中性化为 variant」两个核心约束。任一失败即视为「model-switch 检测能力被静默打废」。
-describe('SessionMapper 重构护栏（variant 中性化 + variant 键名冻结）', () => {
-  it('guard-1: 存量 ThreadEntry 无 variant 键（模拟 SW 重启 / 旧持久化形态）→ decide 不返回 rebuild', () => {
+describe('SessionMapper 重构护栏（variant 中性化 + modelType 键名冻结）', () => {
+  it('guard-1: 存量 ThreadEntry 无 modelType 键（模拟 SW 重启 / 旧持久化形态）→ decide 不返回 rebuild', () => {
     const { mapper } = mk();
     // 旧调用者：register / commit 都不传 variant → ThreadEntry.modelType = undefined
     mapper.register('deepseek', 'cid', 's1', [m('user', 'q1')]);
