@@ -150,7 +150,7 @@ describe('Router', () => {
   // 到 variant 变化 → 走 rebuild 路径（deleteSession + createSession + 完整历史作为 prompt）。
   // DeepSeek 网页 web API 本身不允许一个 chat thread 中途换模型（聊天前定模型）；reuse 旧 session
   // 会让 model_type 与 parent_message_id 链不一致，行为未定义。
-  // 修：ThreadEntry 存 variant，decide() 比对请求的 resolved.variant vs 存储的 variant，
+  // 修：ThreadEntry 以持久化键 modelType 记录 variant 值；decide() 比对 t.modelType vs 请求的 variant，
   // 不一致 → 返回 {action:'rebuild', existing: thread}，复用现有 cid 让客户端无感。
   it('fail-to-pass: 同 cid 中途切模型（flash → pro）→ rebuild + 完整历史作为 prompt', async () => {
     const a = stubAdapter();

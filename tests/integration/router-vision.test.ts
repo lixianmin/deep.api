@@ -151,7 +151,7 @@ describe('router: vision multimodal 路由', () => {
 
   // 2026-09-10（fix/vision-model-type）：图片能力与 wire model_type 解耦的 fail-to-pass。
   // deepseek-flash 改为 variant='default' + supportsImages=true：修复前 gate 是
-  // `resolved.variant === 'vision'` → flash 掉进 else 被 400 拒；修复后走上传，completion
+  // `resolved.modelType === 'vision'` → flash 掉进 else 被 400 拒；修复后走上传，completion
   // 发 model_type='default'（避开 vision 变体的 DSML 工具调用格式，下游才能解析工具调用）。
   it('fail-to-pass: flash(variant=default)+supportsImages → 上传图片且 completion 发 model_type=default', async () => {
     const uploadFile = vi.fn(async () => ({ id: 'file-flash-1', filename: 'x.png', bytes: 11, status: 'uploaded' }));

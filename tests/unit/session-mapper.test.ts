@@ -538,8 +538,11 @@ describe('SessionMapper 重构护栏（variant 中性化 + modelType 键名冻�
   it('guard-1: 存量 ThreadEntry 无 modelType 键（模拟 SW 重启 / 旧持久化形态）→ decide 不返回 rebuild', () => {
     const { mapper } = mk();
     // 旧调用者：register / commit 都不传 variant → ThreadEntry.modelType = undefined
-    mapper.register('deepseek', 'cid', 's1', [m('user', 'q1')]);
+    const t = mapper.register('deepseek', 'cid', 's1', [m('user', 'q1')]);
     mapper.commit('deepseek', 'cid', [m('user', 'q1')], 's1', 1);
+    // 键名冻结断言：持久化键必须仍叫 modelType（改了会让存量 thread 读不出该键）
+    expect('modelType' in t).toBe(true);
+    expect('variant' in t).toBe(false);
     // 新调用者：decide 已用中性形参 variant；存量的 t.modelType=undefined 必须走「不约束」语义
     const d = mapper.decide('deepseek', [m('user', 'q1'), m('user', 'q2')], 'cid', 'default');
     expect(d.action).toBe('incremental');
