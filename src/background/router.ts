@@ -6,7 +6,7 @@ import { labelToModelId } from '../content/models-sync';
 import { SessionMapper, type ThreadEntry } from './session-mapper';
 import { Queue, QueueTimeoutError } from './queue';
 import { ProviderRateLimiter } from './rate-limit';
-import { renderTranscript, renderTail, limitCharsFor } from './transcript-renderer';
+import { renderTranscript, renderTail } from './transcript-renderer';
 import { eventToChunks, finalChunk, toAggregate, toolCallDeltaChunks, type StreamAggregate, type StreamContext } from './chunk-encoder';
 import { buildToolPrompt, parseToolCalls, hasToolTags, toolSpecFingerprint, type ToolContext } from './tool-pipeline';
 import type { RingLog } from './log';

@@ -3,7 +3,8 @@ import { renderMessageContent } from './vision-pipeline';
 
 // 2026-10-01（stage-a/dead-branch）：原实现是 `modelType === 'expert' ? 163_840 : 2_621_440`，
 // 但 LIMITS 里没有任何模型产出 'expert'（deepseek-v4-pro 已 retired），该分支从未被走到。
-// 形参与返回签名保持不变（router.ts 依赖），只去掉永不成立的分支。
+// 形参与返回签名保持不变（模块公开导出表面保持不变，不引入 breaking change），
+// 该函数当前在生产代码中已无调用方；只去掉永不成立的分支。
 export function limitCharsFor(_variant: string): number {
   return 2_621_440;
 }

@@ -34,7 +34,7 @@ describe('DeepSeekAdapter', () => {
     expect(ids).toEqual(['deepseek-flash']);
   });
 
-  it('exposes capability flags', () => {
+  it('exposes identity and login URL', () => {
     const a = createDeepSeekAdapter(mkDeps());
     expect(a.id).toBe('deepseek');
     expect(a.auth.loginPageUrl).toBe('https://chat.deepseek.com/');
