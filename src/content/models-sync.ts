@@ -5,9 +5,8 @@
  *  labelToModelId 优先匹配新 ID（fallback 旧 ID 兼容层）。
  *  失败/无 DOM 时一律静默返回 []，不抛错（spec §3.5 失败回退）。 */
 
-export interface ModelOption { label: string; value?: string }
-
 import { labelToModelId } from '../shared/model-labels';
+import type { ModelOption } from '../shared/model-labels';
 
 const SELECTOR_CANDIDATES = [
   '[role="listbox"] [role="option"]',

@@ -1,4 +1,4 @@
-import type { ModelOption } from '../content/models-sync';
+import type { ModelOption } from '../shared/model-labels';
 
 /** 2026-09-10（feat/models-sync）：SW 侧 catalog 写入。
  *  spec §3.5（缓存策略：TTL 7 天 + 失败回退）+ §3.6（消息协议）。
