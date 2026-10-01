@@ -10,6 +10,16 @@ HELPER="$SELF_DIR/with-lock.py"
 PY=/usr/bin/python3
 
 LOCK_TIMEOUT="${DEEP_API_MERGE_LOCK_TIMEOUT:-1800}"
+# 2026-10-01（fix/merge-gate-build）：闸门必须先 build 再 test。
+# tests/debug/demo-shim.test.ts 读 extension/debug/demo.js —— 它刻意加载**构建产物**在 Node vm 里跑，
+# 验证的是真正打包给 Chrome 的 IIFE bundle（含 v0.1.49 那个 self-shim），不是源码。这类测试对构建
+# 产物的依赖是正当的，缺的是闸门这一侧：extension/ 被 .gitignore，任何全新 worktree 都没有它，
+# 于是测试闸门必然 exit 5。症状有误导性——报错指向 demo-shim 用例，实际缺的是构建步骤。
+#
+# 用 `node build.mjs` 而非 `bun run build`：后者是 `tsc --noEmit && node build.mjs`，与紧随其后的
+# TSC_CMD 闸门重复跑一遍 tsc。esbuild 不做类型检查（memory 教训「非类型检查的打包器 + 无 CI =
+# 类型错误静默进产物」），所以类型错误仍由 TSC_CMD 独立把关，不因先出包而漏过。
+BUILD_CMD="${DEEP_API_MERGE_BUILD_CMD:-node build.mjs}"
 TEST_CMD="${DEEP_API_MERGE_TEST_CMD:-bunx vitest run}"
 TSC_CMD="${DEEP_API_MERGE_TSC_CMD:-bunx tsc --noEmit}"
 
@@ -103,6 +113,10 @@ if [ $? -ne 0 ]; then
   sed 's/^/  /' "$REBASE_LOG" >&2
   exit 7
 fi
+
+step build
+bash -c "$BUILD_CMD" 9>&-
+[ $? -eq 0 ] || die 5 "构建失败：${BUILD_CMD}（闸门需要 extension/ 产物才能跑测试）"
 
 step test
 bash -c "$TEST_CMD" 9>&-
