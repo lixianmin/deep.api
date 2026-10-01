@@ -151,8 +151,9 @@ async function build(): Promise<{ router: Router; log: RingLog; mapper: SessionM
   // 2026-09-09（fix/evict-expired）：TTL 默认 30min（来自 ProviderConfig.ttlMinutes）。
   // restore 之后立即 sweep 一次——清掉 restore 进来的过期 thread，
   // 避免 SW 长时间没重启后 storage 里堆陈旧数据（chrome.storage 容量有界）。
+  // 2026-10-01（stage-a2/debt-task2）：走 sweepAll() 清扫全量 provider，不再硬编码 'deepseek'。
   // 周期性 sweep（每 60s）由 commit 路径 setTimeout 触发，详见 evictExpired 调用点。
-  await mapper.evictExpired('deepseek');
+  await mapper.sweepAll();
   let wasmInst: Promise<WasmInstance> | null = null;
   /** 2026-09-11（fix/review-r1）：接收 PowSolver.fetchBytes 已下载的字节，避免同一 wasm 下载两遍；
    *  实例化失败不落缓存（一次 CDN 抖动不再让整个 SW 生命周期的 PoW 全挂）。 */

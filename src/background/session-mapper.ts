@@ -269,8 +269,9 @@ export class SessionMapper {
       void this.sweepAll();
     }, 60_000);
   }
-  private async sweepAll(): Promise<void> {
-    // 仅 deepseek provider 名下 thread（当前唯一 provider；多 provider 时扩展）
+  // 2026-10-01（stage-a2/debt-task2）：改为 public，供 sw.ts 调用以清扫全量 provider（不再硬编码 'deepseek'）。
+  async sweepAll(): Promise<void> {
+    // 遍历 threads 中所有出现过的 provider，逐个 evictExpired（天然支持多 provider）。
     const providers = new Set<string>();
     for (const k of this.threads.keys()) providers.add(k.split(':')[0]!);
     for (const pid of providers) await this.evictExpired(pid);
