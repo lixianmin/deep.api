@@ -339,7 +339,7 @@ describe('SessionMapper mirrorHash 快路径（fix/mirror-hash，2026-09-09）',
 
 // 2026-09-09（fix/model-switch-rebuild）：同 cid 中途换模型必须 rebuild。DeepSeek 网页 web API
 // 一个 chat thread 不能中途换 model_type；reuse 旧 session 会让 model_type 与 parent_message_id 链不一致。
-// mapper 层 cover：register/commit 写 variant，decide 比对；老 thread 无 variant（未设置）则不约束
+// mapper 层 cover：register/commit 写入持久化键 modelType（值即 variant），decide 比对；老 thread 无该键（未设置）则不约束
 // （SW 重启后持久化场景兼容），首次 commit 会补上。
 describe('SessionMapper variant tracking（fix/model-switch-rebuild）', () => {
   it('同 cid + 同 variant + messages 前缀匹配 → incremental', () => {
@@ -531,16 +531,16 @@ describe('SessionMapper review-r2 fixes', () => {
   });
 });
 
-// 2026-10-01（stage-a2/debt-task1）：refactor variant → variant 时的护栏测试——
-// 钉住「ThreadEntry.variant 是 chrome.storage 持久化键（键名冻结）」「decide/register/commit
+// 2026-10-01（stage-a2/debt-task1）：modelType → variant 改名时的护栏测试——
+// 钉住「ThreadEntry.modelType 是 chrome.storage 持久化键（键名冻结）」「decide/register/commit
 // 的形参已中性化为 variant」两个核心约束。任一失败即视为「model-switch 检测能力被静默打废」。
 describe('SessionMapper 重构护栏（variant 中性化 + variant 键名冻结）', () => {
   it('guard-1: 存量 ThreadEntry 无 variant 键（模拟 SW 重启 / 旧持久化形态）→ decide 不返回 rebuild', () => {
     const { mapper } = mk();
-    // 旧调用者：register / commit 都不传 variant → ThreadEntry.variant = undefined
+    // 旧调用者：register / commit 都不传 variant → ThreadEntry.modelType = undefined
     mapper.register('deepseek', 'cid', 's1', [m('user', 'q1')]);
     mapper.commit('deepseek', 'cid', [m('user', 'q1')], 's1', 1);
-    // 新调用者：decide 已用中性形参 variant；存量的 t.variant=undefined 必须走「不约束」语义
+    // 新调用者：decide 已用中性形参 variant；存量的 t.modelType=undefined 必须走「不约束」语义
     const d = mapper.decide('deepseek', [m('user', 'q1'), m('user', 'q2')], 'cid', 'default');
     expect(d.action).toBe('incremental');
   });
