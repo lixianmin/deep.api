@@ -44,15 +44,21 @@ spice ──HTTP──> 扩展 SW ──port──> MAIN world content script �
 
 ### 3.1 请求路径（发消息）
 
-spice 发消息时，SW 经 port 通知 chatgpt.com 上的 MAIN world 脚本，由它驱动页面：
+spice 发消息时，SW 经 port 通知 chatgpt.com 上的 MAIN world 脚本，由它驱动页面。
+**顺序有严格要求**（每一步都来自实测踩过的坑）：
 
-1. 清 `localStorage` 里匹配 `/draft/i` 的键（实测 ChatGPT 会把 `oai/apps/conversationDrafts`
-   里的旧草稿恢复进 composer，导致提示词被拼接——实测出现过
-   `"Say PONGSay PONGReply with exactly: ALPH"` 这种污染）
-2. 清空 composer：`#prompt-textarea` 是 **contenteditable div，不是 `<textarea>`**，
-   没有 `.select()`；必须用 Range + Selection API 全选后 `execCommand('delete')`
-3. `execCommand('insertText')` 写入消息
-4. 等 `button[data-testid="send-button"]` 出现且非 disabled，完整 pointer 序列点击
+1. **确认页面停在目标会话上**（见 §3.4 配对与导航）；不在则先切换，不在则报错
+2. 清 `localStorage` 中匹配 `/draft/i` 的键。必须在触发 composer 读取之前——
+   ChatGPT 会把 `oai/apps/conversationDrafts` 的旧草稿恢复进输入框，
+   实测出现过 `"Say PONGSay PONGReply with exactly: ALPH"` 这种拼接污染
+3. 清空 composer。`#prompt-textarea` 是 **contenteditable div，不是 `<textarea>`**，
+   没有 `.select()` 方法（实测 `ta.select is not a function`）；必须用
+   `Range.selectNodeContents` + `Selection.addRange` 后 `execCommand('delete')`
+4. `execCommand('insertText')` 写入消息，随后**回读 `innerText` 校验非空**
+5. 等 `button[data-testid="send-button"]` 出现且非 disabled，完整 pointer 序列点击
+
+**第 2 步不能省略第 3 步**：清 localStorage 不会清掉页面内存里已恢复的草稿，
+实测两者都要做。同理，第 3 步不能省——清完 localStorage 后 composer 仍可能有残留。
 
 **必须等页面就绪**：实测在标签页刚加载完立刻点击会**静默失败**（会话不创建、无报错）。
 扩展需等待 composer + send 按钮就绪，而非页面 load 事件。
@@ -61,14 +67,19 @@ spice 发消息时，SW 经 port 通知 chatgpt.com 上的 MAIN world 脚本，�
 
 关键约束（实测决定架构）：
 
-- **页面 JS 在后台标签页里正常运行**，流被接收并缓存；被节流的只是 **React 渲染**。
+- **页面 JS 在后台标签页里正常运行**，流被页面接收并持有；被节流的只是 **React 渲染**。
   实测：后台发消息后 assistant 消息在 DOM 里一直是空的，**切到前台瞬间立刻补全**。
   → 因此在后台挂 fetch 照样能抄到 SSE 帧。
+  ⚠️ **但「页面接收到了」不等于「逐块到达」**。上面的证据只能证明页面最终拿到了完整回复，
+  不能排除响应被整体缓冲后才交给页面。**这一点未验证，且直接决定本设计能否达成流式**，
+  是阶段 B 的第一道闸门（见 §7.1）。
 - **不能用轮询拿流式**：`GET /backend-api/conversation/<id>` 是**原子返回**的，
   实测回复从 0 直接跳到 50 字符、状态已是 `finished_successfully`，无任何中间态可观测。
   轮询只能拿整段，无法满足 spice 的流式期望。
 - **运行期 patch `window.fetch` 无效**：实测已确认发送成功（会话创建、composer 清空）但
-  抓到 0 个请求。原因是 bundle 在模块初始化时就持有了 `window.fetch` 的引用。
+  抓到 0 个请求。*（成因是推断，非直接观测：bundle 在模块初始化时持有了 `window.fetch`
+  的引用；也不能排除页面中途重置了 `window.fetch`。`document_start` 方案能同时覆盖
+  这几种可能，所以即使成因未定，方案不变。）*
 
 因此唯一可行钩点：**MAIN world、`document_start` 时机**——在页面 bundle 读取
 `window.fetch` 之前完成 patch，bundle 随后捕获到的就是被包装过的版本。
@@ -78,11 +89,52 @@ spice 发消息时，SW 经 port 通知 chatgpt.com 上的 MAIN world 脚本，�
 `/backend-api/sidebar/conversation` 的响应做 tee，一路照常返回给页面，
 另一路把 SSE 帧逐块转给 SW。
 
+**tee 两侧都必须被消费**：若只读页面那一侧，未读的分支会滞住并向 socket 反压，
+最终把页面自己的流也拖死。因此桥接侧必须**主动 pump**，不能等下游准备好再读；
+桥接侧只做「解析 + 转发 + 丢弃」的重活要做在流之外，不能在读取循环里做阻塞计算。
+
 ### 3.3 SSE 帧映射
 
 页面收到的是 ChatGPT 自有帧格式。SW 侧转成 `ProviderStreamEvent` 后由既有 router
 编码为 OpenAI 形态（`src/background/chunk-encoder.ts` 已有该能力，DeepSeek 在用）。
 本设计不新增编码器，只新增「ChatGPT 帧 → ProviderStreamEvent」的解析。
+
+### 3.4 配对与导航（实现前必须先定，否则必卡）
+
+谁发起的 spice 请求，与捕到的哪条 SSE 流对应，必须有确定规则。**不能用「最后一条流」
+这种裸假设**——单标签页串行只是当前预期，并发下会错配。
+
+采用 SW 侧**待处理队列（pending queue）**：
+
+1. SW 收到 spice 请求 → 压入 pending 项（含 provider requestId），经 port 通知 content script 发送
+2. content script 点击前先读 `location.pathname` 取当前 conversation_id，一并回传
+3. SSE wrapper 每捕到一条流，从其请求 body/URL 解析出 conversation_id，与队首匹配后出队
+4. **首轮无 conversation_id**：新建会话时以「队首 + 发出时间序」匹配，并在
+   content script 侧记录点击后新出现的 `/c/<uuid>` 作为该 pending 的确定归属
+5. 匹配不到或队首超时（如 60s）→ 报 503 `provider_unavailable`，**不得静默丢弃**
+   （呼应 §2 第 4 点：上游的失败模式就是静默，这里不能重蹈）
+
+**导航**：多轮要求页面停在映射的会话上。若 `location.pathname` 与目标不符：
+- 不擅自 `location.href = ...`（会摧毁用户当前浏览状态与该标签页历史）
+- 优先点击侧边栏历史项（title 已实测可取，如 `/backend-api/conversations`）
+- 历史项找不到（会话太老）才导航到 `/c/<uuid>`，并**记 warning 日志**
+- 无法定位 → 报错，不发送
+
+### 3.5 登录态与标签页缺失
+
+- **登录态**：与 DeepSeek 的 token 探测不同，本 provider 的 `getAuthStatus` 由
+  content script 判定——chatgpt.com 页面存在且未出现登录提示即为 `logged_in`。
+  SW 侧不持有 ChatGPT token（它只存在于页面，桥接也不需要它）。
+- **标签页缺失**：没有打开的 chatgpt.com 标签页时，
+  行为需显式定义。建议：**不自动开**（避免惄惄往用户窗口里塞标签页），
+  首次使用时由 popup 引导用户打开并登录；SW 侧返回 503 并携带明确文案
+  「请先在浏览器中打开并登录 chatgpt.com」。沿用 DeepSeek 现有的
+  `resyncAuth` 手动开 tab 的做法（用户已在 popup 点过），不新增自动开逻辑。
+
+### 3.6 串行化
+
+单标签页同一时刻只能跑一轮对话。pending 队列天然串行：上一轮未出队前不发送下一轮。
+超时则丢弃并报错，不得叠加发送。
 
 ## 4. 必须先修的架构泄漏
 
@@ -121,7 +173,9 @@ ChatGPT 有真实 conversation 概念（`/c/<uuid>`），比 DeepSeek 的 `chat_
 
 - 同一个 OpenAI `conversation_id` → 固定映射到一个 chatgpt.com conversation，页面停在该会话
 - 换 `conversation_id` → 点「新对话」并映射到新会话
-- 页面端会话会累积（用户可见），需提供清理入口
+- 页面端会话会累积（用户可见）。清理策略复用 DeepSeek 已有的 `autoDeleteWebThreads`
+  设置项（popup 里的 checkbox，**默认关**），语义一致：关闭时只解除本地映射、保留网页会话；
+  开启时才真删。ChatGPT 侧对应 `DELETE /backend-api/conversation/<id>`
 - 不实现「编辑已发消息」——与 DeepSeek 现状一致，v1 不做
 
 ## 6. 已知限制（明确接受）
@@ -137,10 +191,25 @@ ChatGPT 有真实 conversation 概念（`/c/<uuid>`），比 DeepSeek 的 `chat_
 
 ## 7. 验证方式
 
-- 单元测试：SSE 帧解析、draft 清理、composer 清空、conversation 映射
+### 7.1 阶段 B 第一道闸门（先做，不通过就不要往下写）
+
+**验证「逐块到达」而非「整体缓冲」**。做法：写一个独立的验证版 content script
+（`document_start` MAIN world，仅 patch fetch 不做其他事），在后台标签页发一条会输出较长回复的
+消息，记录捕获到的 SSE 分块的**时间戳与长度序列**。
+
+- 通过：分块在数秒内陆续到达（时间戳分散）→ 流式成立，阶段 B 按本设计继续
+- 不通过：全部内容在极短时间内一次性到达（疑似缓冲）→ **流式目标无法达成**，
+  应回头与用户重新决策（降级为「非流式、整段返回」或放弃 ChatGPT provider），
+  而不是硬写下去
+
+这个闸门必须最先做，因为它是唯一能让整个阶段 B 作废的前提，
+而验证成本极低（一个脚本 + 一次发送）。
+
+### 7.2 其余验证
+
+- 单元测试：SSE 帧解析、draft 清理、composer 清空、conversation 映射、pending 队列配对与超时
 - 集成测试：stub content script 驱动 + stub SSE 帧，验证 router 产出的 OpenAI 形态分块
 - 手工验收：真实 chatgpt.com 标签页，后台状态下经 spice 发一轮并观察流式分块
-- 必测：后台标签页下 SSE 分块是否逐块到达（依赖 §3.2 的核心假设）
 
 ## 8. 备选方案与否决理由
 
