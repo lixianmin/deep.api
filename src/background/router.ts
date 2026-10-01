@@ -25,6 +25,9 @@ export interface RouterDeps {
   // 2026-10-01（feat/rate-limit）：上游站点节流间隔（ms）。生产不传 → 用下面的默认值；
   // 单测传 0 关闭（多数路由用例用固定时钟连发多轮，开着会全被 429）。
   minRequestIntervalMs?: number;
+  // 2026-10-01（feat/upstream-health）：入口限流抖动上界（ms）。不传 → DEFAULT_JITTER_MS；
+  // 单测传 0 关闭（与 minRequestIntervalMs: 0 一起用，保证连发多轮不被随机拒绝）。
+  jitterMs?: number;
 }
 
 function err(code: ApiErrorCode, message: string, status: number): BridgeError {
@@ -79,6 +82,18 @@ const NO_PROGRESS_MS = 600_000;          // spec §4.5 兜底断流
 // 的最小间隔。取值 1000ms 来自用户要求「每秒最多一次」；这是反自动化的固定基线，做成可调
 // 只会让「调快」变成误操作，故不做 popup 开关。
 const DEFAULT_MIN_REQUEST_INTERVAL_MS = 1000;
+// 2026-10-01（feat/upstream-health）入口限流抖动上界。取值依据：实际间隔落在
+// [1000, 2500]ms，与真人连续发消息的间隔分布（重尾、几秒到几十秒）不再是对比明显的
+// 等距方波。抖动只加不减，不会让限流变松。
+const DEFAULT_JITTER_MS = 1500;
+// 2026-10-01（feat/upstream-health）上游 429 重试收敛。改动前是「重试 3 次、退避
+// 500ms×2^n」，即 DeepSeek 说「慢点」之后我们回它 4 个请求 / 3.5 秒——这是全仓唯一
+// 一处主动顶撞限流阈值的行为，在封号视角下比限流本身更危险。
+// 改为只重试 1 次、退避 5s：一次长退避足以覆盖瞬时抖动，又不在阈值上堆请求。
+// 5s 的依据是它已明显长于正常两轮对话的间隔，且与 CONTINUE_DELAY_MS 拉开一个量级，
+// 使「被限流」和「断流续接」在时序上可区分。
+export const RATE_LIMIT_RETRY_ATTEMPTS = 1;
+export const RATE_LIMIT_RETRY_BASE_MS = 5000;
 // 2026-09-12（feat/continue-on-incomplete）：断流续接（spec §3.4）——上限 3 次、间隔 500ms；
 // 仅这两类是「可恢复断流」（generation_err 实测网页给 Continue 按钮；incomplete_status 是
 // parser 对非 FINISHED 终态/无终态的合成原因）。
@@ -121,7 +136,7 @@ export class Router {
     this.minRequestIntervalMs = d.minRequestIntervalMs ?? DEFAULT_MIN_REQUEST_INTERVAL_MS;
     // 窗口是 SW 进程内存态：MV3 SW 被杀重启会清零。实践上不影响——请求在途时 SW 被保活，
     // 1 秒内的第二次请求不可能跨一次 SW 死亡，故不落 storage。
-    this.limiter = new ProviderRateLimiter(this.minRequestIntervalMs, d.now);
+    this.limiter = new ProviderRateLimiter(this.minRequestIntervalMs, d.now, d.jitterMs ?? DEFAULT_JITTER_MS);
   }
 
 
@@ -595,8 +610,10 @@ export class Router {
         }
         return;
       } catch (e) {
-        if (!emitted && attempt < 3 && provider.isRateLimited(e)) {
-          await sleep(500 * 2 ** attempt);   // 500ms ×2^n，n<3（spec §6.4）
+        if (!emitted && attempt < RATE_LIMIT_RETRY_ATTEMPTS && provider.isRateLimited(e)) {
+          // 退避固定 RATE_LIMIT_RETRY_BASE_MS（不再用 2^n 指数退避）：429 是上游明确的
+          // 拒绝信号，指数退避的短间隔只会把「被限流」升级成「持续冲击」。
+          await sleep(RATE_LIMIT_RETRY_BASE_MS);
           continue;
         }
         throw e;

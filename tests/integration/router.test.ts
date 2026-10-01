@@ -6,6 +6,7 @@ import { RingLog } from '../../src/background/log';
 import type { ProviderAdapter, ProviderCompletion, ProviderContext, ProviderSession, ProviderStreamEvent } from '../../src/background/providers/adapter';
 import type { Message } from '../../src/shared/api-types';
 import { resolveModel as clientResolveModel } from '../../src/background/providers/deepseek/client';
+import { RATE_LIMIT_RETRY_BASE_MS } from '../../src/background/router';
 import { DSML_TOKEN } from '../../src/background/providers/deepseek/dsml-parser';
 import { completionEvents } from '../../src/background/providers/deepseek/sse-patch';
 
@@ -51,7 +52,7 @@ function stubAdapter(over: StubExtras = {}): ProviderAdapter & { prompts: string
 const m = (role: Message['role'], content: string, extra: Partial<Message> = {}): Message => ({ role, content, ...extra });
 const msg = m;
 
-function makeRouter(adapter: ProviderAdapter, opts: { now?: () => number; minRequestIntervalMs?: number } = {}) {
+function makeRouter(adapter: ProviderAdapter, opts: { now?: () => number; minRequestIntervalMs?: number; jitterMs?: number } = {}) {
   const now = vi.fn(opts.now ?? (() => 1000));
   const mapper = new SessionMapper(
     { createSession: async () => ({ webSessionId: 's1' }), deleteSession: async () => {}, now },
@@ -70,6 +71,11 @@ function makeRouter(adapter: ProviderAdapter, opts: { now?: () => number; minReq
     // 2026-10-01（feat/rate-limit）：单测默认关掉上游 1 req/s 节流——多数用例用固定时钟
     // 连发多轮，开着会全被 429。限流本身见 rate-limit.test.ts 与文件末尾的 describe。
     minRequestIntervalMs: opts.minRequestIntervalMs ?? 0,
+    // 2026-10-01（feat/upstream-health）：入口限流抖动。生产默认 1500ms（见 router
+    // DEFAULT_JITTER_MS），但本文件所有用例都断言**精确的窗口边界**（t=999 拒 / t=1000 放），
+    // 抖动会引入随机性。抖动本身由 tests/unit/rate-limit-jitter.test.ts 独立验证，
+    // 这里关掉以保持本文件只测窗口机制。
+    jitterMs: opts.jitterMs ?? 0,
   });
   return router;
 }
@@ -284,22 +290,25 @@ describe('Router', () => {
     expect(e.ssePaths).toContain('response/fragments');
   });
 
-  it('rate-limited twice then succeeds with backoff', async () => {
+  it('rate-limited once then succeeds: 429 只重试 1 次（2026-10-01 由 3 次收敛而来）', async () => {
+    // 改动前是「重试 3 次、退避 500ms×2^n」；现为「重试 1 次、退避 5s」。
+    // 动机：429 是上游明确的拒绝信号，连续重试会把「被限流」升级成「持续冲击」。
+    // 完整用例（含连续 429 只打 2 次、非 429 不重试）见 tests/integration/router-429-retry.test.ts。
     vi.useFakeTimers();
     try {
       let calls = 0;
       const a = stubAdapter({
         streamCompletion: async function* () {
           calls++;
-          if (calls <= 2) throw { status: 429 };
+          if (calls === 1) throw { status: 429 };
           yield { kind: 'content_delta', content: 'ok', finish_reason: 'stop' };
         },
       });
       const r = makeRouter(a);
       const p = r.create(TOKEN, { model: 'deepseek-v4-flash', messages: [m('user', 'hi')] });
-      await vi.advanceTimersByTimeAsync(1500);
+      await vi.advanceTimersByTimeAsync(RATE_LIMIT_RETRY_BASE_MS + 1000);
       const res: any = await p;
-      expect(calls).toBe(3);
+      expect(calls).toBe(2);
       expect(res.choices[0].message.content).toBe('ok');
     } finally { vi.useRealTimers(); }
   });

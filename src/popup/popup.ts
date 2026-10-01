@@ -1,5 +1,6 @@
 // popup.ts - 通过 port 与 SW 通信；只在 MV3 popup 内执行（chrome.* 在此文件中）
 import { formatAuthState, pickForensicTail, renderLogListHtml, renderModelListHtml, slimFullCopy, type PopupLogEntry } from './snippet';
+import { ALL_KINDS, type UpstreamEventKind, type UpstreamSnapshot } from '../background/upstream-health';
 
 type LogEntry = PopupLogEntry;
 type PanelState = {
@@ -11,8 +12,15 @@ type PanelState = {
     models?: Array<{ id: string; description: string }>;
   }>;
   log?: LogEntry[];
+  upstreamHealth?: UpstreamSnapshot;
 };
 let state: PanelState = {};
+
+// 2026-10-01（feat/upstream-health）：健康度计数的中文标签。顺序由 ALL_KINDS 决定（严重度优先）。
+const HEALTH_LABEL: Record<UpstreamEventKind, string> = {
+  waf: 'WAF拦截', rate_limited: '限流', auth: '鉴权失败', bad_body: '响应非JSON',
+  server_error: '服务端错误', network: '网络错误', other: '其他异常', ok: '正常',
+};
 
 // 2026-09-11（fix/review-r2）：port 断线恢复。旧实现只在加载时 connect 一次——SW 被回收/扩展
 // reload 后 port 死掉，send() 每 2s 抛一次未捕获异常，UI 停在最后一次 state 且所有按钮失效。
@@ -69,6 +77,23 @@ function render() {
 
   const snippet = document.getElementById('snippet') as HTMLTextAreaElement;
   snippet.value = snippetText();
+
+  // 2026-10-01（feat/upstream-health）：上游响应健康度。封号风险调研的产物——回答
+  // 「到底有没有在被 DeepSeek 标记」。用 textContent 而非 HTML：数据是纯计数，拼 HTML
+  // 只会多一个转义面。lastDetail 放 title（鼠标悬停才看，不占版面）。
+  const healthEl = document.getElementById('upstream-health')!;
+  const h = state.upstreamHealth;
+  if (!h) {
+    healthEl.textContent = '无数据';
+    healthEl.className = '';
+  } else {
+    const parts = ALL_KINDS.filter((k: UpstreamEventKind) => h.counts[k] > 0).map((k) => `${HEALTH_LABEL[k]} ${h.counts[k]}`);
+    healthEl.textContent = parts.length ? parts.join(' · ') : `共 ${h.counts.total} 次请求，全部正常`;
+    // 有任何非 ok 事件就标红：这是需要人看一眼的信号
+    const bad = ALL_KINDS.some((k: UpstreamEventKind) => k !== 'ok' && h.counts[k] > 0);
+    healthEl.className = bad ? 'bad' : 'ok';
+    healthEl.title = `最近一次：${h.lastKind ?? '—'}${h.lastStatus ? ` (HTTP ${h.lastStatus})` : ''}${h.lastDetail ? `\n${h.lastDetail}` : ''}`;
+  }
 
   const models = provider?.models ?? [];
   const modelList = document.getElementById('model-list')!;

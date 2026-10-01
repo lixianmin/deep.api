@@ -4,6 +4,7 @@ import { SessionMapper, type ThreadEntry } from './session-mapper';
 import { Queue } from './queue';
 import { RingLog } from './log';
 import { createDeepSeekAdapter, type AdapterDeps } from './providers/deepseek/adapter';
+import { classifyUpstream, UpstreamHealth, type UpstreamEventInfo } from './upstream-health';
 import { PowSolver, instantiateDeepSeekWasm, type WasmInstance } from './providers/deepseek/pow';
 import { isBridgeRequest, BridgeError, type BridgeResponseMsg } from '../shared/protocol';
 import type { ChatCompletionChunk } from '../shared/api-types';
@@ -41,6 +42,45 @@ async function setAuthStatus(providerId: string, status: { state: string; messag
 // 登录 token：content script 从 chat.deepseek.com localStorage 读到后通过 port 推送过来。
 // 这里用内存缓存 + chrome.storage.local 持久化（SW 重启/整个浏览器重启都能恢复）。
 let cachedToken: string | null = null;
+
+// 2026-10-01（feat/upstream-health）：上游响应健康度——封号风险调研的产物。
+// 动机：debug log 有逐条记录但无聚合，事后无法回答「到底有没有在被 DeepSeek 标记」。
+// 模块级单例（不放在 build() 里）：probeToken / deleteDeepSeekSession 等调用点在 build() 之外。
+const HEALTH_KEY = 'upstreamHealth.v1';
+const upstreamHealth = new UpstreamHealth(() => Date.now());
+let healthPersistTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * 记录一次上游响应。落盘按 500ms 合并——入口限流 1 req/s 意味着最快也就每秒一次写入，
+ * 但 vision 轮询 / 429 重试 / 断流续接会在一秒内打出多个请求，逐次写 storage 没必要。
+ */
+function recordUpstream(info: UpstreamEventInfo): void {
+  upstreamHealth.record(classifyUpstream(info), info);
+  if (healthPersistTimer) return;
+  healthPersistTimer = setTimeout(() => {
+    healthPersistTimer = null;
+    void STORAGE.set({ [HEALTH_KEY]: upstreamHealth.snapshot() });
+  }, 500);
+}
+
+/** 响应体是不是 HTML 而非 JSON——WAF 拦截的已知形态（HTTP 状态仍是 200，不识别就一路到 JSON.parse 才炸）。 */
+function looksLikeHtml(text: string): boolean {
+  return /^\s*</.test(text);
+}
+
+/**
+ * 记录一次 fetch 响应。**刻意不覆盖 probeToken**（登录探测）：
+ * 它的 401 是「token 过期」的正常表达，计进去会往封号信号里掺大量预期内的噪声；
+ * 这类事件已经由 lastAuthStatus 单独呈现。
+ */
+function recordFetch(r: Response, text?: string): void {
+  recordUpstream({
+    status: r.status,
+    waf: Boolean(r.headers.get('x-amzn-waf-action')),
+    bodyIsHtml: text === undefined ? undefined : looksLikeHtml(text),
+  });
+}
+
 async function loadCachedToken(): Promise<string | null> {
   if (cachedToken !== null) return cachedToken;
   const got = (await STORAGE.get({ authToken: '' })) as unknown as { authToken?: string } | undefined;
@@ -77,9 +117,10 @@ async function deleteDeepSeekSession(webSessionId: string): Promise<void> {
   try {
     const t = await loadCachedToken();
     if (!t || !webSessionId) return;
-    await fetch(`${DEEPSEEK_API_BASE}/chat_session/delete`, {
+    const r = await fetch(`${DEEPSEEK_API_BASE}/chat_session/delete`, {
       method: 'POST', headers: probeHeaders(t), body: JSON.stringify({ chat_session_id: webSessionId }),
     });
+    recordFetch(r);
   } catch { /* best-effort：SW 随时可能被回收，删除失败不阻塞后续流程（spec §4.3） */ }
 }
 
@@ -96,6 +137,12 @@ async function build(): Promise<{ router: Router; log: RingLog; mapper: SessionM
   // DeepSeek 网页端**同一个** Chat thread（webSessionId + parentMessageId 链不丢）。
   // 注意：用户明确要求状态以数据层为准，而不是进程状态。
   mapper.onPersist = (snap) => { void STORAGE.set({ 'threads.v1': snap }); };
+  // 2026-10-01（feat/upstream-health）：恢复上次 SW 生命周期的健康度计数。MV3 SW 随时被回收，
+  // 计数归零会让「上周被拦过几次」这类问题永远查不出来——而这正是本模块存在的理由。
+  try {
+    const got = (await STORAGE.get([HEALTH_KEY])) as unknown as Record<string, unknown> | undefined;
+    if (got) upstreamHealth.restore(got[HEALTH_KEY]);
+  } catch { /* 坏数据就当新计数，不阻断 build */ }
   try {
     const got = (await STORAGE.get('threads.v1')) as unknown;
     const snap = (got as { 'threads.v1'?: { seq: number; threads: ThreadEntry[] } } | undefined)?.['threads.v1'];
@@ -130,6 +177,7 @@ async function build(): Promise<{ router: Router; log: RingLog; mapper: SessionM
         headers: { ...headers, Authorization: `Bearer ${t}` },
         body: init?.body as BodyInit | undefined,
       });
+      recordFetch(r);
       return {
         status: r.status,
         json: async () => { try { return await r.json(); } catch { return null; } },
@@ -148,6 +196,7 @@ async function build(): Promise<{ router: Router; log: RingLog; mapper: SessionM
       // 所有 fetchJson 调用（create_session / delete_session / pow）运行时必抛，
       // 导致 chat 完全无响应且 DeepSeek 端看不到 thread。esbuild 不做类型检查所以 build 通过。
       const text = await r.text();
+      recordFetch(r, text);
       let parsed: unknown;
       try { parsed = text ? JSON.parse(text) : null; } catch { throw Object.assign(new Error(`bad json: ${text.slice(0, 200)}`), { status: r.status }); }
       // DeepSeek 业务错误：HTTP 200 但顶层 code != 0（如 token 过期 code=401）——必须识别，
@@ -164,6 +213,7 @@ async function build(): Promise<{ router: Router; log: RingLog; mapper: SessionM
       const t = await loadCachedToken();
       if (!t) throw Object.assign(new Error('no token'), { status: 401 });
       const r = await fetch(DEEPSEEK_API_BASE + path, { method: 'POST', headers: { ...headers, Authorization: `Bearer ${t}` }, body: JSON.stringify(body) });
+      recordFetch(r);
       if (!r.body) throw Object.assign(new Error(`no body http ${r.status}`), { status: r.status, headers: r.headers });
       return { status: r.status, headers: r.headers, body: r.body as unknown as AsyncIterable<Uint8Array> };
     },
@@ -171,6 +221,7 @@ async function build(): Promise<{ router: Router; log: RingLog; mapper: SessionM
       fetchJson: async (path, _h, body) => {
         const t = await loadCachedToken();
         const r = await fetch(DEEPSEEK_API_BASE + path, { method: 'POST', headers: authHeaders(t ?? ''), body: JSON.stringify(body) });
+        recordFetch(r);
         return r.json();
       },
       fetchBytes: async (url) => {
@@ -244,6 +295,7 @@ async function broadcastPanelState(): Promise<void> {
     const state = {
       providers: { deepseek: { ...provCfg, models: router.models ? (await router.models()).data : [] } },
       log: (logList?.log as any[]) ?? log.list(),
+      upstreamHealth: upstreamHealth.snapshot(),
     };
     for (const p of panelPorts) {
       try { p.postMessage({ kind: 'state', payload: state }); } catch { /* port closed mid-broadcast */ }
@@ -418,6 +470,7 @@ chrome.runtime.onConnect.addListener((port) => {
               deepseek: { ...provCfg, models: router.models ? (await router.models()).data : [] },
             },
             log: (logList?.log as any[]) ?? log.list(),
+            upstreamHealth: upstreamHealth.snapshot(),
           },
         });
       } else if (msg?.kind === 'panel.openLogin') {
