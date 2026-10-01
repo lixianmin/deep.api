@@ -20,7 +20,7 @@ function makeMockAdapter(opts: {
   const streamCalls: ProviderCompletion[] = [];
   return {
     id: 'deepseek',
-    auth: { loginPageUrl: '', cookieDomain: '', requiredCookies: [], getAuthStatus: async () => ({ state: 'logged_in' as const }) },
+    auth: { loginPageUrl: '', getAuthStatus: async () => ({ state: 'logged_in' as const }) },
     createSession: async (): Promise<ProviderSession> => ({ providerId: 'deepseek', webSessionId: 's1', parentMessageId: null }),
     deleteSession: async () => {},
     stopStream: async () => {},
@@ -41,7 +41,6 @@ function makeMockAdapter(opts: {
     isRateLimited: () => false,
     isAuthExpired: () => false,
     isUnavailable: () => false,
-    capabilities: { thinking: true, functionCalling: 'prompt-engineered' },
     streamCalls,
   } as ProviderAdapter & { streamCalls: ProviderCompletion[] };
 }

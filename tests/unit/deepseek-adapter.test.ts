@@ -36,11 +36,8 @@ describe('DeepSeekAdapter', () => {
 
   it('exposes capability flags', () => {
     const a = createDeepSeekAdapter(mkDeps());
-    expect(a.capabilities).toEqual({ thinking: true, functionCalling: 'prompt-engineered' });
     expect(a.id).toBe('deepseek');
     expect(a.auth.loginPageUrl).toBe('https://chat.deepseek.com/');
-    expect(a.auth.cookieDomain).toBe('chat.deepseek.com');
-    expect(a.auth.requiredCookies).toEqual(expect.arrayContaining(['userToken']));
   });
 
   // 2026-09-09（fix/expert-client-version）：v0.1.75 sseRaw 现场抓到服务端明确错误：

@@ -14,7 +14,7 @@ function stubAdapter(over: Partial<ProviderAdapter> = {}): ProviderAdapter {
   let seq = 0;
   const base: ProviderAdapter = {
     id: 'deepseek',
-    auth: { loginPageUrl: 'https://chat.deepseek.com/', cookieDomain: 'chat.deepseek.com', requiredCookies: ['user_token'], getAuthStatus: async () => ({ state: 'logged_in' }) },
+    auth: { loginPageUrl: 'https://chat.deepseek.com/', getAuthStatus: async () => ({ state: 'logged_in' }) },
     createSession: async (): Promise<ProviderSession> => ({ providerId: 'deepseek', webSessionId: `s${++seq}`, parentMessageId: null }),
     deleteSession: async () => {},
     stopStream: async () => {},
@@ -29,7 +29,6 @@ function stubAdapter(over: Partial<ProviderAdapter> = {}): ProviderAdapter {
     isRateLimited: (e: any) => e?.status === 429,
     isAuthExpired: (e: any) => e?.status === 401,
     isUnavailable: (e: any) => (e?.status === 202 && e?.headers?.['x-amzn-waf-action']) || e instanceof TypeError,
-    capabilities: { thinking: true, functionCalling: 'prompt-engineered' },
     ...over,
   };
   return base;

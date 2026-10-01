@@ -1,6 +1,6 @@
 import type { ProviderAdapter, ProviderCompletion, ProviderContext, ProviderSession, UploadFileResult, PollFileReadyOptions, PollFileReadyResult } from '../adapter';
 import { completionPayload, baseHeaders, classify, MODELS, resolveModel, continuePayload, continueHeaders } from './client';
-import { getAuthStatus, DEEPSEEK_LOGIN_PAGE, DEEPSEEK_COOKIE_NAMES } from './auth';
+import { getAuthStatus, DEEPSEEK_LOGIN_PAGE } from './auth';
 import { completionEvents } from './sse-patch';
 import { createDsmlStreamNormalizer } from './dsml-parser';
 
@@ -73,8 +73,6 @@ export function createDeepSeekAdapter(deps: AdapterDeps): ProviderAdapter {
     id: 'deepseek',
     auth: {
       loginPageUrl: DEEPSEEK_LOGIN_PAGE,
-      cookieDomain: 'chat.deepseek.com',     // 仅展示；sw.ts 中取 cookie 用 .chat.deepseek.com
-      requiredCookies: [...DEEPSEEK_COOKIE_NAMES],
       getAuthStatus: (ctx) =>
         getAuthStatus(ctx, async (c) => {
           const s = await createSessionRaw(c);
@@ -199,6 +197,5 @@ export function createDeepSeekAdapter(deps: AdapterDeps): ProviderAdapter {
     isRateLimited: (e) => classify(e).rateLimited,
     isAuthExpired: (e) => classify(e).authExpired,
     isUnavailable: (e) => classify(e).unavailable,
-    capabilities: { thinking: true, functionCalling: 'prompt-engineered' },
   };
 }

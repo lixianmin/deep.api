@@ -22,7 +22,7 @@ function adapterFromStub(stub: { events?: ProviderStreamEvent[] }): ProviderAdap
   };
   return {
     id: 'deepseek',
-    auth: { loginPageUrl: '', cookieDomain: '', requiredCookies: [], getAuthStatus: async () => ({ state: 'logged_in' }) },
+    auth: { loginPageUrl: '', getAuthStatus: async () => ({ state: 'logged_in' }) },
     createSession: async () => ({ providerId: 'deepseek', webSessionId: 's-replay', parentMessageId: null }),
     deleteSession: async () => {},
     stopStream: async () => {},
@@ -34,7 +34,6 @@ function adapterFromStub(stub: { events?: ProviderStreamEvent[] }): ProviderAdap
     isRateLimited: () => false,
     isAuthExpired: () => false,
     isUnavailable: () => false,
-    capabilities: { thinking: true, functionCalling: 'prompt-engineered' },
   };
 }
 

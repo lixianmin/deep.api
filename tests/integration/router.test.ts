@@ -23,7 +23,7 @@ function stubAdapter(over: StubExtras = {}): ProviderAdapter & { prompts: string
   let seq = 0;
   const base: ProviderAdapter = {
     id: 'deepseek',
-    auth: { loginPageUrl: 'https://chat.deepseek.com/', cookieDomain: 'chat.deepseek.com', requiredCookies: ['user_token'], getAuthStatus: async () => ({ state: 'logged_in' }) },
+    auth: { loginPageUrl: 'https://chat.deepseek.com/', getAuthStatus: async () => ({ state: 'logged_in' }) },
     createSession: async (): Promise<ProviderSession> => ({ providerId: 'deepseek', webSessionId: `s${++seq}`, parentMessageId: null }),
     deleteSession: async () => {},
     stopStream: async () => {},
@@ -43,7 +43,6 @@ function stubAdapter(over: StubExtras = {}): ProviderAdapter & { prompts: string
     isRateLimited: (e: any) => e?.status === 429,
     isAuthExpired: (e: any) => e?.status === 401,
     isUnavailable: (e: any) => (e?.status === 202 && e?.headers?.['x-amzn-waf-action']) || e instanceof TypeError,
-    capabilities: { thinking: true, functionCalling: 'prompt-engineered' },
     // 2026-10-01（stage-a/decouple-dsml）：router 不再 import 归一化器——stub 必须自己声明
     // 依赖的归一化行为，等价于真实 DeepSeek adapter.normalizeContent 的契约。
     normalizeContent: (tools) => createDsmlStreamNormalizer(tools),

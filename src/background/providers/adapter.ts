@@ -53,8 +53,6 @@ export interface ProviderAdapter {
   readonly id: ProviderId;
   auth: {
     readonly loginPageUrl: string;
-    readonly cookieDomain: string;
-    readonly requiredCookies: string[];
     getAuthStatus(ctx: ProviderContext): Promise<AuthStatus>;
   };
   createSession(ctx: ProviderContext): Promise<ProviderSession>;
@@ -78,7 +76,6 @@ export interface ProviderAdapter {
   isRateLimited(err: unknown): boolean;
   isAuthExpired(err: unknown): boolean;
   isUnavailable(err: unknown): boolean;
-  capabilities: { thinking: boolean; functionCalling: 'none' | 'prompt-engineered' };
 }
 export type ProviderStreamEvent =
   | { kind: 'message_id'; id: number | string }
