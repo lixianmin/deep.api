@@ -1,19 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { renderTranscript, renderTail, limitCharsFor } from '../../src/background/transcript-renderer';
+import { renderTranscript, renderTail } from '../../src/background/transcript-renderer';
 import type { Message } from '../../src/shared/api-types';
 
 const m = (role: Message['role'], content: string, extra: Partial<Message> = {}): Message => ({ role, content, ...extra });
-
-// 2026-10-01（stage-a/dead-branch）：验证 'expert' 死分支已删除——任何输入都应返回上限值。
-// 原实现是 `modelType === 'expert' ? 163_840 : 2_621_440`，'expert' 分支从未被走到。
-describe('limitCharsFor', () => {
-  it('无论输入什么都返回上限 2621440（删除 expert 死分支后）', () => {
-    expect(limitCharsFor('default')).toBe(2_621_440);
-    expect(limitCharsFor('expert')).toBe(2_621_440);
-    expect(limitCharsFor('vision')).toBe(2_621_440);
-    expect(limitCharsFor('any-string')).toBe(2_621_440);
-  });
-});
 
 describe('renderTranscript', () => {
   it('returns plain text of last user message (no role template tags)', () => {
