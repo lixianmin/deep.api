@@ -240,7 +240,7 @@ Expected: PASS（含新增用例）
 - [ ] **Step 5: 跑全量 + 类型检查**
 
 Run: `bun run test && bunx tsc --noEmit`
-- [ ] **Step 7: 删除 Task 2 遗留的孤儿 export（controller 追加）**
+- [ ] **Step 6: 删除 Task 2 遗留的孤儿 export（controller 追加）**
 
 `src/background/providers/deepseek/auth.ts:5` 的 `DEEPSEEK_COOKIE_NAMES` 现在全仓无引用——
 它唯一的引用是 Task 2 删掉的 `requiredCookies: [...DEEPSEEK_COOKIE_NAMES]`。按 AGENTS.md §3
