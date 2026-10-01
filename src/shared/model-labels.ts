@@ -3,11 +3,6 @@
  *  content script（SW 是 extension 的根，content script 是注入的叶子，倒向依赖会破坏边界）。
  *  抽成纯模块后，两侧均可 import，而 models-sync.ts 自身也继续用同一份实现。 */
 
-/** 2026-09-14（fix/models-v4-retired）：按 V4.1 Flash 统一后调整。
- *  优先匹配新 ID `deepseek-flash`（覆盖 "default" / "DeepSeek V4.1 Flash" 等显示文案）；
- *  兼容旧三个 V4 ID（retired 兼容层仍 accept，但不被选为新内容——这里仅当明确出现
- *  "v4" + "pro/vision/flash" 独立片段时仍认得，留作安全网）。
- *  @internal 纯字符串映射，不碰 DOM，供 content/background 两侧 import。 */
 export interface ModelOption { label: string; value?: string }
 
 // 2026-09-14（fix/models-v4-retired）：按 V4.1 Flash 统一后调整。
