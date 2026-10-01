@@ -7,7 +7,7 @@ import type { ProviderAdapter, ProviderCompletion, ProviderContext, ProviderSess
 import type { Message } from '../../src/shared/api-types';
 import { resolveModel as clientResolveModel } from '../../src/background/providers/deepseek/client';
 import { RATE_LIMIT_RETRY_BASE_MS } from '../../src/background/router';
-import { DSML_TOKEN } from '../../src/background/providers/deepseek/dsml-parser';
+import { DSML_TOKEN, createDsmlStreamNormalizer } from '../../src/background/providers/deepseek/dsml-parser';
 import { completionEvents } from '../../src/background/providers/deepseek/sse-patch';
 
 const MODELS = [
@@ -44,6 +44,9 @@ function stubAdapter(over: StubExtras = {}): ProviderAdapter & { prompts: string
     isAuthExpired: (e: any) => e?.status === 401,
     isUnavailable: (e: any) => (e?.status === 202 && e?.headers?.['x-amzn-waf-action']) || e instanceof TypeError,
     capabilities: { thinking: true, functionCalling: 'prompt-engineered' },
+    // 2026-10-01（stage-a/decouple-dsml）：router 不再 import 归一化器——stub 必须自己声明
+    // 依赖的归一化行为，等价于真实 DeepSeek adapter.normalizeContent 的契约。
+    normalizeContent: (tools) => createDsmlStreamNormalizer(tools),
     ...over,
   };
   return Object.assign(base, { prompts });

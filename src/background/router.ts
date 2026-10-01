@@ -9,7 +9,6 @@ import { ProviderRateLimiter } from './rate-limit';
 import { renderTranscript, renderTail, limitCharsFor } from './transcript-renderer';
 import { eventToChunks, finalChunk, toAggregate, toolCallDeltaChunks, type StreamAggregate, type StreamContext } from './chunk-encoder';
 import { buildToolPrompt, parseToolCalls, hasToolTags, toolSpecFingerprint, type ToolContext } from './tool-pipeline';
-import { createDsmlStreamNormalizer } from './providers/deepseek/dsml-parser';
 import type { RingLog } from './log';
 import { toB64 } from './log';
 
@@ -724,7 +723,7 @@ export class Router {
         // DeepSeek V4 的原生工具协议是 DSML（<｜DSML｜tool_calls> / <｜DSML｜invoke name="X">）；
         // 直接透传使用方（spice）按标准 <tool_calls> 解析不了。归一化器在块外逐段透传
         // （只扣住可能是起始标记前缀的尾巴），块内缓冲到结束标记后重写成标准 <tool_calls> JSON。
-        const dsml = toolCtx.promptSuffix !== '' ? createDsmlStreamNormalizer(toolCtx.tools) : null;
+        const dsml = toolCtx.promptSuffix !== '' ? (provider.normalizeContent?.(toolCtx.tools) ?? null) : null;
         // 队列锁已在 runCompletion 内的 runExclusiveStream 持有，此处直接消费 handle.stream 即可。
         for await (const ev of handle.stream) {
           if (dsml && ev.kind === 'content_delta') {

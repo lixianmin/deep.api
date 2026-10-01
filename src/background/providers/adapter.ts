@@ -1,4 +1,4 @@
-import type { ModelInfo } from '../../shared/api-types';
+import type { ModelInfo, ToolDef } from '../../shared/api-types';
 
 export type ProviderId = 'deepseek' | (string & {});
 export interface ProviderContext { token: string; requestId: string }
@@ -28,6 +28,15 @@ export interface CompletionOverrides {
   reasoning?: import('../../shared/api-types').ReasoningLevel;
   /** Web search toggle (deep.api-specific). undefined → search_enabled=false. */
   search?: boolean;
+}
+/** 2026-10-01（stage-a/decouple-dsml）：流式 content 归一化器的对外契约（router 调用此接口，
+ *  不再关心具体 provider 用的是哪种 wire 协议）。`unparsed`/`dropped` 声明为 readonly 是为了
+ *  让其他 provider 误把可变数组属性重新赋值时立刻被类型拦住；具体实现（DSML 等）保留可变数组语义。 */
+export interface ContentNormalizer {
+  feed(delta: string): string;
+  flush(): string;
+  readonly unparsed: string[];
+  readonly dropped: string[];
 }
 export interface ProviderCompletion {
   session: ProviderSession;
@@ -60,6 +69,10 @@ export interface ProviderAdapter {
   // 2026-09-12（feat/continue-on-incomplete）：断流自动续接（spec §3.2）。可选方法（与
   // uploadFile/pollFileReady 同例）——未实现的 provider 不参与续接（router 检查存在性）。
   continueStream?(ctx: ProviderContext, session: ProviderSession, messageId: number | string, skip: ContinueSkip): AsyncIterable<ProviderStreamEvent>;
+  // 2026-10-01（stage-a/decouple-dsml）：本 provider 的流式 content 是否需要归一化。
+  // DeepSeek V4 的原生工具协议是 DSML，spice 按标准 <tool_calls> 解析不了，必须重写；
+  // 其他 provider 的 content 原样透传。不实现此方法 = 原样透传。
+  normalizeContent?(tools: ToolDef[]): ContentNormalizer | null;
   readonly models: ModelInfo[];
   resolveModel(modelId: string): ResolvedModel | null;
   isRateLimited(err: unknown): boolean;

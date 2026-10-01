@@ -2,6 +2,7 @@ import type { ProviderAdapter, ProviderCompletion, ProviderContext, ProviderSess
 import { completionPayload, baseHeaders, classify, MODELS, resolveModel, continuePayload, continueHeaders } from './client';
 import { getAuthStatus, DEEPSEEK_LOGIN_PAGE, DEEPSEEK_COOKIE_NAMES } from './auth';
 import { completionEvents } from './sse-patch';
+import { createDsmlStreamNormalizer } from './dsml-parser';
 
 export interface AdapterDeps {
   getToken(): Promise<string | null>;
@@ -187,6 +188,11 @@ export function createDeepSeekAdapter(deps: AdapterDeps): ProviderAdapter {
       }
       for await (const ev of completionEvents(res.body, NO_PROGRESS_MS, () => {}, { ...skip, expectMessageId: messageId })) yield ev;
     },
+
+    // 2026-10-01（stage-a/decouple-dsml）：DeepSeek V4 原生工具协议是 DSML，spice 按标准
+    // tool_calls 解析不了——归一化责任下沉到 adapter 自己。router 只问 adapter 要/不要，
+    // 不再 import 这个库。
+    normalizeContent: (tools) => createDsmlStreamNormalizer(tools),
 
     models: MODELS,
     resolveModel,
