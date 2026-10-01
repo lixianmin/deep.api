@@ -1,6 +1,10 @@
 import type { ModelInfo, ToolDef } from '../../shared/api-types';
 
 export type ProviderId = 'deepseek' | (string & {});
+/** provider 内部的「模型变体」标识。共享层不规定取值——各 adapter 自定义
+ *  （DeepSeek 用 'default'/'vision' 这类 wire 词汇）。共享层只用它判断
+ *  「同一 conversation_id 中途是否换了模型」，换了要 rebuild。 */
+export type ModelVariant = string;
 export interface ProviderContext { token: string; requestId: string }
 export type AuthStatus = { state: 'logged_in' } | { state: 'logged_out' } | { state: 'expired'; message: string };
 export interface ProviderSession { providerId: ProviderId; webSessionId: string; parentMessageId: number | string | null }
@@ -41,14 +45,14 @@ export interface ContentNormalizer {
 export interface ProviderCompletion {
   session: ProviderSession;
   prompt: string;
-  model: { modelType: 'default' | 'expert' | 'vision'; thinking: boolean };
+  model: { variant: ModelVariant; thinking: boolean };
   /** 2026-09-09（feat/vision-multimodal）：vision 模型 multipart 上传后拿到的 file_id 数组。
    *  adapter 透传到请求体的 ref_file_ids；flash/pro 不用。 */
   refFileIds?: string[];
   overrides?: CompletionOverrides;
   requestId: string;
 }
-export interface ResolvedModel { modelId: string; modelType: 'default' | 'expert' | 'vision'; supportsImages: boolean; thinking: boolean; limitChars: number }
+export interface ResolvedModel { modelId: string; variant: ModelVariant; supportsImages: boolean; thinking: boolean; limitChars: number }
 export interface ProviderAdapter {
   readonly id: ProviderId;
   auth: {

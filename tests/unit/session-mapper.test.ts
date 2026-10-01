@@ -339,10 +339,10 @@ describe('SessionMapper mirrorHash 快路径（fix/mirror-hash，2026-09-09）',
 
 // 2026-09-09（fix/model-switch-rebuild）：同 cid 中途换模型必须 rebuild。DeepSeek 网页 web API
 // 一个 chat thread 不能中途换 model_type；reuse 旧 session 会让 model_type 与 parent_message_id 链不一致。
-// mapper 层 cover：register/commit 写 modelType，decide 比对；老 thread 无 modelType（未设置）则不约束
+// mapper 层 cover：register/commit 写 variant，decide 比对；老 thread 无 variant（未设置）则不约束
 // （SW 重启后持久化场景兼容），首次 commit 会补上。
-describe('SessionMapper modelType tracking（fix/model-switch-rebuild）', () => {
-  it('同 cid + 同 modelType + messages 前缀匹配 → incremental', () => {
+describe('SessionMapper variant tracking（fix/model-switch-rebuild）', () => {
+  it('同 cid + 同 variant + messages 前缀匹配 → incremental', () => {
     const { mapper } = mk();
     mapper.register('deepseek', 'cid', 's1', [m('user', 'q1')], 'default');
     mapper.commit('deepseek', 'cid', [m('user', 'q1')], 's1', 10, 'default');
@@ -350,7 +350,7 @@ describe('SessionMapper modelType tracking（fix/model-switch-rebuild）', () =>
     expect(d.action).toBe('incremental');
   });
 
-  it('同 cid + 换 modelType → rebuild with existing（old session 被删、modelType 以新值为准）', () => {
+  it('同 cid + 换 variant → rebuild with existing（old session 被删、variant 以新值为准）', () => {
     const { mapper } = mk();
     mapper.register('deepseek', 'cid', 's1', [m('user', 'q1')], 'default');
     mapper.commit('deepseek', 'cid', [m('user', 'q1')], 's1', 10, 'default');
@@ -361,21 +361,23 @@ describe('SessionMapper modelType tracking（fix/model-switch-rebuild）', () =>
     }
   });
 
-  it('老 thread 未设置 modelType + 请求带 modelType → 视为不约束（incremental），commit 后补上', () => {
+  it('老 thread 未设置 variant + 请求带 variant → 视为不约束（incremental），commit 后补上', () => {
     const { mapper } = mk();
-    // 模拟 SW 重启后老持久化 thread：register 没传 modelType
+    // 模拟 SW 重启后老持久化 thread：register 没传 variant
     mapper.register('deepseek', 'cid', 's1', [m('user', 'q1')]);
-    mapper.commit('deepseek', 'cid', [m('user', 'q1')], 's1', 10);   // 老调用者也没传 modelType
-    // 首轮后续请求带 modelType='default' → 应 incremental（不动老 thread）
+    mapper.commit('deepseek', 'cid', [m('user', 'q1')], 's1', 10);   // 老调用者也没传 variant
+    // 首轮后续请求带 variant='default' → 应 incremental（不动老 thread）
     const d = mapper.decide('deepseek', [m('user', 'q1'), m('user', 'q2')], 'cid', 'default');
     expect(d.action).toBe('incremental');
-    // commit 补上 modelType 后，后续决定才进入追踪状态
+    // commit 补上 variant 后，后续决定才进入追踪状态
     mapper.commit('deepseek', 'cid', [m('user', 'q1'), m('user', 'q2')], 's1', 11, 'default');
     const t = (mapper as any).threads.get('deepseek:cid');
+    // ThreadEntry.modelType 是 chrome.storage 持久化键（冻结，见 ThreadEntry 注释）——
+    // 标识符 mechanical rename 不改此处的「键名」读取；值是 commit 写入的 variant='default'
     expect(t.modelType).toBe('default');
   });
 
-  it('auto 池：modelType 不一致的 thread 不被选用（仅同 modelType 候选项选最长 mirror）', () => {
+  it('auto 池：variant 不一致的 thread 不被选用（仅同 variant 候选项选最长 mirror）', () => {
     const { mapper } = mk();
     mapper.register('deepseek', 'auto:1', 's-flash', [m('user', 'flash-q')], 'default');
     mapper.commit('deepseek', 'auto:1', [m('user', 'flash-q')], 's-flash', 1, 'default');
@@ -526,5 +528,28 @@ describe('SessionMapper review-r2 fixes', () => {
     mapper.commit('deepseek', t.conversationId, [m('user', 'u1'), m('assistant', 'a1')], 's1', 10);
     await mapper.fail('deepseek', t.conversationId, 'reqB');
     expect(mapper.stats().threads).toBe(0);
+  });
+});
+
+// 2026-10-01（stage-a2/debt-task1）：refactor variant → variant 时的护栏测试——
+// 钉住「ThreadEntry.variant 是 chrome.storage 持久化键（键名冻结）」「decide/register/commit
+// 的形参已中性化为 variant」两个核心约束。任一失败即视为「model-switch 检测能力被静默打废」。
+describe('SessionMapper 重构护栏（variant 中性化 + variant 键名冻结）', () => {
+  it('guard-1: 存量 ThreadEntry 无 variant 键（模拟 SW 重启 / 旧持久化形态）→ decide 不返回 rebuild', () => {
+    const { mapper } = mk();
+    // 旧调用者：register / commit 都不传 variant → ThreadEntry.variant = undefined
+    mapper.register('deepseek', 'cid', 's1', [m('user', 'q1')]);
+    mapper.commit('deepseek', 'cid', [m('user', 'q1')], 's1', 1);
+    // 新调用者：decide 已用中性形参 variant；存量的 t.variant=undefined 必须走「不约束」语义
+    const d = mapper.decide('deepseek', [m('user', 'q1'), m('user', 'q2')], 'cid', 'default');
+    expect(d.action).toBe('incremental');
+  });
+
+  it('guard-2: 同 cid + 同 variant=default → 不 rebuild（model-switch 检测不会误触发）', () => {
+    const { mapper } = mk();
+    mapper.register('deepseek', 'cid', 's1', [m('user', 'q1')], 'default');
+    mapper.commit('deepseek', 'cid', [m('user', 'q1')], 's1', 1, 'default');
+    const d = mapper.decide('deepseek', [m('user', 'q1'), m('user', 'q2')], 'cid', 'default');
+    expect(d.action).toBe('incremental');
   });
 });

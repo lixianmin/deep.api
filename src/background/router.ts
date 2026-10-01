@@ -279,9 +279,9 @@ export class Router {
     const conversationId = p.conversation_id as string | undefined;
     // 2026-09-09 诊断字段（v0.1.50 落地）：在 handle 构造前先比一次，看看是不是 thread 找不到 / mirror 不匹配。
     // 给 popup 日志区提供 decision.action / threadFound / deletedOld 等现场信息。
-    // 2026-09-09（fix/model-switch-rebuild）：decide 同时传 modelType，让 mapper 能 detect
+    // 2026-09-09（fix/model-switch-rebuild）：decide 同时传 variant，让 mapper 能 detect
     // 同 cid 中途切模型的情况并返回 rebuild（避免复用旧 model 的 webSessionId + parent_message_id 链）。
-    const preDecide = this.d.mapper.decide(provider.id, messages, conversationId, resolved.modelType);
+    const preDecide = this.d.mapper.decide(provider.id, messages, conversationId, resolved.variant);
     const threadFound = preDecide.action !== 'rebuild' || preDecide.existing !== null;
     const mirrorLen = preDecide.action === 'incremental' ? preDecide.thread.mirror.length
       : preDecide.action === 'rebuild' && preDecide.existing ? preDecide.existing.mirror.length
@@ -308,7 +308,7 @@ export class Router {
     // 2026-09-11（fix/review-r1）：改为在 done() 里现算——handle 的会话/promptLen 可能被
     // 「拿锁后重决策」改写，预先冻结会把旧 promptLen / 旧 webSessionId 写进日志。
     const buildRequestFull = () => JSON.stringify({
-      modelType: resolved.modelType,
+      variant: resolved.variant,
       thinking: resolved.thinking,
       reasoningOverride: overrides.reasoning,
       search: overrides.search,
@@ -397,7 +397,7 @@ export class Router {
     refFileIds: string[] = [],
   ): Promise<RunHandle> {
     const pid = provider.id;
-    const decision = this.d.mapper.decide(pid, messages, conversationId, resolved.modelType);
+    const decision = this.d.mapper.decide(pid, messages, conversationId, resolved.variant);
     if (decision.action === 'error') throw err(decision.code, decision.message, 400);
     let session: ProviderSession; let convId: string; let thread: ThreadEntry; let prompt: string;
     // 2026-09-14（feat/spec-compact-incremental）：本轮实际用的 spec 变体。局部变量先行——
@@ -411,9 +411,9 @@ export class Router {
       const s = await provider.createSession(ctx);
       // 优先级：existing 保留同名 cid > 用户传的 cid（named 首次请求） > auto 顺序号
       convId = decision.existing?.conversationId ?? conversationId ?? this.d.mapper.nextAutoConversationId();
-      // 2026-09-09（fix/model-switch-rebuild）：rebuild 时 modelType 一定传（resolved.modelType），
+      // 2026-09-09（fix/model-switch-rebuild）：rebuild 时 variant 一定传（resolved.variant），
       // 让 mapper 跟踪该 cid 当前绑定的模型。下一轮同 cid 同模型→ incremental；下一轮同 cid 换模型→ rebuild。
-      thread = this.d.mapper.register(pid, convId, s.webSessionId, messages, resolved.modelType);
+      thread = this.d.mapper.register(pid, convId, s.webSessionId, messages, resolved.variant);
       session = { providerId: pid, webSessionId: s.webSessionId, parentMessageId: null };
       prompt = renderTranscript(stringMessages).ok
         ? (renderTranscript(stringMessages) as { ok: true; prompt: string }).prompt + toolCtx.promptSuffix
@@ -442,7 +442,7 @@ export class Router {
       throw err('invalid_request_error', `transcript too long: ${prompt.length} > ${resolved.limitChars}（建议缩短历史或分批）`, 400);
     }
     const run: RunState = { parentMessageId: null, repairDone: false, model: resolved, promptLen: prompt.length, continueAttempts: 0, emittedThinkChars: 0, emittedContentChars: 0, specMode };
-    const req: ProviderCompletion = { session, prompt, model: { modelType: resolved.modelType, thinking: resolved.thinking }, overrides, requestId: ctx.requestId, ...(refFileIds.length ? { refFileIds } : {}) };
+    const req: ProviderCompletion = { session, prompt, model: { variant: resolved.variant, thinking: resolved.thinking }, overrides, requestId: ctx.requestId, ...(refFileIds.length ? { refFileIds } : {}) };
     const handle: RunHandle = {
       stream: null as unknown as AsyncIterable<ProviderStreamEvent>,
       session, convId, thread, run,
@@ -464,7 +464,7 @@ export class Router {
         req.session.parentMessageId = live.parentMessageId;   // 防御性刷新（同一对象，通常无变化）
         return;
       }
-      const d2 = this.d.mapper.decide(pid, messages, conversationId, resolved.modelType);
+      const d2 = this.d.mapper.decide(pid, messages, conversationId, resolved.variant);
       if (d2.action === 'error') throw err(d2.code, d2.message, 400);
       if (d2.action === 'incremental') {
         this.d.mapper.markBusy(pid, d2.thread.conversationId, ctx.requestId);
@@ -495,7 +495,7 @@ export class Router {
       }
       const s = await provider.createSession(ctx);
       const newConvId = d2.existing?.conversationId ?? conversationId ?? this.d.mapper.nextAutoConversationId();
-      const t2 = this.d.mapper.register(pid, newConvId, s.webSessionId, messages, resolved.modelType);
+      const t2 = this.d.mapper.register(pid, newConvId, s.webSessionId, messages, resolved.variant);
       const full = renderTranscript(stringMessages);
       const nextPrompt = (full.ok ? full.prompt : '') + toolCtx.promptSuffix;
       if (nextPrompt.length > resolved.limitChars) {
@@ -680,7 +680,7 @@ export class Router {
     // 2026-09-09（fix/model-switch-rebuild）：commit 时同步 modelType，让 mapper 跟踪 cid ↔ 模型。
     // 2026-09-14（feat/spec-compact-incremental）：commit 携指纹（唯一写入点，spec 评审 R2）——
     // 本轮全量/compact 的 prompt 已落线，标「线程已含该工具集全量 spec」。
-    this.d.mapper.commit(provider.id, handle.convId, mirrorMessages, handle.session.webSessionId, handle.run.parentMessageId ?? handle.session.parentMessageId, handle.run.model.modelType, toolSpecFingerprint(toolCtx.tools));
+    this.d.mapper.commit(provider.id, handle.convId, mirrorMessages, handle.session.webSessionId, handle.run.parentMessageId ?? handle.session.parentMessageId, handle.run.model.variant, toolSpecFingerprint(toolCtx.tools));
     agg.toolCalls = toolCalls;
     agg.finishReason = agg.finishReason ?? 'stop';
   }
@@ -700,7 +700,7 @@ export class Router {
     const repairReq: ProviderCompletion = {
       session: { ...handle.session, parentMessageId: handle.run.parentMessageId ?? handle.session.parentMessageId },
       prompt: `${REPAIR_INSTRUCTION}\n\n${raw}`,
-      model: { modelType: handle.run.model.modelType, thinking: handle.run.model.thinking },
+      model: { variant: handle.run.model.variant, thinking: handle.run.model.thinking },
       requestId: `${ctx.requestId}-repair`,
     };
     let buf = '';
@@ -821,7 +821,7 @@ export class Router {
         const mirrorMessages: Message[] = [...messages, { role: 'assistant', content: sentRawContent, ...(agg.toolCalls.length ? { tool_calls: agg.toolCalls } : {}) }];
         // 2026-09-09（fix/model-switch-rebuild）：commit 时同步 modelType。
         // 2026-09-14（feat/spec-compact-incremental）：commit 携指纹（唯一写入点，spec 评审 R2）。
-        self.d.mapper.commit(provider.id, handle.convId, mirrorMessages, handle.session.webSessionId, handle.run.parentMessageId ?? handle.session.parentMessageId, handle.run.model.modelType, toolSpecFingerprint(toolCtx.tools));
+        self.d.mapper.commit(provider.id, handle.convId, mirrorMessages, handle.session.webSessionId, handle.run.parentMessageId ?? handle.session.parentMessageId, handle.run.model.variant, toolSpecFingerprint(toolCtx.tools));
         completed = true;
         done(true, self.d.now() - started, undefined, { finishReason: agg.finishReason ?? 'stop', parentMessageId: handle.run.parentMessageId, replySample: agg.content.slice(0, 1200), rawSample: rawContent.slice(0, B64_SAMPLE_CHARS), reasoningSample: agg.reasoning.slice(0, 200), sseBytes: handle.run.sseBytes, ssePaths: handle.run.ssePaths, sseRaw: handle.run.sseRaw, sseStatusValues: handle.run.sseStatusValues, sseThinkingChars: handle.run.sseThinkingChars, sseResponseChars: handle.run.sseResponseChars, sseRawTail: handle.run.sseRawTail, sseAutoResume: handle.run.sseAutoResume, sseHasPendingFragment: handle.run.sseHasPendingFragment, continueAttempts: handle.run.continueAttempts });
       } catch (e) {

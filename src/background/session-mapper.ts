@@ -1,4 +1,5 @@
 import type { Message } from '../shared/api-types';
+import type { ModelVariant } from './providers/adapter';
 import { RingLog, type LogEntry } from './log';
 
 // 2026-09-09（fix/mirror-hash）：commit 时算 mirror 内容 64-bit FNV-1a hash（同步轻量）。
@@ -50,7 +51,11 @@ export interface ThreadEntry {
   // reuse 旧 session 会让 model_type 与 parent_message_id 链不一致。register/commit 时
   // 写入，decide 时比对，不一致 → rebuild 走 deleteSession+createSession+renderTranscript。
   // 未设置（undefined）：旧持久化 thread 走「不约束」路径，避免 SW 重启后首轮误 rebuild。
-  modelType?: 'default' | 'expert' | 'vision';
+  // 2026-10-01（stage-a2/debt-task1）：属性名 modelType 是 chrome.storage 的持久化键，冻结不改
+  // （改名会导致所有存量 thread 读不出该键 → decide 对 undefined 走「不约束」路径 → model-switch
+  // 检测能力静默失效，同一会话中途换模型不再 rebuild）。类型已中性化为 ModelVariant（共享层
+  // 不规定取值，各 adapter 自定义；DeepSeek 仍是 'default'/'expert'/'vision'）。
+  modelType?: ModelVariant;
   // 2026-09-14（feat/spec-compact-incremental）：线程已含的全量工具 spec 指纹（tool-pipeline
   // toolSpecFingerprint，基于 toolCtx.tools）。**唯一写入点 = commit**（spec 评审 R2：prompt
   // 构建期/register 写入会在队列超时场景留下「假已含」标记——full spec 实际未落线）。
@@ -132,11 +137,12 @@ export class SessionMapper {
     return messages.slice(idx);
   }
 
-  decide(providerId: string, messages: Message[], conversationId?: string, modelType?: 'default' | 'expert' | 'vision'): Decision {
+  decide(providerId: string, messages: Message[], conversationId?: string, variant?: ModelVariant): Decision {
     if (messages.length === 0) return { action: 'error', code: 'invalid_request_error', message: 'messages is empty' };
     // 2026-09-09（fix/model-switch-rebuild）：同一 cid 中途切模型 → rebuild。
     // t.modelType 未设置（老持久化 thread）跳过本检查，承诺在 commit 时补上。
-    const modelMatches = (t: ThreadEntry): boolean => t.modelType === undefined || modelType === undefined || t.modelType === modelType;
+    // 2026-10-01（stage-a2/debt-task1）：t.modelType 是存储键，参数已中性化为 variant。
+    const modelMatches = (t: ThreadEntry): boolean => t.modelType === undefined || variant === undefined || t.modelType === variant;
     // 全量 messages（含末条）用于匹配：镜像 ⊆ messages 即命中；
     // 未在网页线程上的部分 = messages.slice(mirror.length)（含最新一条 user 消息）。
     // 2026-09-09（fix/mirror-hash）：commit 时已算 mirrorHash；decide 时 hash 快路径——
@@ -172,7 +178,12 @@ export class SessionMapper {
     return { action: 'rebuild', existing: null };
   }
 
-  register(providerId: string, conversationId: string, webSessionId: string, mirror: Message[], modelType?: 'default' | 'expert' | 'vision', toolSpecFingerprint?: string): ThreadEntry {
+  register(providerId: string, conversationId: string, webSessionId: string, mirror: Message[], variant?: ModelVariant, toolSpecFingerprint?: string): ThreadEntry {
+    // 2026-10-01（stage-a2/debt-task1）：局部变量沿用旧名 modelType，使对象字面量仍可使用
+    // `modelType,` 简写——ThreadEntry.modelType 是 chrome.storage 持久化键（冻结，见 ThreadEntry
+    // 注释），写入行的字面量必须原样保留（brief Step 9 grep 检验）。中性化的形参 variant 仍
+    // 通过此局部变量绑定写入键 modelType，外部行为等价。
+    const modelType = variant;
     const t: ThreadEntry = {
       providerId, conversationId, webSessionId, parentMessageId: null,
       mirror: mirror.map(x => ({ ...x })),
@@ -229,13 +240,13 @@ export class SessionMapper {
     return this.threads.get(this.key(providerId, conversationId));
   }
 
-  commit(providerId: string, conversationId: string, messages: Message[], webSessionId: string, parentMessageId: number | string | null, modelType?: 'default' | 'expert' | 'vision', toolSpecFingerprint?: string) {
+  commit(providerId: string, conversationId: string, messages: Message[], webSessionId: string, parentMessageId: number | string | null, variant?: ModelVariant, toolSpecFingerprint?: string) {
     const t = this.threads.get(this.key(providerId, conversationId));
-    if (!t) { this.register(providerId, conversationId, webSessionId, messages, modelType, toolSpecFingerprint); return; }
+    if (!t) { this.register(providerId, conversationId, webSessionId, messages, variant, toolSpecFingerprint); return; }
     t.mirror = messages.map(x => ({ ...x }));
     t.mirrorHash = hashMirror(t.mirror);
     t.parentMessageId = parentMessageId;
-    if (modelType !== undefined) t.modelType = modelType;   // commit 调用者总是带新 modelType，覆盖以保证该轮成功后状态一致
+    if (variant !== undefined) t.modelType = variant;   // commit 调用者总是带新 variant，覆盖以保证该轮成功后状态一致（键名保持 modelType 见 ThreadEntry.modelType）
     // 2026-09-14（feat/spec-compact-incremental）：指纹唯一写入点。缺省（undefined）不回写——
     // 老持久化/既有调用路径不传，保持 undefined 语义（route 侧首轮按不匹配走全量）。
     if (toolSpecFingerprint !== undefined) t.toolSpecFingerprint = toolSpecFingerprint;

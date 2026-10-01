@@ -34,11 +34,11 @@ function stubAdapter(over: StubExtras = {}): ProviderAdapter & { prompts: string
     },
     models: MODELS,
     resolveModel: (id: string) => id === 'deepseek-v4-flash'
-      ? { modelId: id, modelType: 'default' as const, supportsImages: false, thinking: false, limitChars: 2_621_440 }
+      ? { modelId: id, variant: 'default' as const, supportsImages: false, thinking: false, limitChars: 2_621_440 }
       : id === 'deepseek-v4-pro'
-        ? { modelId: id, modelType: 'expert' as const, supportsImages: false, thinking: true, limitChars: 163_840 }
+        ? { modelId: id, variant: 'expert' as const, supportsImages: false, thinking: true, limitChars: 163_840 }
         : id === 'deepseek-v4-flash-vision-exp'
-          ? { modelId: id, modelType: 'vision' as const, supportsImages: true, thinking: false, limitChars: 2_621_440 }
+          ? { modelId: id, variant: 'vision' as const, supportsImages: true, thinking: false, limitChars: 2_621_440 }
           : null,
     isRateLimited: (e: any) => e?.status === 429,
     isAuthExpired: (e: any) => e?.status === 401,
@@ -147,10 +147,10 @@ describe('Router', () => {
   });
 
   // 2026-09-09（fix/model-switch-rebuild）：同一 conversation_id 中途切模型 → mapper 必须 detect
-  // 到 modelType 变化 → 走 rebuild 路径（deleteSession + createSession + 完整历史作为 prompt）。
+  // 到 variant 变化 → 走 rebuild 路径（deleteSession + createSession + 完整历史作为 prompt）。
   // DeepSeek 网页 web API 本身不允许一个 chat thread 中途换模型（聊天前定模型）；reuse 旧 session
   // 会让 model_type 与 parent_message_id 链不一致，行为未定义。
-  // 修：ThreadEntry 存 modelType，decide() 比对请求的 resolved.modelType vs 存储的 modelType，
+  // 修：ThreadEntry 存 variant，decide() 比对请求的 resolved.variant vs 存储的 variant，
   // 不一致 → 返回 {action:'rebuild', existing: thread}，复用现有 cid 让客户端无感。
   it('fail-to-pass: 同 cid 中途切模型（flash → pro）→ rebuild + 完整历史作为 prompt', async () => {
     const a = stubAdapter();

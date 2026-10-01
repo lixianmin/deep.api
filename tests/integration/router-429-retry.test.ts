@@ -31,7 +31,7 @@ function stubAdapter(over: Partial<ProviderAdapter> = {}): ProviderAdapter {
     },
     models: [{ id: 'deepseek-flash', provider: 'deepseek', description: 'flash' }],
     resolveModel: (id: string) => id === 'deepseek-flash'
-      ? { modelId: id, modelType: 'default' as const, supportsImages: false, thinking: false, limitChars: 2_621_440 }
+      ? { modelId: id, variant: 'default' as const, supportsImages: false, thinking: false, limitChars: 2_621_440 }
       : null,
     isRateLimited: (e: any) => e?.status === 429,
     isAuthExpired: (e: any) => e?.status === 401,

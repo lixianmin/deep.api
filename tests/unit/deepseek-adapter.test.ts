@@ -21,11 +21,11 @@ describe('DeepSeekAdapter', () => {
     // 2026-09-14（fix/models-v4-retired）：V4 三个 chat ID retired，只 1 个新 chat ID。
     // 2026-09-10（fix/vision-model-type）：deepseek-flash 改为 wire model_type='default' +
     // 独立 supportsImages（避开 vision 变体的 DSML 工具调用格式）。
-    expect(a.resolveModel('deepseek-flash')).toMatchObject({ modelType: 'default', supportsImages: true, thinking: true });
+    expect(a.resolveModel('deepseek-flash')).toMatchObject({ variant: 'default', supportsImages: true, thinking: true });
     // vision 兼容层仍保留
-    expect(a.resolveModel('deepseek-v4-flash-vision-exp')).toMatchObject({ modelType: 'vision', supportsImages: true, thinking: true });
+    expect(a.resolveModel('deepseek-v4-flash-vision-exp')).toMatchObject({ variant: 'vision', supportsImages: true, thinking: true });
     // 2026-09-14（fix/accept-v4-flash-alias）：`deepseek-v4-flash` 恢复兼容解析（旧下游仍发此 ID）
-    expect(a.resolveModel('deepseek-v4-flash')).toMatchObject({ modelType: 'default', supportsImages: true, thinking: true });
+    expect(a.resolveModel('deepseek-v4-flash')).toMatchObject({ variant: 'default', supportsImages: true, thinking: true });
     // 仍未恢复的旧 V4 chat ID
     expect(a.resolveModel('deepseek-v4-pro')).toBeNull();
     expect(a.resolveModel('gpt-4o')).toBeNull();
@@ -60,7 +60,7 @@ describe('DeepSeekAdapter', () => {
     const req: ProviderCompletion = {
       session: { webSessionId: 's1', parentMessageId: null } as any,
       prompt: 'hi',
-      model: { modelId: 'deepseek-v4-pro', modelType: 'expert', thinking: false } as any,
+      model: { modelId: 'deepseek-v4-pro', variant: 'expert', thinking: false } as any,
     } as any;
     for await (const _ of a.streamCompletion(ctx, req)) { void _; }
     expect(sentHeaders?.['x-client-version']).toBe('2.4.0');

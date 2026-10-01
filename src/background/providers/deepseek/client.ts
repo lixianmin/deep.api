@@ -1,4 +1,4 @@
-import type { ModelInfo, ProviderSession, ResolvedModel } from '../adapter';
+import type { ModelInfo, ModelVariant, ProviderSession, ResolvedModel } from '../adapter';
 
 // 2026-09-14（fix/models-v4-retired）：V4 三个 ID（flash / pro / vision-exp）官方
 // 9/14 12:00 起全部 retired，统一为 V4.1 Flash 新 ID `deepseek-flash`（UI
@@ -12,7 +12,7 @@ export const MODELS: ModelInfo[] = [
 export interface MergedModel {
   id: string;
   description: string;
-  modelType: 'default' | 'expert' | 'vision';
+  variant: ModelVariant;
   supportsImages: boolean;
   thinking: boolean;
   limitChars: number;
@@ -31,16 +31,16 @@ export interface MergedModel {
 // 用 DSML（`<|dsml|tool_calls>`）工具调用格式的 vision 变体——下游按标准 `<tool_calls>` 解析
 // 会失败。所以 chat 模型一律发 `default`，图片支持改由 `supportsImages` 独立表达。
 const LIMITS = {
-  'deepseek-flash': { modelType: 'default' as const, supportsImages: true, thinking: true, limitChars: 2_621_440 },
+  'deepseek-flash': { variant: 'default', supportsImages: true, thinking: true, limitChars: 2_621_440 },
   // 2026-09-14（fix/accept-v4-flash-alias）：`fix/models-v4-retired` 误把旧 chat ID 从
   // `resolveModel` 一并删掉，导致仍发 `deepseek-v4-flash` 的下游被 router 拦成 400
   // `unknown model`。DeepSeek API 兼容层仍接受该 ID（路由到 V4.1 Flash），故恢复解析。
   // 配置与 `deepseek-flash` 完全一致（同一底层模型，含图片支持），保持别名语义：
-  // 两者相互切换时 mapper 的 modelType 相同 → 仍走 incremental，不触发 rebuild。
-  'deepseek-v4-flash': { modelType: 'default' as const, supportsImages: true, thinking: true, limitChars: 2_621_440 },
+  // 两者相互切换时 mapper 的 variant 相同 → 仍走 incremental，不触发 rebuild。
+  'deepseek-v4-flash': { variant: 'default', supportsImages: true, thinking: true, limitChars: 2_621_440 },
   // 2026-09-10（fix/vision-model-type）：vision-exp 是唯一仍需 `model_type:"vision"` 的
   // 独立实验模型；保留兼容层，如后续 retire 再删。
-  'deepseek-v4-flash-vision-exp': { modelType: 'vision' as const, supportsImages: true, thinking: true, limitChars: 2_621_440 },
+  'deepseek-v4-flash-vision-exp': { variant: 'vision', supportsImages: true, thinking: true, limitChars: 2_621_440 },
 };
 
 export function resolveModel(modelId: string): ResolvedModel | null {
@@ -52,7 +52,7 @@ export function resolveModel(modelId: string): ResolvedModel | null {
 export function completionPayload(
   session: ProviderSession,
   prompt: string,
-  model: { modelType: 'default' | 'expert' | 'vision'; thinking: boolean },
+  model: { variant: ModelVariant; thinking: boolean },
   // 2026-09-11（feat/reasoning-search-alignment）：对齐 pi-ai ModelThinkingLevel 单字段；
   // 'off' 字段缺席表达，其余 level 折叠见 spec §3.2 映射表。
   overrides?: { reasoning?: import('../../../shared/api-types').ReasoningLevel; search?: boolean },
@@ -64,7 +64,7 @@ export function completionPayload(
   const payload: Record<string, unknown> = {
     chat_session_id: session.webSessionId,
     parent_message_id: session.parentMessageId ?? null,
-    model_type: model.modelType,
+    model_type: model.variant,
     prompt,
     ref_file_ids: refFileIds && refFileIds.length > 0 ? refFileIds : [],
     search_enabled: searchEnabled,
