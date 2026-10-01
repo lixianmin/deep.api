@@ -240,14 +240,26 @@ Expected: PASS（含新增用例）
 - [ ] **Step 5: 跑全量 + 类型检查**
 
 Run: `bun run test && bunx tsc --noEmit`
+- [ ] **Step 7: 删除 Task 2 遗留的孤儿 export（controller 追加）**
+
+`src/background/providers/deepseek/auth.ts:5` 的 `DEEPSEEK_COOKIE_NAMES` 现在全仓无引用——
+它唯一的引用是 Task 2 删掉的 `requiredCookies: [...DEEPSEEK_COOKIE_NAMES]`。按 AGENTS.md §3
+「清理自己改动造成的孤儿」，连同其上方那两行已失效的注释（提到「chrome.cookies 取 cookie
+时域名必须用 . 前缀」，而 DeepSeek auth 早已改 localStorage JWT）一并删除。
+
+改完 grep 确认：`grep -rn "DEEPSEEK_COOKIE_NAMES" src/ tests/` 应无结果。
+
+- [ ] **Step 7: 跑全量 + 类型检查**
+
+Run: `bun run test && bunx tsc --noEmit`
 Expected: 540 passed，tsc 0 错误。若有用例失败，说明真有代码在传 `'expert'`——
 **停下来查，不要改断言**。
 
-- [ ] **Step 6: 提交**
+- [ ] **Step 8: 提交**
 
 ```bash
-git add src/background/transcript-renderer.ts tests/unit/transcript-renderer.test.ts
-git commit -m "refactor(transcript): 删除无人走到的 'expert' 分支"
+git add src/background/transcript-renderer.ts tests/unit/transcript-renderer.test.ts src/background/providers/deepseek/auth.ts
+git commit -m "refactor(transcript): 删除 'expert' 死分支与失效 cookie 常量"
 ```
 
 ---
