@@ -17,9 +17,13 @@ DeepSeek 的 REST 后端（`/api/v0/*`）只要一个 Bearer token 就能直接�
 
 实测（2026-10-01，详见 `docs/01.memory.md` 的 ChatGPT 调研条目）：
 
-1. 端点是 `POST /backend-api/sidebar/conversation`，**不是** `/conversation`（少一级 `sidebar/`
-   会得到 422 `Invalid conversation body`）。body 必填 `conversation_id`（string，新会话传 `""`）
-   与 `message_id`（string）。
+1. **主聊天发送的真实端点是 `POST /backend-api/f/conversation`**（2026-10-01 实测更正）。
+   此前本节写的是 `/backend-api/sidebar/conversation`——**该路径确实存在**（对它 POST 会得到
+   规范的 Pydantic 422，body 必填 `conversation_id`（string，新会话 `""`）与 `message_id`），
+   但它**不是主聊天流走的路**。误判来源：在一个 1675B 的 chunk 里读到该字面量，而它属于
+   sidebar 内联聊天分支。主聊天流走 `/f/conversation`，同族还有 `/f/conversation/prepare`。
+   ⚠️ 教训：静态读到的字面量不等于实际流量，必须用 Resource Timing 以
+   `initiatorType` 为准反查真实请求。
 2. Bearer 认证本身可用：`GET /api/auth/session` 的 `accessToken`（1690 字符 RS256 JWT）配
    `Authorization: Bearer` 打 `/backend-api/*` 实测 200。**但只带 cookie（`credentials:include`）
    会得到误导性错误** `"Log in to view this conversation"`，排查时必须先试 bearer。
@@ -90,7 +94,7 @@ spice 发消息时，SW 经 port 通知 chatgpt.com 上的 MAIN world 脚本，�
 本仓已有同款基建（`src/content/bridge-main.ts`，`run_at: document_start` + `world: MAIN`）。
 
 包装逻辑：请求照常发出（不动 headers/body，保住原生 auth 与 sentinel），但对
-`/backend-api/sidebar/conversation` 的响应做 tee，一路照常返回给页面，
+`/backend-api/f/conversation` 的响应做 tee，一路照常返回给页面，
 另一路把 SSE 帧逐块转给 SW。
 
 **tee 两侧都必须被消费**：若只读页面那一侧，未读的分支会滞住并向 socket 反压，
@@ -195,26 +199,35 @@ ChatGPT 有真实 conversation 概念（`/c/<uuid>`），比 DeepSeek 的 `chat_
 
 ## 7. 验证方式
 
-### 7.1 阶段 B 第一道闸门（先做，不通过就不要往下写）
+### 7.1 阶段 B 第一道闸门 —— **已通过（2026-10-01 实测）**
 
-**必须用真实的 `document_start` MAIN world 注入来测，不能用 DOM 观测代替。**
-原因是 2026-10-01 那轮用 DOM 观测的尝试失败了：测量脚本读错了元素（读末尾空占位
-而非真实内容节点），导致结论不可信。DOM 观测本身就不是可靠观测量。
+**结论：流式成立，且后台标签页可读。阶段 B 可以开工。**
 
-验证内容：**SSE 分块是否逐块到达**，而非整体缓冲后一次性交付。
-做法：写一个只做 fetch 包装、不含其他逻辑的验证版 content script，记录每块到达的
-时间戳与长度。
+实测数据（Resource Timing，`initiatorType: fetch`，以点击时刻为基准）：
 
-- 通过：分块在数秒内陆续到达（时间戳分散）→ 流式成立，阶段 B 按本设计继续
-- 不通过：内容在极短时间内一次性到达 → **流式目标无法达成**，
-  应回头与用户重新决策（降级为「非流式、整段返回」或放弃 ChatGPT provider），
-  而不是硬写下去
+| 场景 | 端点 | TTFB | 下载持续 | 解码字节 |
+|---|---|---|---|---|
+| 前台 | `/backend-api/f/conversation` | 1802ms | **4369ms** | 9128 |
+| **后台**（`focused:false`） | `/backend-api/f/conversation` | — | **4464ms** | 8098 |
 
-**同时一并验证 §3.2 的降级结论**：同一个脚本在**后台标签页**里跑一遍，
-确认后台也能捕到分块。若后台捕不到，则「必须在 chatgpt.com 标签页保持前台」将成为
-硬约束，§6 的限制需重写。
+TTFB 后仍有数秒持续下载 = 教科书式 SSE。后台与前台**数值一致**，说明后台标签页
+的 JS 会完整消费该流，被节流的只是 React 渲染（与 §3.2 的降级结论一致，现已证实）。
 
-这个闸门必须最先做，它是唯一能让整个阶段 B 作废的前提。
+sentinel 握手在同一窗口内并行完成（`chat-requirements/finalize` 3170B、
+`/f/conversation/prepare` 384B、多次 `sentinel/ping`）。
+
+**本轮踩到的仪器错误（勿重蹈）**：
+
+1. 第一版 tap 脚本的正则 `\/backend-api\/(sidebar\/)?conversation` **无词边界**，
+   把 `conversations`（会话列表，24,462B）误判成流式请求，一度得出「整体缓冲」的假结论。
+   真实数字对得上：tap 抓到的 24462B 与该列表接口的 `decodedBodySize` 完全一致。
+2. tap 只保留最后一条匹配记录，覆盖掉了真正的目标请求。
+3. Resource Timing 过滤同样漏了 `/f/` 这一级，导致「端点不存在」的假象。
+4. `dl` 判定脚本里用截断路径做精确字符串比较，误报「没有该条目」。
+
+**最终结论以 Resource Timing 为准**：`dl`（responseEnd − responseStart）跨秒 = 真流式；
+`dl≈0` 而 `dec` 很大 = 整体缓冲。Resource Timing 是比 DOM 观测可靠得多的仪器
+（DOM 观测已被 §3.2 记录的「空占位元素」问题证伪过一次）。
 
 ### 7.2 其余验证
 
