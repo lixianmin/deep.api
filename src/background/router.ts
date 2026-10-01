@@ -2,7 +2,7 @@ import { BridgeError } from '../shared/protocol';
 import type { ApiErrorCode, ChatCompletion, ChatCompletionChunk, Message, ModelInfo, ToolCall, ToolChoice, ToolDef } from '../shared/api-types';
 import type { ProviderAdapter, ProviderCompletion, ProviderContext, ProviderId, ProviderSession, ProviderStreamEvent, ResolvedModel } from './providers/adapter';
 import { extractImageRefs, renderMessageContent } from './vision-pipeline';
-import { labelToModelId } from '../content/models-sync';
+import { labelToModelId } from '../shared/model-labels';
 import { SessionMapper, type ThreadEntry } from './session-mapper';
 import { Queue, QueueTimeoutError } from './queue';
 import { ProviderRateLimiter } from './rate-limit';

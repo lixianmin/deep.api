@@ -7,34 +7,14 @@
 
 export interface ModelOption { label: string; value?: string }
 
+import { labelToModelId } from '../shared/model-labels';
+
 const SELECTOR_CANDIDATES = [
   '[role="listbox"] [role="option"]',
   '.ant-select-item-option',
   'li[role="option"]',
   'select option',
 ] as const;
-
-// 2026-09-14（fix/models-v4-retired）：按 V4.1 Flash 统一后调整。
-// 优先匹配新 ID `deepseek-flash`（覆盖 "default" / "DeepSeek V4.1 Flash" 等显示文案）；
-// 兼容旧三个 V4 ID（retired 兼容层仍 accept，但不被选为新内容——这里仅当明确出现
-// "v4" + "pro/vision/flash" 独立片段时仍认得，留作安全网）。
-const LABEL_PATTERNS: Array<{ re: RegExp; id: string }> = [
-  // 新模型（V4.1 Flash 统一）："default" / "DeepSeek V4.1 Flash" / "V4.1 Flash" / "DeepSeek Flash" / "DeepSeek"
-  { re: /^(default|deepseek(\s+v4[\s\-_.]*1[\s\-_.]*)?\s+flash|v4[\s\-_.]*1[\s\-_.]*\s+flash)$/i, id: 'deepseek-flash' },
-  // 旧 ID 兼容（仅当 label 明确带 v4-pro / v4-flash-vision-exp 字样时认得，否则走默认 flash）
-  { re: /deepseek\s*v4\s*flash\s*vision\s*exp(eriment(al)?)?/i, id: 'deepseek-v4-flash-vision-exp' },
-  { re: /deepseek\s*v4\s*pro/i, id: 'deepseek-v4-pro' },
-  { re: /deepseek\s*v4\s*flash/i, id: 'deepseek-flash' },
-];
-
-export function labelToModelId(label: string): string | null {
-  const t = (label || '').trim();
-  if (!t) return null;
-  for (const { re, id } of LABEL_PATTERNS) {
-    if (re.test(t)) return id;
-  }
-  return null;
-}
 
 export async function extractModelOptions(): Promise<ModelOption[]> {
   for (const sel of SELECTOR_CANDIDATES) {

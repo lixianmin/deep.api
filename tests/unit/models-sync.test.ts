@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
-import { extractModelOptions, labelToModelId, sendCatalogUpdate } from '../../src/content/models-sync';
+import { labelToModelId } from '../../src/shared/model-labels';
+import { extractModelOptions, sendCatalogUpdate } from '../../src/content/models-sync';
 
 describe('labelToModelId', () => {
   // 2026-09-14（fix/models-v4-retired）：DeepSeek 官方 9/14 起统一为 V4.1 Flash
