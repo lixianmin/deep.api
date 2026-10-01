@@ -193,93 +193,75 @@ git commit -m "refactor(adapter): 删除无人读取的 capabilities 与失效 c
 
 ---
 
-### Task 3: modelType 去 DeepSeek 化 + 删死分支
+### Task 3: 删除 transcript-renderer 的 `'expert'` 死分支
 
 **Files:**
-- Modify: `src/background/providers/adapter.ts:35`、`:42`（类型改中性）
-- Modify: `src/background/router.ts`（`resolved.modelType` → `resolved.variant`，共 15 处引用中的 12 处；`handle.run.model.modelType` 2 处）
-- Modify: `src/background/session-mapper.ts:53`（`ThreadEntry` 字段）、`:135/:139/:175/:182/:232/:234/:238`（函数签名与比对）
-- Modify: `src/background/transcript-renderer.ts:4-6`（`limitCharsFor` 删 `'expert'` 分支）
-- Test: `tests/unit/transcript-renderer.test.ts`（改现有断言）、`tests/unit/session-mapper.test.ts`（补 variant 用例）
+- Modify: `src/background/transcript-renderer.ts:4-6`
+- Test: `tests/unit/transcript-renderer.test.ts`（追加 1 例）
 
 **Interfaces:**
-- Consumes: 无新依赖
-- Produces:
-  ```ts
-  // adapter.ts —— 共享层的 provider 中立「变体标识」
-  export type ModelVariant = string;
-  // ResolvedModel
-  export interface ResolvedModel { modelId: string; variant: ModelVariant; supportsImages: boolean; thinking: boolean; limitChars: number }
-  // ProviderCompletion
-  model: { variant: ModelVariant; thinking: boolean };
-  ```
+- Consumes: 无
+- Produces: `limitCharsFor` 签名与返回类型**不变**，只是不再有永不成立的分支。
 
-**关键约束 —— 存储键不许改**：`ThreadEntry` 会被持久化到 `chrome.storage`，存量 thread 里存的是
-**键名 `modelType`**。只改 TypeScript 侧字段名会让所有存量 thread 的该键读不出来，
-进而 `t.variant` 恒为 `undefined`。虽然 `decide()` 对 `undefined` 走「不约束」路径不会误 rebuild
-（见 Review Focus #4），但会**永久丢失 model-switch 检测能力**。因此：
+背景（已核实，勿重新论证）：`limitCharsFor(modelType: 'default' | 'expert')` 的实现是
+`modelType === 'expert' ? 163_840 : 2_621_440`。但 `deepseek/client.ts` 的 `LIMITS`
+只产出 `'default'` 与 `'vision'`，**没有任何模型产出 `'expert'`**（`deepseek-v4-pro` 已
+retired）。该分支自 v0.1.35 起从未被走到，是死代码。
 
-> `ThreadEntry` 上保留**存储键** `modelType` 不动，只在 `session-mapper.ts` 内部把
-> 类型标注改为 `ModelVariant`，并在 `register`/`commit` 写入时同时写 `modelType` 键。
-> 其余（router、adapter、ProviderCompletion）一律改名 `variant`。
+- [ ] **Step 1: 写失败测试 —— `limitCharsFor` 对任何输入都返回上限**
 
-- [ ] **Step 1: 先补 session-mapper 的 variant 用例（锁定 Review Focus #4/#5）**
+在 `tests/unit/transcript-renderer.test.ts` 追加一例：对 `'default'`、`'expert'`、
+`'vision'`、任意字符串四个输入，断言 `limitCharsFor` 一律返回 `2_621_440`。
+**当前应失败**（`'expert'` 那一例会返回 163_840）。
 
-`tests/unit/session-mapper.test.ts` 追加两例：
-- `variant` 为 `undefined` 的存量 thread（构造 `ThreadEntry` 时不带该键）→ `decide()` 不得返回 `rebuild`
-- 同一 `conversation_id`、`variant` 同为 `'default'` → 不得 `rebuild`（这正是 `deepseek-v4-flash` 与 `deepseek-flash` 两个别名互切的场景，是刻意设计）
-- 同一 `conversation_id`、`variant` 不同 → 必须 `rebuild`
+- [ ] **Step 2: 跑测试确认失败**
 
-- [ ] **Step 2: 跑测试确认当前行为已正确**
+Run: `bunx vitest run tests/unit/transcript-renderer.test.ts`
+Expected: FAIL —— `'expert'` 用例实际返回 163_840。
 
-Run: `bunx vitest run tests/unit/session-mapper.test.ts`
-Expected: PASS（新用例描述的是**现有**行为，重构不该让它们变红——它们是护栏）
+- [ ] **Step 3: 删掉死分支**
 
-- [ ] **Step 3: 改共享类型**
-
-`adapter.ts`：
-- 第 35 行 `{ modelType: 'default' | 'expert' | 'vision'; thinking: boolean }` → `{ variant: ModelVariant; thinking: boolean }`
-- 第 42 行 `ResolvedModel` 的 `modelType: 'default' | 'expert' | 'vision'` → `variant: ModelVariant`
-- 新增 `export type ModelVariant = string;`
-
-- [ ] **Step 4: 改 DeepSeek 侧产出点**
-
-`src/background/providers/deepseek/client.ts`：`LIMITS` 三个条目的 `modelType: 'X' as const` → `variant: 'X'`，`MergedModel.modelType` → `variant`，`completionPayload` 的 `model_type: model.modelType` → `model_type: model.variant`（**wire 字段名保持 `model_type` 不变**——那是 DeepSeek 服务端的契约）。
-
-- [ ] **Step 5: 改 router 与 session-mapper**
-
-- `router.ts`：`resolved.modelType` → `resolved.variant`；`handle.run.model.modelType` → `handle.run.model.variant`
-- `session-mapper.ts`：函数形参 `modelType?: 'default'|'expert'|'vision'` → `variant?: ModelVariant`；**`ThreadEntry` 的字段名保持 `modelType`**，但其类型标注改为 `ModelVariant`，并在类内读写时统一（`t.modelType` 的比较改为与传入的 `variant` 比）
-
-- [ ] **Step 6: 删 transcript-renderer 死分支**
-
-`transcript-renderer.ts:4-6` 改为：
+`src/background/transcript-renderer.ts:4-6` 改为：
 
 ```ts
-export function limitCharsFor(_variant: ModelVariant): number {
+// 2026-10-01（stage-a/dead-branch）：原实现是 `modelType === 'expert' ? 163_840 : 2_621_440`，
+// 但 LIMITS 里没有任何模型产出 'expert'（deepseek-v4-pro 已 retired），该分支从未被走到。
+// 形参与返回签名保持不变（router.ts 依赖），只去掉永不成立的分支。
+export function limitCharsFor(_variant: string): number {
   return 2_621_440;
 }
 ```
 
-保留形参与返回签名（调用方 `router.ts` 依赖它），只去掉永不成立的 `'expert'` 分支。参数加 `_` 前缀表明刻意不用。
+- [ ] **Step 4: 跑测试确认通过**
 
-- [ ] **Step 7: 跑全量 + 类型检查**
+Run: `bunx vitest run tests/unit/transcript-renderer.test.ts`
+Expected: PASS（含新增用例）
+
+- [ ] **Step 5: 跑全量 + 类型检查**
 
 Run: `bun run test && bunx tsc --noEmit`
-Expected: 539 + 2 = 541 passed，tsc 0 错误。
+Expected: 540 passed，tsc 0 错误。若有用例失败，说明真有代码在传 `'expert'`——
+**停下来查，不要改断言**。
 
-- [ ] **Step 8: 确认存储键没被改动**
-
-Run: `git diff --stat` 后人工核对：`session-mapper.ts` 里 `modelType` 作为**对象字面量键**的出现处数量应与改动前一致（只改类型标注，不改键名）。
-
-- [ ] **Step 9: 提交**
+- [ ] **Step 6: 提交**
 
 ```bash
-git add src/background/providers/adapter.ts src/background/providers/deepseek/client.ts src/background/router.ts src/background/session-mapper.ts src/background/transcript-renderer.ts tests/unit/session-mapper.test.ts tests/unit/transcript-renderer.test.ts
-git commit -m "refactor(model): 共享层 modelType 改中性 variant，删 transcript 死分支"
+git add src/background/transcript-renderer.ts tests/unit/transcript-renderer.test.ts
+git commit -m "refactor(transcript): 删除无人走到的 'expert' 分支"
 ```
 
 ---
+
+## 已从本阶段移出的项（见 ledger Ruling 2）
+
+`modelType` → 中性 `variant` 的重命名**推迟到阶段 B**。原因：该字段在 10 个测试文件共
+62 处（`deepseek-client` 19 / `router-vision` 8 / `router` 5 / `deepseek-adapter` 3 /
+`deepseek-models` 3 / `session-mapper` 11 / 其他 5，含 `tests/replay/trajectory-replay.test.ts`），
+重命名必然要求修改大量现有断言，与本阶段「不得修改任何现有断言」的全局约束直接冲突；
+且它不影响任何功能。阶段 B 出现 ChatGPT adapter 后 `variant` 才有真实语义，届时重命名
+才有回报。
+
+**本阶段仍不碰 `ThreadEntry.modelType` 这个 chrome.storage 持久化键**（同 Ruling 2 的理由）。
 
 ## 完成判据
 
