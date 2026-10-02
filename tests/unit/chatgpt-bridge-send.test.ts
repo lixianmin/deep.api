@@ -528,13 +528,17 @@ describe('集成：install 副作用', () => {
     expect(window.fetch).not.toBe(origFetch);
   });
 
+  // 2026-10-04（fix/chatgpt-send-envelope-mismatch）：本 describe 下两处 sendMsg 形状由旧的
+  // `{__deepApiChatGPT: 'send', ...}` 改为新契约 `{__deepApiChatGPT: true, kind: 'send', ...}`。
+  // 原因：旧形状与 SW 发送端真正发的包不一致（发送端一直是 true + kind），旧接收端却按旧形状判断，
+  // 导致本用例「绿着」而真实链路丢包。断言期望值未变，只把输入改成发送端真发的形状。
   it('install() 装上 window.message listener 来接收 send 指令', async () => {
     const { install } = await import('../../src/content/chatgpt-bridge-main');
     install();
     // 模拟 relay 发来 send 指令 → 应当被路由（错误路径：composer 不存在 → emit error）
     // 用 spy 监听 postMessage 的发出
     const postSpy = vi.spyOn(window, 'postMessage').mockImplementation(() => undefined);
-    const sendMsg = { __deepApiChatGPT: 'send', requestId: 'r-test', text: 'hi', conversationId: null };
+    const sendMsg = { __deepApiChatGPT: true as const, kind: 'send' as const, requestId: 'r-test', text: 'hi', conversationId: null };
     window.dispatchEvent(new MessageEvent('message', { data: sendMsg, source: window }));
     // handler 是 async；等微任务链进入 waitForComposer，然后推进到 composer 超时（默认 30s）
     await vi.advanceTimersByTimeAsync(30_000 + 1000);
@@ -552,7 +556,7 @@ describe('集成：install 副作用', () => {
     const { install } = await import('../../src/content/chatgpt-bridge-main');
     install();
     const postSpy = vi.spyOn(window, 'postMessage').mockImplementation(() => undefined);
-    const sendMsg = { __deepApiChatGPT: 'send', requestId: 'r-x', text: 'hi', conversationId: null };
+    const sendMsg = { __deepApiChatGPT: true as const, kind: 'send' as const, requestId: 'r-x', text: 'hi', conversationId: null };
     // source: null 模拟 cross-origin 或非 self 窗口——install 的 guard 应忽略
     window.dispatchEvent(new MessageEvent('message', { data: sendMsg, source: null }));
     // 推进时间——但 listener 的 guard 拦在第一行，不会进 handleSend

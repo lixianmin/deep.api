@@ -22,20 +22,21 @@
  *   - 默认 timeout 120s（来自 brief）：单条请求的最长寿命，超时即按错误结束。
  *     短超时（progress 内置）由 adapter 层处理（用 REQUEST_WATCHDOG_MS）；这里只兜底「永远不发 done」。
  */
+import type { ChatGPTSendMsg } from '../../../shared/chatgpt-protocol';
+
 export interface ChatGPTPortLike {
   postMessage(m: unknown): void;
   onMessage(cb: (m: unknown) => void): void;
   onDisconnect(cb: () => void): void;
 }
 
-/** SW → MAIN world 的 send 指令。 */
-export interface ChatGPTSendMsg {
-  __deepApiChatGPT: true;
-  kind: 'send';
-  requestId: string;
-  text: string;
-  conversationId: string | null;
-}
+/**
+ * send 指令（SW → MAIN world）的类型与判定谓词都在共享协议模块 src/shared/chatgpt-protocol.ts：
+ * 本文件是**唯一**生产者（下面的 `const msg: ChatGPTSendMsg`），接收端 chatgpt-bridge-main.ts
+ * 用同一个模块的 isChatGPTSendMsg 做判定——两侧绑在一个定义上，形状再漂移编译器会先报错。
+ * 2026-10-04（fix/chatgpt-send-envelope-mismatch）：此前本类型只存在于本文件、接收端另写了一套
+ * 判断（`__deepApiChatGPT === 'send'`），两侧各自单测全绿而真实链路静默丢包。
+ */
 
 /** MAIN world → SW 的流事件（不含已过滤的内部字段）。 */
 export type ChatGPTBridgeEvent =

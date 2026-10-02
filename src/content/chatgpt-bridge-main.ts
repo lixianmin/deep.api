@@ -7,7 +7,8 @@
  *  1. 出：document_start 时把 `window.fetch` 包一层。命中 `/backend-api/f/conversation`
  *     时旁路读 response body，按 splitFrames/parseFrame 拆 SSE 帧，每帧 postMessage 出去
  *     （kind='frame'），终止时 kind='done'，resume_conversation_token 帧携带 kind='conversation'。
- *  2. 入：监听 window 'message'，收到 `__deepApiChatGPT: 'send'` 后驱动 ChatGPT 网页：
+ *  2. 入：监听 window 'message'，收到 `{__deepApiChatGPT: true, kind: 'send', requestId, text, conversationId}` 后驱动 ChatGPT 网页：
+ *     形状判定用共享协议模块的 isChatGPTSendMsg（发送端 import 同一模块，两侧绑在一个类型上）。
  *     切到目标会话（如需）→ 等 composer（#prompt-textarea，绝不退回 fallback textarea）→
  *     填词 → 等 send 按钮（先填后等，避免鸡生蛋） → 点击 → fetch 钩子接管读流。
  *
@@ -29,6 +30,7 @@
  */
 import { splitFrames, parseFrame } from '../shared/chatgpt-sse';
 import type { SseFrame } from '../shared/chatgpt-sse';
+import { isChatGPTSendMsg } from '../shared/chatgpt-protocol';
 
 // ===== 常量（manifest matches 与 selector；集中在一处便于审查）=====
 /** ChatGPT 后端真实流式端点——与 /backend-api/f/conversation/prepare、/backend-api/sentinel/* 严格区分。 */
@@ -500,13 +502,16 @@ function installMessageListener(): void {
     // brief 事件契约：来自 relay（self window）的 send 指令
     // 防 cross-origin 噪音：仅当 source 是 self window 时接收
     if (ev.source !== null && ev.source !== window) return;
-    const data = ev.data as { __deepApiChatGPT?: unknown } | undefined;
-    if (typeof data !== 'object' || data === null) return;
-    if (data.__deepApiChatGPT !== 'send') return;
-    const msg = ev.data as { requestId?: unknown; text?: unknown; conversationId?: unknown };
-    if (typeof msg.requestId !== 'string' || typeof msg.text !== 'string') return;
-    const cid = typeof msg.conversationId === 'string' ? msg.conversationId : null;
-    void handleSend({ requestId: msg.requestId, text: msg.text, conversationId: cid });
+    // 2026-10-04（fix/chatgpt-send-envelope-mismatch）：形状判定收敛到共享模块，与 SW 发送端
+    // 用的是同一个类型 + 同一个谓词。旧实现这里写 `data.__deepApiChatGPT !== 'send'`，而发送端
+    // 发的是 `{__deepApiChatGPT: true, kind: 'send'}`——send 在本行被 return 掉，静默丢弃，
+    // 表现为 composer 永不填词、请求 120s 超时且无任何报错。切勿在此手写形状判断。
+    if (!isChatGPTSendMsg(ev.data)) return;
+    void handleSend({
+      requestId: ev.data.requestId,
+      text: ev.data.text,
+      conversationId: ev.data.conversationId,
+    });
   });
 }
 
