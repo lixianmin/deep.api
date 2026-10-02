@@ -11,7 +11,10 @@
  * 3. 通道分界（final_channel_token 之前 think_delta、之后 content_delta）
  */
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { interpretFrame, newStreamState } from '../../src/background/providers/chatgpt/stream';
+import type { ProviderStreamEvent } from '../../src/background/providers/adapter';
 import type { SseFrame } from '../../src/shared/chatgpt-sse';
 import { splitFrames, parseFrame } from '../../src/shared/chatgpt-sse';
 
@@ -573,5 +576,184 @@ describe('interpretFrame × 协议 doc 帧序列端到端', () => {
     const r2 = runOnce();
     expect(r1.events).toEqual(r2.events);
     expect(r1.finalState).toEqual(r2.finalState);
+  });
+});
+// ===== 9. 帧级 ops 批次（fix/chatgpt-ops-batch-and-cite） =====
+// 现场 bug：一次回答被切成 8 个数组批次，其中 6 个帧级没有 p/o（形如 {"v":[{...ops...}]}）。
+// 旧代码用 p === '' 认批次，而这 6 帧的 p 会继承成 /message/content/parts/0 → 判定不成立 →
+// 整批 ops（含正文）落到 processSingleOp（v 是数组、不是字符串）→ 全部丢弃。
+// 本节守住「帧级无 p/o 的批次也必须展开」。
+
+/** 构造 delta 帧：body 用 JSON.stringify 序列化，省得手写私有区字符 / 换行的转义。 */
+function deltaFrame(body: Record<string, unknown>): SseFrame {
+  return { event: 'delta', data: JSON.stringify(body) };
+}
+
+describe('interpretFrame × 帧级 ops 批次（无 p/o 的帧也必须展开）', () => {
+  it('帧级只有 v 的 ops 批次 → 展开产出内容（不得依赖 p === ""）', () => {
+    const state = newStreamState();
+    state.phase = 'content';
+    state.lastP = '/message/content/parts/0';
+    state.lastO = 'append';
+    expect(interpretFrame(deltaFrame({
+      v: [{ p: '/message/content/parts/0', o: 'append', v: 'A' }],
+    }), state)).toEqual([{ kind: 'content_delta', content: 'A' }]);
+    // 展开后 state 落到批次最后一项的 p/o
+    expect(state.lastP).toBe('/message/content/parts/0');
+    expect(state.lastO).toBe('append');
+  });
+
+  it('批次内内容 op 与非内容 op 混排（含字符串数组 v 的 metadata op）→ 只产内容事件', () => {
+    const state = newStreamState();
+    state.phase = 'content';
+    state.lastP = '/message/content/parts/0';
+    state.lastO = 'append';
+    expect(interpretFrame(deltaFrame({
+      v: [
+        { p: '/message/content/parts/0', o: 'append', v: 'B' },
+        { p: '/message/metadata/safe_urls', o: 'append', v: ['https://a.example'] },
+        { p: '/message/content/parts/0', o: 'append', v: 'C' },
+      ],
+    }), state)).toEqual([
+      { kind: 'content_delta', content: 'B' },
+      { kind: 'content_delta', content: 'C' },
+    ]);
+  });
+
+  it('反例 (a)：v 是字符串数组的 metadata op → 不产内容、不抛异常', () => {
+    const state = newStreamState();
+    state.phase = 'content';
+    state.lastP = '/message/content/parts/0';
+    state.lastO = 'append';
+    let events: ProviderStreamEvent[] = [];
+    expect(() => {
+      events = interpretFrame(deltaFrame({
+        p: '/message/metadata/content_references/0/safe_urls',
+        o: 'append',
+        v: ['https://a.example', 'https://b.example'],
+      }), state);
+    }).not.toThrow();
+    expect(events).toEqual([]);
+  });
+
+  it('反例 (b)：v 是「无 p 的对象数组」的 metadata op → 不产内容、不抛异常', () => {
+    const state = newStreamState();
+    state.phase = 'content';
+    state.lastP = '/message/content/parts/0';
+    state.lastO = 'append';
+    let events: ProviderStreamEvent[] = [];
+    expect(() => {
+      events = interpretFrame(deltaFrame({
+        p: '/message/metadata/content_references',
+        o: 'append',
+        v: [{ matched_text: '11', end_idx: 42 }],
+      }), state);
+    }).not.toThrow();
+    expect(events).toEqual([]);
+  });
+});
+
+// ===== 10. 引用标记清洗（fix/chatgpt-ops-batch-and-cite） =====
+// 实测码点：U+E200 起始、U+E202 分隔、U+E201 结束；本次抓帧 6 个标记全是 \uE200cite\uE202turn0newsN\uE201。
+// 用户拍板：直接从正文删掉（不换链接、不保留来源名）。
+// 正文是流式分片到达的 → 标记可能跨 delta 断裂 → 清洗必须有跨帧扣留逻辑（不能只做全局替换）。
+const CITE_START = '\uE200';
+const CITE_END = '\uE201';
+const CONTENT_PATH = '/message/content/parts/0';
+
+/** 拼一个实测形态的引用标记。 */
+function cite(n: number): string {
+  return `${CITE_START}cite\uE202turn0news${n}${CITE_END}`;
+}
+
+describe('interpretFrame × 引用标记清洗', () => {
+  it('完整标记被删除，相邻正文保留', () => {
+    const state = newStreamState();
+    state.phase = 'content';
+    expect(interpretFrame(deltaFrame({ p: CONTENT_PATH, o: 'append', v: `a${cite(1)}b` }), state))
+      .toEqual([{ kind: 'content_delta', content: 'ab' }]);
+  });
+
+  it('连续多个标记 → 只留正文', () => {
+    const state = newStreamState();
+    state.phase = 'content';
+    expect(interpretFrame(deltaFrame({ p: CONTENT_PATH, o: 'append', v: `a${cite(1)}b${cite(2)}c` }), state))
+      .toEqual([{ kind: 'content_delta', content: 'abc' }]);
+  });
+
+  it('标记跨 delta 断裂：半截被扣留，下一帧补齐后不泄漏、不重复、不丢相邻正文', () => {
+    const state = newStreamState();
+    state.phase = 'content';
+    // 第一片以半截标记结尾（"前\uE200cit"）——半截不得原样发给用户
+    expect(interpretFrame(deltaFrame({ p: CONTENT_PATH, o: 'append', v: `前${CITE_START}cit` }), state))
+      .toEqual([{ kind: 'content_delta', content: '前' }]);
+    // 第二片以半截开头（"e\uE202turn0news2\uE201后"）——与扣留的 "\uE200cit" 拼成完整标记后整体删除
+    expect(interpretFrame(deltaFrame({ v: `e\uE202turn0news2${CITE_END}后` }), state))
+      .toEqual([{ kind: 'content_delta', content: '后' }]);
+  });
+
+  it('流结束时仍未闭合的半截标记 → 丢弃，只剩正文', () => {
+    const state = newStreamState();
+    state.phase = 'content';
+    expect(interpretFrame(deltaFrame({ p: CONTENT_PATH, o: 'append', v: `正文${CITE_START}cite\uE202turn0` }), state))
+      .toEqual([{ kind: 'content_delta', content: '正文' }]);
+  });
+
+  it('think_delta 通道同样清洗', () => {
+    const state = newStreamState();   // phase 初值 reasoning
+    expect(interpretFrame(deltaFrame({ p: CONTENT_PATH, o: 'append', v: `想${cite(3)}` }), state))
+      .toEqual([{ kind: 'think_delta', content: '想' }]);
+  });
+});
+
+// ===== 11. 真实抓帧回归（2026-10-02 联网回答，36 帧） =====
+// 夹具来源：真实 ChatGPT 联网回答抓帧，含 8 个 ops 批次帧（其中 6 个帧级无 p/o）。
+// EXPECTED_NEWS_TEXT = 页面 DOM 真值（536 字符）。
+// Bug 现场：旧代码只产出 194 字（6 个批次整批丢弃），从中段开始错位、结尾断在半句。
+interface CapturedFrame {
+  /** SSE event 字段（抓帧时未给出的帧为 null）。 */
+  e: string | null;
+  /** SSE data 字段原文。 */
+  d: string;
+}
+
+function loadCapturedFrames(): SseFrame[] {
+  const path = join(__dirname, '..', 'fixtures', 'chatgpt-frames-news.json');
+  const captured = JSON.parse(readFileSync(path, 'utf8')) as CapturedFrame[];
+  return captured.map((f) => ({ event: f.e, data: f.d }));
+}
+
+const EXPECTED_NEWS_TEXT = "我查了一下今天（2026年10月2日）北京的新闻，比较受关注的本地新闻主要有这些：\n\n### 🏙️ 城市与民生\n\n**1. 昌平举办国庆主题嘉年华活动**  \n昌平区东小口镇“盛世迎华诞，奥北耀星河2026奥北金秋国庆嘉年华”启动，活动贯穿国庆假期，包括文化、休闲等系列活动。\n\n**2. 颐堤港将更名为“北京太古坊”**  \n北京商业地标颐堤港宣布，自2026年11月1日起将正式更名为“北京太古坊”。报道显示，此次调整不仅是名称变化，也涉及项目升级规划。\n\n### 🎭 文化活动\n\n**3. 国庆期间北京文化活动增多**  \n国庆假期，北京多地安排文化活动，包括书店分享会、艺术展览等。例如东城区有文学分享活动，邀请作家、学者参与。\n\n**4. 北京大学生艺术节艺术作品展举行**  \n2026年北京大学生艺术节艺术作品及艺术实践工作坊展览在中国人民大学美术馆启幕，展示高校艺术实践成果。\n\n### 📸 节日旅游\n\n**5. 国庆北京旅游热度持续**  \n新华社报道记录了国庆期间天安门广场、故宫、北海公园、火车站等地游客活动，通过新旧照片对比展示北京城市变化。\n\n---\n\n如果你关心的是**北京科技/AI行业新闻、创业融资、互联网公司动态**，我也可以单独搜一版。";
+
+describe('interpretFrame × 真实抓帧回归（2026-10-02 联网回答）', () => {
+  it('36 帧全部喂入 → content_delta 拼接逐字等于页面真值（536 字符）', () => {
+    const frames = loadCapturedFrames();
+    expect(frames).toHaveLength(36);
+    const state = newStreamState();
+    const parts: string[] = [];
+    for (const frame of frames) {
+      for (const ev of interpretFrame(frame, state)) {
+        if (ev.kind === 'content_delta') parts.push(ev.content);
+      }
+    }
+    const text = parts.join('');
+    // 按码点计数：页面真值 536 个字符（String#length 是 UTF-16 单元，文中 3 个 emoji 会多算 3）
+    expect([...text].length).toBe(536);
+    expect(text).toBe(EXPECTED_NEWS_TEXT);
+  });
+
+  it('同 36 帧喂两次 → 输出与终态一致（跨帧状态不残留）', () => {
+    const frames = loadCapturedFrames();
+    const run = () => {
+      const state = newStreamState();
+      const parts: string[] = [];
+      for (const frame of frames) {
+        for (const ev of interpretFrame(frame, state)) {
+          if (ev.kind === 'content_delta') parts.push(ev.content);
+        }
+      }
+      return { text: parts.join(''), state: { ...state } };
+    };
+    expect(run()).toEqual(run());
   });
 });

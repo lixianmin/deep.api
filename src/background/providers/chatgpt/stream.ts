@@ -7,17 +7,24 @@
  * 职责：把上游 SSE 帧（已由 src/shared/chatgpt-sse.ts 拆帧解析）转成 provider 流事件。
  *         不消费原始字节，不发网络请求；不写日志、不更新 storage。
  *
- * 三个最易写错的点（doc §「解析规则」逐条对应实现）：
+ * 四个最易写错的点（doc §「解析规则」逐条对应实现）：
  *  1. p/o 跨帧继承：只带 {"v":"..."} 的帧沿用 state.lastP/lastO；
  *     真实帧 11/12 是正文续帧——不继承会让正文整段丢失。
- *  2. patch 数组展开：{"p":"","o":"patch","v":[...]} 的 v 是操作数组，
- *     要对每项递归走 processSingleOp；数组内的 append 与顶层同等处理。
+ *  2. ops 批次展开：帧级 v 是操作数组（[{"p":...,"o":...,"v":...}, ...]）时逐项递归处理。
+ *     实测两种形态——文档形态 {"p":"","o":"patch","v":[...]}（协议 doc 帧 13）与观测形态
+ *     {"v":[...]}（帧级根本没有 p/o，2026-10-02 抓帧一次回答 8 个批次帧里有 6 个是这种）；
+ *     判定不能拿 p === '' 当依据——p/o 是跨帧继承的（见规则 1），观测形态下 p 会继承成上一次的
+ *     /message/content/parts/0，p === '' 不成立 → 整批 ops（含正文）被当单条 op（v 是数组）丢掉。
+ *     这就是「正文大面积丢失 / 中段错位 / 结尾截断」的根因（同一段回答实测只产出 194 字符，页面真值 536）。
  *  3. 通道分界：marker 含 "final_channel_token" → state.phase 切到 'content'；
  *     之前所有正文产 think_delta，之后产 content_delta。
  *     实测两种 marker 形态都成立：(a) 两个独立帧各带一个 marker——帧 6 "user_visible_token"
  *     与帧 9 "final_channel_token"（传 docs/superpowers/specs/2026-10-01-chatgpt-sse-protocol.md
  *     帧序列）；(b) 一帧里 marker 为 "user_visible_token|final_channel_token" 合并值。
  *     代码以 includes('final_channel_token') 判定，对两种形态都能切通道——代码逻辑不变。
+ *  4. 引用标记清洗：正文里内联着 \uE200cite\uE202turn0newsN\uE201（网页 UI 渲染成来源角标），
+ *     作为 API 文本是垃圾字符 → 删除；正文分片到达、标记可能被切成两半，故清洗必须跨帧扣留
+ *     （见 stripCiteMarkers）。
  *
  * 设计决策（写下来备查）：
  *  - resume_conversation_token 不发事件。ProviderStreamEvent 现有事件集无 conversationId 类型
@@ -31,6 +38,13 @@
 import type { ProviderStreamEvent } from '../adapter';
 import type { SseFrame } from '../../../shared/chatgpt-sse';
 
+/** 引用标记码点（2026-10-02 抓帧实测）：U+E200 起始、U+E202 分隔、U+E201 结束。 */
+const CITE_START = '\uE200';
+const CITE_END = '\uE201';
+
+/** 成对标记（\uE200…\uE201，含中间的分隔符 U+E202 与来源名）。非贪婪：连续多个标记逐个匹配。 */
+const CITE_MARKER_RE = /\uE200[\s\S]*?\uE201/g;
+
 /** 跨帧继承状态（持续聊天 + 增量流必需）。 */
 export interface ChatGPTStreamState {
   /** 上一次 delta 帧的 path（缺省时继承给下一帧）。空串表示「未设置」+ 是 patch 顶层标识。 */
@@ -39,6 +53,12 @@ export interface ChatGPTStreamState {
   lastO: string;
   /** 通道分界：final_channel_token 之前=reasoning（think_delta），之后=content（content_delta）。 */
   phase: 'reasoning' | 'content';
+  /**
+   * 引用标记清洗的扣留缓冲：最后一个 U+E200 之后还没出现 U+E201 的那半截标记。
+   * 未设置（undefined）= 无挂起。与 lastP/lastO 同一层，跨帧持久化。
+   * 流结束时不清空也不补发：残缺标记不是正文，直接丢弃。
+   */
+  pendingCite?: string;
 }
 
 /** 新一轮对话的初始状态：phase 从 reasoning 开始，p/o 待第一帧填充。 */
@@ -119,25 +139,52 @@ function processDeltaOp(obj: Record<string, unknown>, state: ChatGPTStreamState)
     if (vErr !== null) return [vErr];
   }
 
-  // 先更新 state（patch 数组内的子项也要更新，所以这里无条件赋值；缺省值仍沿用旧值）
+  // 先更新 state（批次内的子项也要更新，所以这里无条件赋值；缺省值仍沿用旧值）
   if (hasP) state.lastP = p;
   if (hasO) state.lastO = op;
 
-  // patch 操作 → 展开数组（doc §「解析规则 3」）
-  if (p === '' && op === 'patch' && Array.isArray(v)) {
-    const events: ProviderStreamEvent[] = [];
-    for (const item of v) {
-      if (typeof item !== 'object' || item === null) continue;
-      const itemObj = item as Record<string, unknown>;
-      // 数组内的子项也走同一套继承：缺省沿用上一项更新后的 state.lastP/lastO
-      const itemP = typeof itemObj.p === 'string' ? (state.lastP = itemObj.p) : state.lastP;
-      const itemO = typeof itemObj.o === 'string' ? (state.lastO = itemObj.o) : state.lastO;
-      events.push(...processSingleOp(itemP, itemO, itemObj.v, state));
-    }
-    return events;
-  }
+  // 帧级 v 是 ops 批次 → 展开（判定见 isOpBatch）。
+  // 这里不能沿用旧的 p === '' 判据：p/o 是可继承的，观测形态的批次帧没有 p/o，
+  // 此时 p 是继承来的 /message/content/parts/0，p === '' 不成立 → 整批被当单条 op 丢弃。
+  if (isOpBatch(v, op)) return expandOps(v, state);
 
   return processSingleOp(p, op, v, state);
+}
+
+/**
+ * 帧级 v 是否「ops 批次」（数组元素本身是 {p,o,v} 操作）。
+ * 两种真实形态：
+ *  - 文档形态 {"p":"","o":"patch","v":[ops]}（协议 doc 帧 13）：op=patch 直接认定；
+ *  - 观测形态 {"v":[ops]}（帧级无 p/o）：靠「每个元素都是带字符串 p 的非数组对象」认定——
+ *    实测批次内每个元素都自带 p，op 则是继承来的（append / patch 都有）。
+ * 反面用例（都是普通 op，v 是字符串数组或「无 p 的对象数组」，绝不能被当批次展开）：
+ *  - {"p":"/message/metadata/content_references/0/safe_urls","o":"append","v":["https://…"]}
+ *  - {"p":"/message/metadata/content_references","o":"append","v":[{"matched_text":…}]}
+ */
+function isOpBatch(v: unknown, op: string): v is Record<string, unknown>[] {
+  if (!Array.isArray(v) || v.length === 0) return false;
+  if (op === 'patch') return true;
+  return v.every((item) =>
+    typeof item === 'object' && item !== null && !Array.isArray(item)
+    && typeof (item as Record<string, unknown>).p === 'string');
+}
+
+/** 展开 ops 批次：子项缺省 p/o 沿用继承（与帧级同规则）；子项自身是批次时由本函数递归处理。 */
+function expandOps(items: readonly unknown[], state: ChatGPTStreamState): ProviderStreamEvent[] {
+  const events: ProviderStreamEvent[] = [];
+  for (const raw of items) {
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) continue;
+    const item = raw as Record<string, unknown>;
+    // 数组内的子项也走同一套继承：缺省沿用上一项更新后的 state.lastP/lastO
+    const itemP = typeof item.p === 'string' ? (state.lastP = item.p) : state.lastP;
+    const itemO = typeof item.o === 'string' ? (state.lastO = item.o) : state.lastO;
+    if (isOpBatch(item.v, itemO)) {
+      events.push(...expandOps(item.v, state));
+      continue;
+    }
+    events.push(...processSingleOp(itemP, itemO, item.v, state));
+  }
+  return events;
 }
 
 /** 单条 op → ProviderStreamEvent。命中正文 append 才产出事件；其余忽略（status/metadata/end_turn 等）。 */
@@ -145,10 +192,33 @@ function processSingleOp(p: string, op: string, v: unknown, state: ChatGPTStream
   // 正文 path = /message/content/parts/0，op = append，v = 字符串增量
   // 严格相等而非 startsWith——避免误把 /message/content/parts/0/extra 之类当正文
   if (p === '/message/content/parts/0' && op === 'append' && typeof v === 'string') {
-    if (state.phase === 'content') return [{ kind: 'content_delta', content: v }];
-    return [{ kind: 'think_delta', content: v }];
+    // 两个通道都清洗：reasoning 段的思考文本同样会带引用标记
+    const content = stripCiteMarkers(v, state);
+    if (state.phase === 'content') return [{ kind: 'content_delta', content }];
+    return [{ kind: 'think_delta', content }];
   }
   return [];
+}
+
+/**
+ * 删除正文切片里的内部引用标记，并扣留跨帧断裂的半截标记。
+ *
+ * 为什么要扣留而不能只做全局替换：正文是流式分片到达的，一个标记可能被切成两半——
+ * 上一个 delta 以 "\uE200cit" 结尾、下一个 delta 以 "e\uE202turn0news2\uE201" 开头。
+ * 正则只能吃掉同一片内的完整标记，分片处的那半截会原样泄漏给用户，所以先把「最后一个 U+E200
+ * 之后没有 U+E201」的尾巴扣在 state.pendingCite 里，等下一帧到了再拼起来一起判。
+ * 用户已拍板：标记直接删（不换成链接、不保留来源名），故闭合标记连同中间内容整段丢掉。
+ */
+function stripCiteMarkers(chunk: string, state: ChatGPTStreamState): string {
+  const text = (state.pendingCite ?? '') + chunk;
+  const lastStart = text.lastIndexOf(CITE_START);
+  if (lastStart !== -1 && text.indexOf(CITE_END, lastStart) === -1) {
+    // 未闭合：从最后一个起点起的尾巴全部扣留（含上一帧扣留的部分），前面已能确认的部分先发
+    state.pendingCite = text.slice(lastStart);
+    return text.slice(0, lastStart).replace(CITE_MARKER_RE, '');
+  }
+  state.pendingCite = undefined;
+  return text.replace(CITE_MARKER_RE, '');
 }
 
 /** 检测顶层 error / error_code 字段，构造 stream_error；都不为空时也只产一个事件。 */
