@@ -246,6 +246,14 @@ export class SessionMapper {
     t.mirror = messages.map(x => ({ ...x }));
     t.mirrorHash = hashMirror(t.mirror);
     t.parentMessageId = parentMessageId;
+    // 2026-10-02（fix/mapper-commit-persist-websession）：回写 webSessionId——这是本字段的**唯一更新点**。
+    // 有些 provider（ChatGPT）的 createSession 只能返回 ''（真实 conversation_id 要等首轮响应的
+    // 'conversation' 帧才由 adapter 填进 req.session）→ router 流成功后 commit 回写；
+    // 旧实现在此丢弃它，线程 webSessionId 恒为 ''，下一轮 adapter 拿 conversationId=null →
+    // MAIN world 判定新会话 → location.assign('/') → 每条消息都新开一个对话。
+    // 仅在非空时写：'' 是「provider 还没有真实会话 id」的占位，异常路径（帧没到）用空串回写会把
+    // 一个已建立的会话引用擦掉，逼出一次新会话。
+    if (webSessionId !== '') t.webSessionId = webSessionId;
     if (variant !== undefined) t.modelType = variant;   // commit 调用者总是带新 variant，覆盖以保证该轮成功后状态一致（键名保持 modelType 见 ThreadEntry.modelType）
     // 2026-09-14（feat/spec-compact-incremental）：指纹唯一写入点。缺省（undefined）不回写——
     // 老持久化/既有调用路径不传，保持 undefined 语义（route 侧首轮按不匹配走全量）。

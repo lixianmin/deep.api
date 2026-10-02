@@ -556,3 +556,50 @@ describe('SessionMapper 重构护栏（variant 中性化 + modelType 键名冻�
     expect(d.action).toBe('incremental');
   });
 });
+
+// 2026-10-02（fix/mapper-commit-persist-websession）：commit 必须把 webSessionId 回写到线程。
+// ChatGPT 的 createSession 只返回 ''（占位），真实 conversation_id 要等首轮响应的 'conversation'
+// 帧才由 adapter 填进 req.session.webSessionId；router 在流成功后 commit 回写——若 commit 丢弃它，
+// 线程 webSessionId 恒为 ''，下一轮 adapter 拿 conversationId=null → MAIN world 判定新会话 →
+// location.assign('/') → 每条消息都新开一个 ChatGPT 对话（用户实测复现）。
+describe('commit 回写 webSessionId（fix/mapper-commit-persist-websession）', () => {
+  it('fail-to-pass: 占位空串 register 后，commit 的真实 conversation_id 落进线程（ChatGPT 首轮）', () => {
+    const { mapper } = mk();
+    // ChatGPT createSession 返回 webSessionId='' 占位（adapter.ts createSession）
+    const t = mapper.register('chatgpt', 'auto:1', '', [m('user', 'q1')]);
+    expect(t.webSessionId).toBe('');
+    // 首轮流成功后 router 从 req.session（adapter 已 mutate）拿到真实 conversation_id 并 commit
+    mapper.commit('chatgpt', 'auto:1', [m('user', 'q1'), m('assistant', 'a1')], 'conv-1', null);
+    const d = mapper.decide('chatgpt', [m('user', 'q1'), m('assistant', 'a1'), m('user', 'q2')]);
+    expect(d.action).toBe('incremental');
+    // 下一轮 adapter 要拿这个值填 conversationId，否则判定为新会话 → 新开对话
+    if (d.action === 'incremental') expect(d.thread.webSessionId).toBe('conv-1');
+  });
+
+  it('空串不回写：已有会话引用的线程不被空 webSessionId 覆盖（异常路径不得擦掉会话）', () => {
+    const { mapper } = mk();
+    mapper.register('chatgpt', 'auto:1', 'conv-1', [m('user', 'q1')]);
+    mapper.commit('chatgpt', 'auto:1', [m('user', 'q1'), m('assistant', 'a1')], '', null);
+    expect((mapper as any).threads.get('chatgpt:auto:1').webSessionId).toBe('conv-1');
+    const d = mapper.decide('chatgpt', [m('user', 'q1'), m('assistant', 'a1'), m('user', 'q2')]);
+    expect(d.action).toBe('incremental');
+    if (d.action === 'incremental') expect(d.thread.webSessionId).toBe('conv-1');
+  });
+
+  it('DeepSeek 路径回归：register/commit 同为真实 session id → 行为不变', () => {
+    const { mapper } = mk();
+    mapper.register('deepseek', 'auto:1', 's1', [m('user', 'q1')]);
+    mapper.commit('deepseek', 'auto:1', [m('user', 'q1'), m('assistant', 'a1')], 's1', 10);
+    const d = mapper.decide('deepseek', [m('user', 'q1'), m('assistant', 'a1'), m('user', 'q2')]);
+    expect(d.action).toBe('incremental');
+    if (d.action === 'incremental') expect(d.thread.webSessionId).toBe('s1');
+  });
+
+  it('回写走 persist()：serialize 快照里是新 webSessionId（SW 重启后仍复用同一会话）', () => {
+    const { mapper } = mk();
+    mapper.register('chatgpt', 'auto:1', '', [m('user', 'q1')]);
+    mapper.commit('chatgpt', 'auto:1', [m('user', 'q1'), m('assistant', 'a1')], 'conv-1', null);
+    const snap = (mapper as any).serialize();
+    expect(snap.threads[0].webSessionId).toBe('conv-1');
+  });
+});
