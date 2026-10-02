@@ -12,8 +12,12 @@
  *     真实帧 11/12 是正文续帧——不继承会让正文整段丢失。
  *  2. patch 数组展开：{"p":"","o":"patch","v":[...]} 的 v 是操作数组，
  *     要对每项递归走 processSingleOp；数组内的 append 与顶层同等处理。
- *  3. 通道分界：marker 含 "final_channel_token"（实测形如 "user_visible_token|final_channel_token"）
- *     → state.phase 切到 'content'；之前所有正文产 think_delta，之后产 content_delta。
+ *  3. 通道分界：marker 含 "final_channel_token" → state.phase 切到 'content'；
+ *     之前所有正文产 think_delta，之后产 content_delta。
+ *     实测两种 marker 形态都成立：(a) 两个独立帧各带一个 marker——帧 6 "user_visible_token"
+ *     与帧 9 "final_channel_token"（传 docs/superpowers/specs/2026-10-01-chatgpt-sse-protocol.md
+ *     帧序列）；(b) 一帧里 marker 为 "user_visible_token|final_channel_token" 合并值。
+ *     代码以 includes('final_channel_token') 判定，对两种形态都能切通道——代码逻辑不变。
  *
  * 设计决策（写下来备查）：
  *  - resume_conversation_token 不发事件。ProviderStreamEvent 现有事件集无 conversationId 类型

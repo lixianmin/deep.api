@@ -13,12 +13,16 @@ import { createRegistry } from './providers/registry';
 // 接收 chatgpt.com ISOLATED relay 转发的消息，包装成 ProviderAdapter 注册到 router。
 import { createChatGPTAdapter } from './providers/chatgpt/adapter';
 import { createBridgeClient } from './providers/chatgpt/bridge-client';
+import type { ProviderAdapter, ProviderId } from './providers/adapter';
 // 2026-09-14（fix/models-v4-retired）：`onCatalogUpdate` 不再用——仅 register-catalog-listener.ts 调用。
 import { registerCatalogListener } from './register-catalog-listener';
 // 2026-09-15（fix/auth-flip-flop）：auth.sync 采纳策略收拢到 auth-sync.ts（可单测）。
 import { createAuthSync } from './auth-sync';
 // 2026-09-16（feat/relay-auto-recovery）：扩展重载/更新后向开着的标签页重注入 bridge-relay.js。
 import { createRelayRecovery } from './relay-recovery';
+// 2026-10-01（fix/auth-end-to-end）：token 门禁下沉到 provider 维度——chatgpt 不需要 token。
+// 详见 src/background/sw-gate.ts 文件头。仅 deepseek 模型请求才走原有 503 门禁。
+import { needsDeepSeekToken } from './sw-gate';
 
 const STORAGE = chrome.storage.local;
 const DEEPSEEK_API_BASE = 'https://chat.deepseek.com/api/v0';
@@ -111,7 +115,7 @@ function probeHeaders(token: string): Record<string, string> {
   return { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
 }
 
-let cached: { router: Router; log: RingLog; mapper: SessionMapper } | null = null;
+let cached: { router: Router; log: RingLog; mapper: SessionMapper; registry: Record<ProviderId, ProviderAdapter> } | null = null;
 const panelPorts = new Set<chrome.runtime.Port>();   // 当前打开的 popup 面板 port
 
 // 2026-10-01（feat/chatgpt-bridge）：chatgpt.com ISOLATED relay 连接到本 SW 时收请求的 bridge-client。
@@ -134,7 +138,7 @@ async function deleteDeepSeekSession(webSessionId: string): Promise<void> {
   } catch { /* best-effort：SW 随时可能被回收，删除失败不阻塞后续流程（spec §4.3） */ }
 }
 
-async function build(): Promise<{ router: Router; log: RingLog; mapper: SessionMapper }> {
+async function build(): Promise<{ router: Router; log: RingLog; mapper: SessionMapper; registry: Record<ProviderId, ProviderAdapter> }> {
   if (cached) return cached;
   const log = new RingLog(500);   // 2026-09-09（feat/debug-dashboard）调到 500：debug 页日志 tab 看更多决策现场
   const cfg = await getProviderConfig('deepseek');
@@ -250,8 +254,9 @@ async function build(): Promise<{ router: Router; log: RingLog; mapper: SessionM
   // bridge 是 module-level 的，确保 onConnect 注册的 port.onMessage listener 与 build() 内的
   // adapter 拿到同一份 bridge 引用。
   const chatgptAdapter = createChatGPTAdapter({ bridge: chatgptBridge, now: () => Date.now() });
+  const registry = createRegistry(adapter, chatgptAdapter);
   const router = new Router({
-    registry: createRegistry(adapter, chatgptAdapter),
+    registry,
     mapper,
     queue: new Queue({ timeoutMs: 60_000, concurrency: cfg.poolSize }),
     storage: { get: async (k) => (await STORAGE.get(k as unknown as string))?.[k as unknown as string] },
@@ -263,7 +268,7 @@ async function build(): Promise<{ router: Router; log: RingLog; mapper: SessionM
   // 2026-09-09（feat/debug-dashboard）：注入 log 给 mapper，让 listThreads() 能按 cid 聚合最近一次决策现场。
   // 单实例仅一次；重复 build 命中 cached 短路。
   if (!mapper.log) mapper.log = log;
-  cached = { router, log, mapper };
+  cached = { router, log, mapper, registry };
   return cached;
 }
 
@@ -398,12 +403,25 @@ chrome.runtime.onConnect.addListener((port) => {
       // 2026-09-11（fix/review-r1）：build() 移进 try——旧代码在 try 之外 await build()，
       // storage 读失败/构建异常会让整个监听器 reject（unhandledrejection），调用方永远等不到回包。
       try {
-        const { router } = await build();
-        const token = await loadCachedToken();
-        if (!token) {
-          const { error, status } = { error: { error: { message: '未登录 chat.deepseek.com，请先在浏览器中登录', type: 'api_error', code: 'provider_unavailable' } }, status: 503 };
-          safePost({ __deepApi: { id: env.id, kind: 'error', error } } as unknown as BridgeResponseMsg);
-          return;
+        const { router, registry } = await build();
+        // 2026-10-01（fix/auth-end-to-end）：token 门禁下沉到 provider 维度。chatgpt provider 已注册，
+        // 但既往 `if (!token) 503 '未登录 chat.deepseek.com'` 把只登录了 ChatGPT 的用户一起拦死。
+        // 现在按 provider 分流：仅 chat.completions.create + model 解析到 deepseek 才需 token。
+        // 其他方法（models.list / cancel / auth.* / chatgpt 模型请求）→ 不要求。
+        const needsToken = needsDeepSeekToken(env, registry);
+        let token: string;
+        if (needsToken) {
+          const t = await loadCachedToken();
+          if (!t) {
+            const { error, status } = { error: { error: { message: '未登录 chat.deepseek.com，请先在浏览器中登录', type: 'api_error', code: 'provider_unavailable' } }, status: 503 };
+            safePost({ __deepApi: { id: env.id, kind: 'error', error } } as unknown as BridgeResponseMsg);
+            return;
+          }
+          token = t;
+        } else {
+          // 非深先路径（chatgpt 模型 / 列表 / 取消 / auth.*）→ 不需 token；传空串，chatgpt adapter
+          // 不读 token，deepseek 路径根本不会被路由到（needsToken=false 意味着 resolveModel 未命中 deepseek）。
+          token = '';
         }
         // 2026-09-14（fix/models-v4-retired）：删除 models-catalog:update 死分支。
         // content script 走 chrome.runtime.sendMessage（registerCatalogListener 接听），

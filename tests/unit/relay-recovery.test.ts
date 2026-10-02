@@ -13,8 +13,8 @@ describe('relay-recovery（扩展重载后的桥自动恢复）', () => {
     });
     await recover();
     expect(calls).toHaveLength(2);
-    expect(calls[0]).toEqual({ tabId: 1, files: ['bridge-relay.js'] });
-    expect(calls[1]).toEqual({ tabId: 2, files: ['bridge-relay.js'] });
+    expect(calls[0]).toEqual({ tabId: 1, files: ['bridge-relay.js', 'chatgpt-bridge-relay.js'] });
+    expect(calls[1]).toEqual({ tabId: 2, files: ['bridge-relay.js', 'chatgpt-bridge-relay.js'] });
   });
 
   it('单 tab 注入失败只记日志，继续注入其余 tab（不抛出）', async () => {
@@ -43,5 +43,18 @@ describe('relay-recovery（扩展重载后的桥自动恢复）', () => {
     });
     await expect(recover()).resolves.toBeUndefined();
     expect(executeScript).not.toHaveBeenCalled();
+  });
+
+  // 2026-10-01（fix/relay-recovery-chatgpt）：同时重注入 chatgpt-bridge-relay.js——
+  // 只注前者的话，已开的 chatgpt 标签页里 chatgpt relay 不会复活，它把
+  // "Extension context invalidated" 当终态停机 → 用户必须手动刷新每个 chatgpt 标签页。
+  it('重注入同时包含 bridge-relay.js 与 chatgpt-bridge-relay.js（前者后者顺序固定）', async () => {
+    const calls: Array<{ tabId: number; files: string[] }> = [];
+    const recover = createRelayRecovery({
+      queryTabs: async () => [{ id: 7 }],
+      executeScript: async (inj) => { calls.push({ tabId: inj.target.tabId, files: [...inj.files] }); },
+    });
+    await recover();
+    expect(calls).toEqual([{ tabId: 7, files: ['bridge-relay.js', 'chatgpt-bridge-relay.js'] }]);
   });
 });

@@ -30,6 +30,8 @@ import {
   savePendingSend,
   loadPendingSend,
   clearPendingSend,
+  decideSendNavigation,
+  tapFinalEvent,
 } from '../../src/content/chatgpt-bridge-main';
 import type { SseFrame } from '../../src/shared/chatgpt-sse';
 
@@ -561,5 +563,75 @@ describe('集成：install 副作用', () => {
       return typeof d === 'object' && d !== null && (d as { __deepApiChatGPT?: unknown }).__deepApiChatGPT === true;
     });
     expect(ourMsgs).toHaveLength(0);
+  });
+});
+
+// ===== 11. decideSendNavigation：handleSend 跳转决策（纯函数）=====
+// 2026-10-01（fix/new-conv-pollution）：聊所有 send 指令在驱动 composer 之前都必须验证当前页路径
+// 正确——fetch 钩子本页 capture，不跳页面直接 send 会把消息写进当前会话，导致多线程上下文互窜。
+// 本文件仅覆盖纯函数（decideSendNavigation）；navigation 后续依赖 sessionStorage + 重注入路径，
+// 已有 8 号 describe 覆盖。
+describe('decideSendNavigation', () => {
+  it('新会话（conversationId=null）+ 当前在 /c/old → 期望 assign("/")（critical fix）', () => {
+    expect(decideSendNavigation({ requestId: 'r1', text: 'hi', conversationId: null }, '/c/old')).toBe('/');
+  });
+
+  it('新会话 + 当前在 / → 不跳（已经在新会话页）', () => {
+    expect(decideSendNavigation({ requestId: 'r1', text: 'hi', conversationId: null }, '/')).toBeNull();
+  });
+
+  it('新会话 + pathname 带尾巴但非 /（如 /c 或 /?foo=1） → 一律跳 /', () => {
+    // pathname 不严格等于 '/'，但不属于 /c/<id> 路径，新会话都要回到 /
+    expect(decideSendNavigation({ requestId: 'r1', text: 'hi', conversationId: null }, '/c')).toBe('/');
+    expect(decideSendNavigation({ requestId: 'r1', text: 'hi', conversationId: null }, '/?foo=1')).toBe('/');
+    expect(decideSendNavigation({ requestId: 'r1', text: 'hi', conversationId: null }, '')).toBe('/');
+  });
+
+  it('指定会话 + 当前不在 /c/<id> → 跳 /c/<id>', () => {
+    expect(decideSendNavigation({ requestId: 'r1', text: 'hi', conversationId: 'uuid-x' }, '/')).toBe('/c/uuid-x');
+    expect(decideSendNavigation({ requestId: 'r1', text: 'hi', conversationId: 'uuid-x' }, '/c/old')).toBe('/c/uuid-x');
+  });
+
+  it('指定会话 + 已在 /c/<id> → 不跳', () => {
+    expect(decideSendNavigation({ requestId: 'r1', text: 'hi', conversationId: 'uuid-x' }, '/c/uuid-x')).toBeNull();
+  });
+
+  it('指定会话 + /c/<id> 子路径（如 /c/<id>/share） → 不跳（仍属于同一会话）', () => {
+    // startsWith 匹配 /c/<id> 即可，子页面不需要再跳
+    expect(decideSendNavigation({ requestId: 'r1', text: 'hi', conversationId: 'uuid-x' }, '/c/uuid-x/share')).toBeNull();
+  });
+});
+
+// ===== 12. tapFinalEvent：tap 收尾事件选择（重要修复）=====
+// 2026-10-01（fix/tap-error-emit）：现在 finally 区分 doneSeen：false 时不产任何消息，导致
+// 调用方只能等 120s 超时。tapFinalEvent 决定补发什么——重要路径如下：
+//   - doneSeen=true → 'done'（上游给了 [DONE] / message_stream_complete）
+//   - !doneSeen + 异常 EOF（reader.read 拋错）→ 'error' + 异常 message
+//   - !doneSeen + 正常 EOF（上游流结束但未到终止帧）→ 'error' + 默认 message
+describe('tapFinalEvent（tap 收尾事件）', () => {
+  it('doneSeen=true → 产 done（即使 catch 有错也优先 done）', () => {
+    expect(tapFinalEvent(true, undefined)).toEqual({ kind: 'done' });
+    expect(tapFinalEvent(true, new Error('late error'))).toEqual({ kind: 'done' });
+  });
+
+  it('!doneSeen + Error 异常 → 产 error，message 含异常原文', () => {
+    expect(tapFinalEvent(false, new Error('network reset'))).toEqual({
+      kind: 'error',
+      message: 'network reset',
+    });
+  });
+
+  it('!doneSeen + 字符串异常 → message = 该字符串', () => {
+    expect(tapFinalEvent(false, 'connection closed')).toEqual({
+      kind: 'error',
+      message: 'connection closed',
+    });
+  });
+
+  it('!doneSeen + undefined/null → 产 error + 默认 message（覆盖上游净 EOF 未到终止帧）', () => {
+    const ev1 = tapFinalEvent(false, undefined);
+    expect(ev1).toMatchObject({ kind: 'error' });
+    if (ev1.kind === 'error') expect(ev1.message).toMatch(/ended without terminal frame|EOF/);
+    expect(tapFinalEvent(false, null)).toMatchObject({ kind: 'error' });
   });
 });

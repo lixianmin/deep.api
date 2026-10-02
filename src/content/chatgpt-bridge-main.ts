@@ -293,6 +293,22 @@ export function clearPendingSend(): void {
 
 // ===== 6. fetch 钩子（document_start 立即生效）=====
 
+/**
+ * tap 收尾该产出什么消息（纯函数）：
+ *   - doneSeen=true → {kind:'done'}（上游给了 [DONE] 或 message_stream_complete）
+ *   - 否则          → {kind:'error', message}（异常 EOF / reader.read 拋错 / 未到终止帧）
+ *
+ * 2026-10-01（fix/tap-error-emit）：现在 finally 区分 doneSeen：false 补发 error。
+ * 不调则调用方只能等 120s 超时——该路径后客户端（SW 端 bridge-client）的 bridge error）
+ * 会让请求与上下文丢失。本次 extra 不是为了别的。
+ */
+export type TapFinalEvent = { kind: 'done' } | { kind: 'error'; message: string };
+export function tapFinalEvent(doneSeen: boolean, caughtError: unknown): TapFinalEvent {
+  if (doneSeen) return { kind: 'done' };
+  const detail = caughtError instanceof Error ? caughtError.message : (typeof caughtError === 'string' ? caughtError : '');
+  return { kind: 'error', message: detail === '' ? 'chatgpt stream ended without terminal frame' : detail };
+}
+
 /** 当前活跃请求 id——handleSend 进入时设、tap 完成时清；单 active 模型简化并发。 */
 let activeRequestId: string | null = null;
 /** 当前活跃 tap 状态——按 activeRequestId 切换；多个流并发时换成 Map<string, TapState>。 */
@@ -318,6 +334,8 @@ async function tapConversationResponse(response: Response, requestId: string): P
   }
   const decoder = new TextDecoder();
   let doneSeen = false;
+  // 2026-10-01（fix/tap-error-emit）：catch 里保存的异常交付 finally 上报给 bridge-client。
+  let caughtTapError: unknown = null;
   try {
     while (true) {
       const { value, done } = await reader.read();
@@ -350,8 +368,10 @@ async function tapConversationResponse(response: Response, requestId: string): P
         }
       }
     }
-  } catch {
-    /* stream 读失败——错误信息已通过 stream 自然结束时的 [DONE] 告知 */
+  } catch (e) {
+    // 2026-10-01（fix/tap-error-emit）：reader.read 拋错（网络中断 / fetch 异常 EOF）。
+    // 旧代码静默吞掉 → 调用方只能等 120s 超时。本次重新拋到 finally，交给 tapFinalEvent。
+    caughtTapError = e;
   } finally {
     try { await reader.cancel(); } catch { /* ignore */ }
     if (doneSeen) {
@@ -362,6 +382,14 @@ async function tapConversationResponse(response: Response, requestId: string): P
         if (pending !== null && pending.requestId === requestId) clearPendingSend();
         activeRequestId = null;
         activeTapState = null;
+      }
+    } else {
+      // 2026-10-01（fix/tap-error-emit）：上游净 EOF 未到 [DONE] / message_stream_complete，
+      // 或者 catch 里拋了异常——发 error 补消息，避免调用方陪跑 120s 超时。
+      const ev = tapFinalEvent(false, caughtTapError);
+      if (ev.kind === 'error' && activeRequestId === requestId) {
+        postOutgoing({ __deepApiChatGPT: true, kind: 'error', requestId, message: ev.message } satisfies OutgoingErrorMsg);
+        // error 路径不主动清 sessionStorage——bridge-client 收到 error 帧后会做错误清理。
       }
     }
   }
@@ -388,6 +416,29 @@ function patchFetch(): void {
 }
 
 // ===== 7. send 指令处理 =====
+
+/**
+ * 决定 handleSend 是否需要在驱动 composer 之前先跳转 URL。
+ *
+ * 背景：fetch 钩子是本页 fetch 的 capture——若不在目标会话页面，发出的 send 只会被写进
+ * 当前页面所在的会话里，导致多线程上下文互窜（critical fix）。回传长度：
+ *   - pending.conversationId 非 null 且当前页不在 /c/<id> → '/c/<id>'
+ *   - pending.conversationId 非 null 且当前已在 /c/<id> → null
+ *   - pending.conversationId === null 且当前页不在 '/' → '/' （新会话必须从 / 起手）
+ *   - pending.conversationId === null 且当前已在 '/' → null
+ *
+ * 纯函数，便于单测（无 fetch / DOM 依赖）。
+ */
+export function decideSendNavigation(p: PendingSend, currentPathname: string): string | null {
+  if (p.conversationId !== null) {
+    if (!currentPathname.startsWith('/c/' + p.conversationId)) return '/c/' + p.conversationId;
+    return null;
+  }
+  // 新会话：路径不是 '/' 必须跳回根页面，避免污染上一轮的 conversation_id
+  if (currentPathname !== '/') return '/';
+  return null;
+}
+
 /** 单飞守卫：同时只有一个 send 在执行（导航后脚本重新注入时也只接管一次）。 */
 let inflightSend = false;
 
@@ -399,9 +450,11 @@ async function handleSend(p: PendingSend): Promise<void> {
   activeRequestId = p.requestId;
   activeTapState = { buffer: '', conversationId: null };
   try {
-    // 会话切换：非 null 时若不在目标会话，先导航——脚本会重注入
-    if (p.conversationId !== null && !location.pathname.startsWith('/c/' + p.conversationId)) {
-      location.assign('/c/' + p.conversationId);
+    // 会话切换：无论是否带 conversationId，都要先验证当前路径正确，否则 fetch 钩子会把 send
+    // 发到当前页所在的会话里，导致多线程上下文互窜。
+    const navTarget = decideSendNavigation(p, location.pathname);
+    if (navTarget !== null) {
+      location.assign(navTarget);
       // 不清 inflightSend——新文档接管时会 reset
       // 也不发任何 outgoing——等新脚本接管
       return;

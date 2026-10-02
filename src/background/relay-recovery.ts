@@ -30,7 +30,12 @@ export function createRelayRecovery(deps: RelayRecoveryDeps): () => Promise<void
       if (tab.id === undefined) continue;
       try {
         // 不带 allFrames：与 manifest content_scripts（默认仅顶层 frame）保持一致
-        await deps.executeScript({ target: { tabId: tab.id }, files: ['bridge-relay.js'] });
+        // 2026-10-01（fix/relay-recovery-chatgpt）：同时注 chatgpt-bridge-relay.js——
+        // 只注前者的话，已开的 chatgpt 标签页里 chatgpt relay 不会复活，它把
+        // "Extension context invalidated" 当终态停机 → 用户必须手动刷新每个 chatgpt 标签页。
+        // chatgpt-bridge-relay.js 自身有自检（未起 chatgpt tab 时无副作用），注入到非 chatgpt
+        // 标签页失败只记日志，不阻塞其余 tab。
+        await deps.executeScript({ target: { tabId: tab.id }, files: ['bridge-relay.js', 'chatgpt-bridge-relay.js'] });
         injected++;
       } catch (e) {
         failed++;

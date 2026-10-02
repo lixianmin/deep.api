@@ -469,7 +469,7 @@ describe('bridge-client', () => {
     expect((err as Error).message).toMatch(/no chatgpt tab connected|logged_out/i);
   });
 
-  it('conversation 重复上报幂等：同一 requestId 来两次 conversation → 只在第一次设置', async () => {
+  it('conversation 重复上报不丢消息：同一 requestId 来两次 conversation → 都产出 + 都携同 id（bridge 不实现去重，consumer 自己处理幂等）', async () => {
     const bc = createBridgeClient({ now: () => now });
     const port = mkPort();
     bc.registerPort(port.p);
@@ -480,7 +480,7 @@ describe('bridge-client', () => {
     port.deliver({ __deepApiChatGPT: true, kind: 'done', requestId: 'r1' });
     const events: ChatGPTBridgeEvent[] = [];
     for await (const e of iter) events.push(e);
-    // 两次 conversation 都产出（consumer 自己处理幂等），但 bridge 内部状态不变
+    // 两条 conversation 都携同 conversationId；bridge 不去重——consumer 上层处理。
     const convEvents = events.filter((e): e is { kind: 'conversation'; conversationId: string } => e.kind === 'conversation');
     expect(convEvents.length).toBe(2);
     expect(convEvents.every((e) => e.conversationId === 'conv-X')).toBe(true);
@@ -491,11 +491,23 @@ describe('bridge-client', () => {
     const port = mkPort();
     bc.registerPort(port.p);
     const iter = bc.request({ requestId: 'r1', text: 'A', conversationId: null });
+    // 记录发送数：调用 iter.return() 前仅 1 个 send 发出（仅 r1）
+    expect(port.sent).toHaveLength(1);
     // 立即断开（不消费）——iter.return 收尾
-    if (iter.return) await iter.return();
-    // 推进时间：若 timer 没清，test 框架会因为 pending timer 警告/挂起
+    expect(iter.return).toBeDefined();
+    if (iter.return) {
+      const r = await iter.return();
+      // return 告诉 consumer 不会再产事件了
+      expect(r.done).toBe(true);
+    }
+    // 推进时间：若 timer 没清，到 1000ms 会进 timer → 产 error 事件→ 错位。
+    // 检查这个连点：fake timer 推进过超时点，但不应有任何 timeout error 出现。
     await vi.advanceTimersByTimeAsync(2000);
-    // 通过即可——关键是没有「真挂起」状态
+    // 实际断言：iter.return 后 active 被释放，后续 request 能正常发送（意味着 timer 已清、active 已重置）
+    const it2 = bc.request({ requestId: 'r2', text: 'B', conversationId: null });
+    expect(port.sent.map((m) => (m as { requestId?: string }).requestId)).toEqual(['r1', 'r2']);
+    port.deliver({ __deepApiChatGPT: true, kind: 'done', requestId: 'r2' });
+    await collectAll(it2);
   });
 
   it('timeoutMs≤0 → 抛错（参数校验）', async () => {
@@ -505,6 +517,54 @@ describe('bridge-client', () => {
     let err: unknown = null;
     try { for await (const _ of bc.request({ requestId: 'r1', text: 'A', conversationId: null, timeoutMs: 0 })) void _; } catch (e) { err = e; }
     expect((err as Error).message).toMatch(/timeout/i);
+  });
+
+  // 2026-10-01（fix/bridge-stale-frames）：dispatchIncoming 必须按 requestId 过滤。旧实现忽略
+  // msg.requestId —— r1 超时释放后，tap 仍在读流；后续投递给 r1 的 frame/done 会被当成 r2 的内容
+  // 注入 active，导致 r2 的回复被截断并当作正常结束。
+  it('r1 超时后投递一个 r1 的 frame：断言不进 r2 的迭代器（requestId 过滤）', async () => {
+    const bc = createBridgeClient({ now: () => now, defaultTimeoutMs: 100 });
+    const port = mkPort();
+    bc.registerPort(port.p);
+    // r1 启动，不消费
+    const it1 = bc.request({ requestId: 'r1', text: 'A', conversationId: null });
+    // 推点内容，但不结束
+    port.deliver({ __deepApiChatGPT: true, kind: 'frame', requestId: 'r1', event: 'delta', data: '{"v":"r1-part"}' });
+    // 超时 → r1 释放 active
+    await vi.advanceTimersByTimeAsync(150);
+    await collectAll(it1);
+
+    // r2 启动并消费（观察 buffer 内容）
+    const it2 = bc.request({ requestId: 'r2', text: 'B', conversationId: null });
+    // r2 自己的 frame（应当收到）
+    port.deliver({ __deepApiChatGPT: true, kind: 'frame', requestId: 'r2', event: 'delta', data: '{"v":"r2-part"}' });
+    // 关键：现在又来一个 r1 的残留 frame（tap 还在读 → 投递）——必须被忽略
+    port.deliver({ __deepApiChatGPT: true, kind: 'frame', requestId: 'r1', event: 'delta', data: '{"v":"STALE-r1"}' });
+    // 关键：r1 的 done 也必须被忽略
+    port.deliver({ __deepApiChatGPT: true, kind: 'done', requestId: 'r1' });
+    // r2 真正的 done
+    port.deliver({ __deepApiChatGPT: true, kind: 'done', requestId: 'r2' });
+
+    const events: ChatGPTBridgeEvent[] = [];
+    for await (const e of it2) events.push(e);
+    // r2 只收到自己的 frame + done；r1 的任何东西都不该出现
+    expect(events.map((e) => e.kind)).toEqual(['frame', 'done']);
+    const frame = events.find((e) => e.kind === 'frame');
+    if (frame && frame.kind === 'frame') expect(frame.data).toBe('{"v":"r2-part"}');
+  });
+
+  it('仅在 active 的 requestId 与消息匹配时才消费；消息/requestId 缺失时仍走原路径（退化兼容）', async () => {
+    const bc = createBridgeClient({ now: () => now });
+    const port = mkPort();
+    bc.registerPort(port.p);
+    const it1 = bc.request({ requestId: 'r1', text: 'A', conversationId: null });
+    // 缺 requestId 字段的帧（兼容旧实现 / 测试 stub）：当作 active 自己的消息（不漏丢）
+    port.deliver({ __deepApiChatGPT: true, kind: 'frame', event: 'delta', data: '{"v":"legacy"}' });
+    port.deliver({ __deepApiChatGPT: true, kind: 'done', requestId: 'r1' });
+    const events: ChatGPTBridgeEvent[] = [];
+    for await (const e of it1) events.push(e);
+    // 两条都在（兼容旧 MAIN world 输出）
+    expect(events.map((e) => e.kind)).toEqual(['frame', 'done']);
   });
 });
 

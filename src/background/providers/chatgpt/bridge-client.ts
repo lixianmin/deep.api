@@ -76,8 +76,6 @@ interface PendingRequest {
   port: ChatGPTPortLike | null;
   /** 收到的 event 缓存（consumer drain 用）。 */
   buffer: ChatGPTBridgeEvent[];
-  /** 首次 'conversation' 事件记录的 conversationId（用于上层回填 session.webSessionId）。 */
-  conversationId: string | null;
   /** 流是否已结束（done=true 后 buffer drain 完即终止迭代）。 */
   done: boolean;
   /** 'error' 事件的 message（done 时填，buffer 已含 error 事件）。 */
@@ -184,10 +182,16 @@ export function createBridgeClient(deps: BridgeClientDeps): BridgeClient {
 
   function dispatchIncoming(msg: ChatGPTIncomingMsg): void {
     if (active === null) return;   // 没人在飞：丢弃（理论上 active 必定非 null，因为 send 已发；但保险起见）
+    // 2026-10-01（fix/bridge-stale-frames）：按 requestId 过滤入站消息。请求超时释放后，背后的
+    // tap 仍在 reader 上读到后续 frames/done，若混入后续 r2 就会把当前 request 的回复截断并当作正常结束。
+    // 规则：缺 requestId 字段时跳过过滤（兼容旧 stub / 老版本 MAIN world）；带 requestId 但
+    // 不匹配 active.opts.requestId → 丢。
+    if (typeof msg.requestId === 'string' && msg.requestId !== active.opts.requestId) return;
     const kind = msg.kind;
     if (kind === 'conversation' && typeof msg.conversationId === 'string') {
-      // 幂等：重复 'conversation' 事件不覆盖已记录的 conversationId（Ruling 4 + Task 3 实现者自报）
-      if (active.conversationId === null) active.conversationId = msg.conversationId;
+      // 2026-10-01（fix/dead-field）：旧实现存 active.conversationId 字段仅用于幂等判断，
+      // 但该字段无任何后续读取路径——是死字段。现不存任何内部状态，重复 'conversation'
+      // 事件原样产出去重由上层（consumer/adapter）决定。
       active.buffer.push({ kind: 'conversation', conversationId: msg.conversationId });
     } else if (kind === 'frame') {
       active.buffer.push({ kind: 'frame', event: typeof msg.event === 'string' ? msg.event : null, data: typeof msg.data === 'string' ? msg.data : '' });
@@ -317,7 +321,6 @@ export function createBridgeClient(deps: BridgeClientDeps): BridgeClient {
       opts,
       port: null,
       buffer: [],
-      conversationId: null,
       done: false,
       error: null,
       wake: null,
