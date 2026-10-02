@@ -17,7 +17,7 @@
 - 不得引入新依赖。注释用中文解释「为什么」。
 - **不得提交任何 `expect` 期望值改动**（本阶段只新增测试文件）。
 - 提交首行 ≤72 字符。合并走 `scripts/merge.sh`。
-- **v1 范围铁律**：不支持 tool_calls / vision / reasoning / search。收到这些参数**必须显式报错**，不能静默忽略（静默忽略会让 spice 以为能力存在）。
+- **v1 范围铁律**：不支持 tool_calls / vision / search（`reasoning` 例外，见文首修正）。收到这些参数**必须显式报错**，不能静默忽略（静默忽略会让 spice 以为能力存在）。
 
 ## 关键实测约束（来自协议文档，违反即 bug）
 
@@ -30,6 +30,12 @@
 - **新会话请求体不传 `conversation_id`**；会话 id 由 `resume_conversation_token` 帧回传。
 - composer 必须是 `#prompt-textarea`（contenteditable）；未水合时会退化成 `wcDTda_fallbackTextarea`，此时点 send 只是 GET 导航，**不算发送**。
 - **不能用 send 按钮存在与否判断就绪**（它要等有文字才出现，鸡生蛋死锁）。
+
+> **实施后修正（2026-10-02）**：Task 4 的 v1 守卫原按本计划把 `reasoning` 也列入 400 拒绝，
+> 但 debug 页 reasoning 下拉默认 high 且每次请求都带，导致 **ChatGPT 在 debug 页完全不可用**
+> （用户实测截图）。已改为 **`reasoning` 接受但忽略**（是否思考由 ChatGPT 网页侧自主决定，
+> 桥接无透传通道，抛错换不来「不思考」）。tools / vision / search=true 仍拒。
+> 下方「v1 范围铁律」中 reasoning 的表述以此修正为准。
 
 ## Review Focus
 
