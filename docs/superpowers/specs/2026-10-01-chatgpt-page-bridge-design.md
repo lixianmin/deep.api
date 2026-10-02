@@ -128,16 +128,36 @@ spice 发消息时，SW 经 port 通知 chatgpt.com 上的 MAIN world 脚本，�
 - 历史项找不到（会话太老）才导航到 `/c/<uuid>`，并**记 warning 日志**
 - 无法定位 → 报错，不发送
 
-### 3.5 登录态与标签页缺失
+### 3.5 登录态与专属标签页
 
 - **登录态**：与 DeepSeek 的 token 探测不同，本 provider 的 `getAuthStatus` 由
   content script 判定——chatgpt.com 页面存在且未出现登录提示即为 `logged_in`。
   SW 侧不持有 ChatGPT token（它只存在于页面，桥接也不需要它）。
-- **标签页缺失**：没有打开的 chatgpt.com 标签页时，
-  行为需显式定义。建议：**不自动开**（避免惄惄往用户窗口里塞标签页），
-  首次使用时由 popup 引导用户打开并登录；SW 侧返回 503 并携带明确文案
-  「请先在浏览器中打开并登录 chatgpt.com」。沿用 DeepSeek 现有的
-  `resyncAuth` 手动开 tab 的做法（用户已在 popup 点过），不新增自动开逻辑。
+- ~~**标签页缺失**：不自动开，由 popup 引导用户打开并登录。~~
+  **（2026-10-05 作废，改为下面的「扩展独占」）**
+  旧方案的「不自动开」以「复用用户自己开的 chatgpt.com 标签页」为前提；该前提已被
+  用户 2026-10-04 明确推翻（见下），故本节改与实现对齐。
+- **扩展独占一个 chatgpt.com 标签页**（2026-10-04 用户拍板，代码 `src/background/chatgpt-owned-tab.ts`）：
+  扩展**自己开**一个 chatgpt.com 页面并**只驱动它**，绝不认领用户的标签页。
+  - 为何不能复用用户的标签页：桥接会 `location.assign('/')` 换会话、清空并占用 composer、
+    把扩展请求插队到用户自己的对话前面。用户在该页手动操作时会被直接捣乱
+    （用户原话：「用户可能正在里面进行手动操作呢，你这不是给捣乱吗」）。
+  - 实现：**独立窗口** `chrome.windows.create({focused:false})`（不混进用户标签条、不抢焦点）；
+    tabId 落 storage，SW 被 MV3 回收后靠它认领；用户关掉 / 跳走 / 浏览器重启导致 tabId 被复用
+    → 一律当作已丢失并重建，**绝不认领别人的 tab**。
+  - `bridge-client` 只认 `setOwnedTab()` 登记的那个 tabId 的 port，其余一律无视。
+  - **已知痛点（2026-10-05，用户反馈）**：新建窗口的瞬间用户能感知到「开了一个东西」；
+    但实测（0.2.21）窗口**只创建一次**、后续请求复用；浏览器内部焦点在请求全程与新建窗口时
+    **均未丢失**（`document.hasFocus()` 保持 true）。跨应用焦点抢占未能复现（测试环境无法切换
+    前台应用），待用户在新版上复测。若仍持续，可选缓解：建窗口时 `state:'minimized'` 或
+    置于屏幕外（需实测是否触发 Chrome 的后台节流）。
+- **不可行方案备查：iframe 内嵌**（2026-10-05 实测）。试图把 chatgpt.com 嵌进扩展页面
+  （免得开窗口）**被 CSP 硬阻断**：真实响应里 `x-frame-options` 为 null，但 CSP 写着
+  `frame-ancestors 'self' chrome-extension://iaiigpefkbhgjcmcmffmfkpmhemdhdnj
+  chrome-extension://lfkehkpjohcoelkpembgemeipeppanef`——**只放行两个特定扩展 ID
+  （OpenAI 自家扩展）**，我们的 ID 不在其中，浏览器直接拒绝渲染。该名单由 OpenAI 控制。
+  理论上的绕法是用 `declarativeNetRequest` 删掉 chatgpt.com 响应的 CSP 头，但那等于
+  **全局拉低用户 chatgpt.com 会话的 XSS 防护**，代价与收益不成比例，不建议。
 
 ### 3.6 串行化
 
