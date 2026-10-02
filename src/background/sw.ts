@@ -11,8 +11,11 @@ import type { ChatCompletionChunk } from '../shared/api-types';
 import { createRegistry } from './providers/registry';
 // 2026-10-01（feat/chatgpt-bridge）：ChatGPT provider（网页桥接型）—— SW 侧用 bridge-client
 // 接收 chatgpt.com ISOLATED relay 转发的消息，包装成 ProviderAdapter 注册到 router。
-import { createChatGPTAdapter } from './providers/chatgpt/adapter';
+import { createChatGPTAdapter, type ChatGPTBridge } from './providers/chatgpt/adapter';
 import { createBridgeClient } from './providers/chatgpt/bridge-client';
+// 2026-10-04（fix/chatgpt-owned-tab）：扩展自己开一个 chatgpt.com 标签页（独立窗口），
+// 只驱动它——不再要求用户手动开页，也不再劫持用户自己正在操作的 chatgpt.com 标签页。
+import { createOwnedChatGPTTab } from './chatgpt-owned-tab';
 import type { ProviderAdapter, ProviderId } from './providers/adapter';
 // 2026-09-14（fix/models-v4-retired）：`onCatalogUpdate` 不再用——仅 register-catalog-listener.ts 调用。
 import { registerCatalogListener } from './register-catalog-listener';
@@ -123,6 +126,46 @@ const panelPorts = new Set<chrome.runtime.Port>();   // 当前打开的 popup �
 // 只注册一次——听者引用本单例，避免「build() 调用了新实例，port listener 还在旧实例上」的错位。
 // MV3 SW 终止重启后本单例也会丢；重新加载 chatgpt.com 标签页时会重新注册 port 到新单例。
 const chatgptBridge = createBridgeClient({ now: () => Date.now(), defaultTimeoutMs: 120_000 });
+
+// 2026-10-04（fix/chatgpt-owned-tab）：专属标签页的 tabId 落 storage（MV3 SW 随时被回收，
+// 内存里的认领会丢；storage 里的记录让重启后还能认出「哪个 tab 是自己的」）。
+const OWNED_CHATGPT_TAB_KEY = 'chatgptOwnedTabId.v1';
+
+async function readOwnedChatGPTTabId(): Promise<number | null> {
+  const got = (await STORAGE.get([OWNED_CHATGPT_TAB_KEY])) as unknown as Record<string, number | undefined> | undefined;
+  const v = got?.[OWNED_CHATGPT_TAB_KEY];
+  return typeof v === 'number' ? v : null;
+}
+
+// 独立窗口 + focused:false：不混进用户的标签条、视觉上就属于扩展，也不抢焦点。
+// chrome.windows.create 在 MV3 下返回 Promise<Window>，取其 tabs[0].id 作为 tabId。
+const chatgptOwnedTab = createOwnedChatGPTTab({
+  readOwnedTabId: readOwnedChatGPTTabId,
+  writeOwnedTabId: async (tabId) => { await STORAGE.set({ [OWNED_CHATGPT_TAB_KEY]: tabId }); },
+  getTab: async (tabId) => {
+    try {
+      return await chrome.tabs.get(tabId);
+    } catch {
+      return null;   // 用户关掉了这个 tab
+    }
+  },
+  createWindow: async (createData) => {
+    const win = await chrome.windows.create(createData);
+    return win.tabs?.[0]?.id ?? null;
+  },
+  hasBridgeConnection: () => chatgptBridge.hasConnection(),
+  adoptOwnedTab: (tabId) => { chatgptBridge.setOwnedTab(tabId); },
+  now: () => Date.now(),
+  sleep: (ms) => new Promise<void>((r) => setTimeout(r, ms)),
+  log: (msg) => console.log(msg),
+});
+
+/** adapter 看到的 bridge：bridge-client 本体 + 「先把自己的标签页准备好」。 */
+const chatgptBridgeForAdapter: ChatGPTBridge = {
+  hasConnection: () => chatgptBridge.hasConnection(),
+  ensureReady: () => chatgptOwnedTab.ensureReady(),
+  request: (opts) => chatgptBridge.request(opts),
+};
 
 /** 2026-09-11（fix/review-r1）：SessionMapper 的 deleteSession 真实现。
  *  旧注入是 `async () => {}`，mapper.fail() / TTL 过期 / LRU 淘汰承诺的 best-effort deleteSession
@@ -252,8 +295,8 @@ async function build(): Promise<{ router: Router; log: RingLog; mapper: SessionM
   const adapter = createDeepSeekAdapter(deps);
   // 2026-10-01（feat/chatgpt-bridge）：ChatGPT provider 复用模块级 chatgptBridge（见文件顶部声明）——
   // bridge 是 module-level 的，确保 onConnect 注册的 port.onMessage listener 与 build() 内的
-  // adapter 拿到同一份 bridge 引用。
-  const chatgptAdapter = createChatGPTAdapter({ bridge: chatgptBridge, now: () => Date.now() });
+  // adapter 拿到同一份 bridge 引用。ensureReady 由 chatgptOwnedTab 提供（开/复用扩展自己的标签页）。
+  const chatgptAdapter = createChatGPTAdapter({ bridge: chatgptBridgeForAdapter, now: () => Date.now() });
   const registry = createRegistry(adapter, chatgptAdapter);
   const router = new Router({
     registry,
@@ -352,11 +395,23 @@ chrome.runtime.onConnect.addListener((port) => {
     // 2026-10-01（feat/chatgpt-bridge）：chatgpt.com ISOLATED relay 接入。bridge-client 自己
     // 负责 onMessage / onDisconnect 处理（过滤 __deepApiChatGPT 消息 + 维护 alive 状态）。
     // 这里只需把 port 转交给它。
+    // 2026-10-04（fix/chatgpt-owned-tab）：tabId 一起传下去——bridge-client 只驱动
+    // setOwnedTab(tabId) 认领的那一个（扩展自己的标签页）。
+    const senderTabId = port.sender?.tab?.id;
     chatgptBridge.registerPort({
       postMessage: (m) => { try { port.postMessage(m); } catch { /* port closed mid-send */ } },
       onMessage: (cb) => port.onMessage.addListener((m) => { cb(m); }),
       onDisconnect: (cb) => port.onDisconnect.addListener(() => { cb(); }),
-    });
+    }, senderTabId);
+    // MV3 SW 重启后内存里的归属丢失（ownedTabId 回到 null），而专属标签页里的 relay 会自己
+    // 重连上来——这里按 storage 里的记录重新认领。
+    // **为什么不能无条件 setOwnedTab(senderTabId)**：那等于「谁连上来就认谁」，用户自己打开的
+    // chatgpt.com 标签页会在下一次请求时被驱动（跳走当前会话、清 composer、插队），正是本次
+    // 要修的劫持。因此只认领我们自己记录在案的那个 tab。
+    void (async () => {
+      const recorded = await readOwnedChatGPTTabId();
+      if (recorded !== null && recorded === senderTabId) chatgptBridge.setOwnedTab(senderTabId);
+    })();
     return;
   }
   if (port.name === 'deepapi') {

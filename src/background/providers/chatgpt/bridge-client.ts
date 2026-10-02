@@ -88,10 +88,15 @@ interface PendingRequest {
 }
 
 export interface BridgeClient {
-  /** 是否有任意 chatgpt tab 处于连接态。 */
+  /** 是否有「扩展自己那个」chatgpt tab 处于连接态（用户自己开的 tab 不算）。 */
   hasConnection(): boolean;
-  /** 注册一个新 port（由 SW 的 onConnect 处理调用）。 */
-  registerPort(port: ChatGPTPortLike): void;
+  /**
+   * 声明扩展专属的 tabId（chatgpt-owned-tab 模块负责开/复用它）。设为 null 表示尚未确定归属。
+   * 只有 tabId === ownedTabId 的 port 会被使用——用户自己开着的 chatgpt.com 标签页一律无视。
+   */
+  setOwnedTab(tabId: number | null): void;
+  /** 注册一个新 port（由 SW 的 onConnect 处理调用）。tabId = 发起连接的标签页。 */
+  registerPort(port: ChatGPTPortLike, tabId?: number): void;
   /** 主动移除 port（一般不需要——onDisconnect 自动调用；但保留供测试/强制下线）。 */
   removePort(port: ChatGPTPortLike): void;
   /**
@@ -106,20 +111,39 @@ export interface BridgeClient {
 
 export function createBridgeClient(deps: BridgeClientDeps): BridgeClient {
   const defaultTimeoutMs = deps.defaultTimeoutMs ?? 120_000;
-  /** 已注册 port 集合（value = alive 状态）。 */
-  const ports = new Map<ChatGPTPortLike, { alive: boolean }>();
+  /** 已注册 port 集合（value = alive 状态 + 归属 tabId）。 */
+  const ports = new Map<ChatGPTPortLike, { alive: boolean; tabId: number | undefined }>();
   /** 等待中的请求（不含正在跑的）。 */
   const queue: PendingRequest[] = [];
   /** 当前活跃请求（queue head 已被 pump 后填进来）。 */
   let active: PendingRequest | null = null;
+  /** 扩展专属标签页 id（null = 尚未认领）。 */
+  let ownedTabId: number | null = null;
+
+  /**
+   * 这个 port 是不是「扩展自己那个标签页」的。
+   *
+   * 2026-10-04（fix/chatgpt-owned-tab）：为什么只认自己的 tab——旧实现接受任何连上来的
+   * deepapi-chatgpt port，于是扩展会劫持用户自己正在手动操作的 chatgpt.com 标签页：
+   * conversationId 为空时 location.assign('/') 把用户正在看的会话导航走、清空并占用用户的
+   * composer 输入框、把扩展的请求插队到用户自己的对话前面。所以不属于 ownedTabId 的 port
+   * 一律**直接无视**（不报错、不 disconnect、不清 storage）——它在用户那边完全不受影响。
+   * ownedTabId 尚未确定（SW 刚重启、ensureReady 还没跑）时，带 tabId 的 port 也按「不是自己的」
+   * 处理：宁可暂无连接等 ensureReady 认领，也不误用用户标签页。
+   */
+  function isOwned(entry: { alive: boolean; tabId: number | undefined }): boolean {
+    if (!entry.alive) return false;
+    if (ownedTabId === null) return entry.tabId === undefined;
+    return entry.tabId === ownedTabId;
+  }
 
   function hasConnection(): boolean {
-    for (const v of ports.values()) if (v.alive) return true;
+    for (const v of ports.values()) if (isOwned(v)) return true;
     return false;
   }
 
   function pickAlivePort(): ChatGPTPortLike | null {
-    for (const [p, v] of ports.entries()) if (v.alive) return p;
+    for (const [p, v] of ports.entries()) if (isOwned(v)) return p;
     return null;
   }
 
@@ -235,8 +259,12 @@ export function createBridgeClient(deps: BridgeClientDeps): BridgeClient {
     dispatchIncoming(msg);
   }
 
-  function registerPort(port: ChatGPTPortLike): void {
-    ports.set(port, { alive: true });
+  function setOwnedTab(tabId: number | null): void {
+    ownedTabId = tabId;
+  }
+
+  function registerPort(port: ChatGPTPortLike, tabId?: number): void {
+    ports.set(port, { alive: true, tabId });
     port.onMessage((m) => { handlePortMessage(port, m); });
     port.onDisconnect(() => {
       const v = ports.get(port);
@@ -315,7 +343,7 @@ export function createBridgeClient(deps: BridgeClientDeps): BridgeClient {
       throw new Error('bridge-client: timeoutMs must be > 0');
     }
     if (!hasConnection()) {
-      throw new Error('bridge-client: no chatgpt tab connected (open https://chatgpt.com in a tab)');
+      throw new Error('bridge-client: no chatgpt tab connected (the extension-owned chatgpt.com tab is not connected)');
     }
     const p: PendingRequest = {
       opts,
@@ -332,5 +360,5 @@ export function createBridgeClient(deps: BridgeClientDeps): BridgeClient {
     return makeIterator(p);
   }
 
-  return { hasConnection, registerPort, removePort, request };
+  return { hasConnection, setOwnedTab, registerPort, removePort, request };
 }

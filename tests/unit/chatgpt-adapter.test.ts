@@ -50,10 +50,11 @@ function mkPort(): FakePort {
   };
 }
 
-/** adapter 用的 bridge mock：默认是「无连接、request 直接抛」。 */
+/** adapter 用的 bridge mock：默认是「无连接、ensureReady 空转、request 直接抛」。 */
 function mkBridge(over: Partial<ChatGPTBridge> = {}): ChatGPTBridge {
   return {
     hasConnection: () => false,
+    ensureReady: async () => {},
     request: makeRequestReturning([]),
     ...over,
   };
@@ -190,6 +191,7 @@ describe('ChatGPTAdapter.streamCompletion v1 范围守卫', () => {
     let requestCalled = false;
     const fakeBridge: ChatGPTBridge = {
       hasConnection: () => true,
+      ensureReady: async () => {},
       request: (() => {
         requestCalled = true;
         return makeRequestReturning([
@@ -210,6 +212,7 @@ describe('ChatGPTAdapter.streamCompletion v1 范围守卫', () => {
     let requestCalled = false;
     const fakeBridge: ChatGPTBridge = {
       hasConnection: () => true,
+      ensureReady: async () => {},
       request: (() => {
         requestCalled = true;
         return makeRequestReturning([{ kind: 'done' }]);
@@ -234,6 +237,7 @@ describe('ChatGPTAdapter.streamCompletion v1 范围守卫', () => {
     let requestCalled = false;
     const fakeBridge: ChatGPTBridge = {
       hasConnection: () => true,
+      ensureReady: async () => {},
       request: (() => {
         requestCalled = true;
         return makeRequestReturning([
@@ -261,6 +265,7 @@ describe('ChatGPTAdapter.streamCompletion 无桥接连接', () => {
     let requestCalled = false;
     const fakeBridge: ChatGPTBridge = {
       hasConnection: () => false,
+      ensureReady: async () => {},
       request: ((_opts) => { requestCalled = true; return makeRequestReturning([{ kind: 'done' }])(_opts); }),
     };
     const a = createChatGPTAdapter(mkDeps({ bridge: fakeBridge }));
@@ -273,6 +278,7 @@ describe('ChatGPTAdapter.streamCompletion 无桥接连接', () => {
   it('无连接提示可行动：包含 chatgpt.com / 打开 / 保持标签页打开的引导', async () => {
     const fakeBridge: ChatGPTBridge = {
       hasConnection: () => false,
+      ensureReady: async () => {},
       request: makeRequestReturning([{ kind: 'done' }]),
     };
     const a = createChatGPTAdapter(mkDeps({ bridge: fakeBridge }));
@@ -289,6 +295,7 @@ describe('ChatGPTAdapter.streamCompletion 无桥接连接', () => {
     let requestCalled = false;
     const fakeBridge: ChatGPTBridge = {
       hasConnection: () => true,
+      ensureReady: async () => {},
       request: (() => {
         requestCalled = true;
         return makeRequestReturning([
@@ -400,6 +407,7 @@ describe('ChatGPTAdapter.streamCompletion 事件翻译', () => {
     const captured: { text: string; conversationId: string | null } = { text: '', conversationId: 'unset' };
     const fakeBridge: ChatGPTBridge = {
       hasConnection: () => true,
+      ensureReady: async () => {},
       request: ((opts): AsyncIterable<ChatGPTBridgeEvent> => {
         captured.text = opts.text;
         captured.conversationId = opts.conversationId;
@@ -417,6 +425,65 @@ describe('ChatGPTAdapter.streamCompletion 事件翻译', () => {
     expect(a.isUnavailable(new Error('x'))).toBe(false);
     expect(a.isAuthExpired(new Error('x'))).toBe(false);
     expect(a.isRateLimited(new Error('x'))).toBe(false);
+  });
+});
+
+// ===== 4b. ensureReady：先把扩展自己的标签页准备好，再判连接 =====
+// 2026-10-04（fix/chatgpt-owned-tab）：旧实现要求用户自己开 chatgpt.com 标签页并保持它开着，
+// 还要复用那个标签页——用户可能正在里面手动操作。改为扩展独占一个标签页：请求前先
+// ensureReady（开/复用专属 tab + 等 relay 连上），连不上才报可行动错。
+describe('ChatGPTAdapter.streamCompletion ensureReady（扩展自己的标签页）', () => {
+  it('先 await ensureReady 再判 hasConnection（顺序不能反：没 tab 时 hasConnection 必为 false）', async () => {
+    const order: string[] = [];
+    const fakeBridge: ChatGPTBridge = {
+      hasConnection: () => { order.push('hasConnection'); return true; },
+      ensureReady: async () => { order.push('ensureReady'); },
+      request: () => { order.push('request'); return makeRequestReturning([{ kind: 'done' }])({ requestId: 'r1', text: 'hi', conversationId: null }); },
+    };
+    const a = createChatGPTAdapter(mkDeps({ bridge: fakeBridge }));
+    await toArray(a.streamCompletion(mkCtx(), mkReq()));
+    expect(order).toEqual(['ensureReady', 'hasConnection', 'request']);
+  });
+
+  it('ensureReady 后仍无连接 → 恰好一条 stream_error，且完全不调 bridge.request', async () => {
+    let requestCalled = false;
+    let readyCalled = false;
+    const fakeBridge: ChatGPTBridge = {
+      hasConnection: () => false,
+      ensureReady: async () => { readyCalled = true; },
+      request: () => { requestCalled = true; return makeRequestReturning([{ kind: 'done' }])({ requestId: 'r1', text: 'hi', conversationId: null }); },
+    };
+    const a = createChatGPTAdapter(mkDeps({ bridge: fakeBridge }));
+    const events = await toArray(a.streamCompletion(mkCtx(), mkReq()));
+    expect(readyCalled).toBe(true);
+    expect(requestCalled).toBe(false);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.kind).toBe('stream_error');
+  });
+
+  it('ensureReady 抛错（开不出标签页）→ 转成可行动 stream_error，不抛裸 Error（否则 500）', async () => {
+    let requestCalled = false;
+    const fakeBridge: ChatGPTBridge = {
+      hasConnection: () => false,
+      ensureReady: async () => { throw new Error('chrome.windows.create failed'); },
+      request: () => { requestCalled = true; return makeRequestReturning([{ kind: 'done' }])({ requestId: 'r1', text: 'hi', conversationId: null }); },
+    };
+    const a = createChatGPTAdapter(mkDeps({ bridge: fakeBridge }));
+    const events = await toArray(a.streamCompletion(mkCtx(), mkReq()));
+    expect(requestCalled).toBe(false);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.kind).toBe('stream_error');
+    expect((events[0] as { message: string }).message).toMatch(/标签页|窗口/);
+  });
+
+  it('无连接文案：说清是扩展自己的标签页 + 关掉会自动重建（不再让用户手动开）', async () => {
+    const fakeBridge: ChatGPTBridge = mkBridge();
+    const a = createChatGPTAdapter(mkDeps({ bridge: fakeBridge }));
+    const events = await toArray(a.streamCompletion(mkCtx(), mkReq()));
+    const message = (events[0] as { message: string } | undefined)?.message ?? '';
+    expect(message).toMatch(/扩展/);
+    expect(message).toMatch(/标签页/);
+    expect(message).toMatch(/重建|重新/);
   });
 });
 
@@ -668,3 +735,72 @@ describe('bridge-client', () => {
 async function collectAll(iter: AsyncIterable<unknown>): Promise<void> {
   for await (const _ of iter) void _;
 }
+
+// ===== 6. 标签页归属（fix/chatgpt-owned-tab）：用户的标签页必须被无视 =====
+// 核心回归：registerPort 旧实现接受任何 deepapi-chatgpt port，于是扩展会劫持用户自己
+// 正在手动操作的 chatgpt.com 标签页（跳走当前会话、清 composer、插队到用户对话）。
+// 现在每个 port 记 tabId，hasConnection / pickAlivePort 只认 tabId === ownedTabId 的那些。
+describe('bridge-client 标签页归属（setOwnedTab）', () => {
+  let now: number;
+  beforeEach(() => { now = 0; });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('**核心回归**：ownedTab=1 时，用户标签页（tabId=2）的 port 算「无连接」', () => {
+    const bc = createBridgeClient({ now: () => now });
+    bc.setOwnedTab(1);
+    const userTab = mkPort();
+    bc.registerPort(userTab.p, 2);
+    expect(bc.hasConnection()).toBe(false);
+  });
+
+  it('ownedTab=1 时，属于自己的 port（tabId=1）才算连接', () => {
+    const bc = createBridgeClient({ now: () => now });
+    bc.setOwnedTab(1);
+    bc.registerPort(mkPort().p, 1);
+    expect(bc.hasConnection()).toBe(true);
+  });
+
+  it('用户的 port 不只不算连接，还不会被发指令（send 绝不落到 tabId=2 的 port 上）', () => {
+    const bc = createBridgeClient({ now: () => now });
+    bc.setOwnedTab(1);
+    const userTab = mkPort();
+    bc.registerPort(userTab.p, 2);
+    expect(bc.hasConnection()).toBe(false);
+    expect(() => bc.request({ requestId: 'r1', text: 'hi', conversationId: null })).toThrow(/no chatgpt tab connected/);
+    expect(userTab.sent).toHaveLength(0);
+  });
+
+  it('用户的 port 与自己的 port 同时在：只给自己的那一个发指令', async () => {
+    vi.useFakeTimers();
+    const bc = createBridgeClient({ now: () => now, defaultTimeoutMs: 120_000 });
+    bc.setOwnedTab(1);
+    const userTab = mkPort();
+    const ownTab = mkPort();
+    bc.registerPort(userTab.p, 2);
+    bc.registerPort(ownTab.p, 1);
+    const it = bc.request({ requestId: 'r1', text: 'hi', conversationId: null });
+    expect(userTab.sent).toHaveLength(0);
+    expect(ownTab.sent).toHaveLength(1);
+    ownTab.deliver({ __deepApiChatGPT: true, kind: 'done', requestId: 'r1' });
+    await collectAll(it);
+  });
+
+  it('尚未认领（ownedTab=null）时，带 tabId 的 port 一律不算连接（都是外部/用户标签页）', () => {
+    const bc = createBridgeClient({ now: () => now });
+    bc.registerPort(mkPort().p, 7);
+    expect(bc.hasConnection()).toBe(false);
+  });
+
+  it('setOwnedTab(null) / 换 tab → 旧归属的 port 立即失效', () => {
+    const bc = createBridgeClient({ now: () => now });
+    bc.registerPort(mkPort().p, 1);
+    bc.setOwnedTab(1);
+    expect(bc.hasConnection()).toBe(true);
+    bc.setOwnedTab(null);
+    expect(bc.hasConnection()).toBe(false);
+    bc.setOwnedTab(1);
+    expect(bc.hasConnection()).toBe(true);
+    bc.setOwnedTab(2);
+    expect(bc.hasConnection()).toBe(false);
+  });
+});

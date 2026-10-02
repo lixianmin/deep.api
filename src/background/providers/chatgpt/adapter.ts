@@ -48,6 +48,13 @@ import type { ChatGPTBridgeEvent } from './bridge-client';
 /** adapter 用 bridge 的最小契约。bridge-client 实现 + 测试 stub 都满足。 */
 export interface ChatGPTBridge {
   hasConnection(): boolean;
+  /**
+   * 请求前把「扩展自己的 chatgpt.com 标签页」准备好：不存在就开（独立窗口、不抢焦点），
+   * 并等到它的 relay 连上。SW 侧注入的实现负责这件事，内含超时且不抛错——
+   * 失败由 streamCompletion 紧接着的 hasConnection() 判断转成可行动错误。
+   * 2026-10-04（fix/chatgpt-owned-tab）：以前是要用户自己开标签页并保持它开着，还会劫持它。
+   */
+  ensureReady(): Promise<void>;
   request(opts: {
     requestId: string;
     text: string;
@@ -138,7 +145,23 @@ export function createChatGPTAdapter(deps: ChatGPTAdapterDeps): IProviderAdapter
       // v1 守卫——入口即查（throw 而非 yield stream_error，否则 consumer 会以「流正常结束」处理）
       assertV1Scope(req);
 
-      // 2026-10-03（fix/chatgpt-no-tab-clear-error）：无桥接连接时提前报可行动错。
+      // 2026-10-04（fix/chatgpt-owned-tab）：先把扩展**自己的** chatgpt.com 标签页准备好
+      // （不存在就开、等 relay 连上），再判连接。顺序不能反：专属 tab 还没建时 hasConnection()
+      // 必然 false，先判就永远走不通。
+      // ensureReady 抛错（开不出窗口等）转 stream_error：裸 throw 会被 router 归成 500
+      // internal_error，用户看不到任何可行动信息（同下面无连接时的考虑）。
+      try {
+        await deps.bridge.ensureReady();
+      } catch (e) {
+        yield {
+          kind: 'stream_error',
+          message: `ChatGPT 桥接准备失败：${e instanceof Error ? e.message : String(e)}。`
+            + '扩展需要一个自己的 chatgpt.com 标签页（独立窗口）来转发请求，请检查浏览器是否拦截了扩展新开窗口。',
+        };
+        return;
+      }
+
+      // 2026-10-03（fix/chatgpt-no-tab-clear-error）：桥接仍未连上时提前报可行动错。
       // 不提前的话，bridge.request 的 throw（'no chatgpt tab connected'）发生在 async
       // generator 体内，要等第一次 .next() 才冒出来，且它是普通 Error：router 的 mapErrStatic
       // 逐 adapter 问 isRateLimited/isAuthExpired/isUnavailable，chatgpt 三个全 false → 归成
@@ -152,8 +175,9 @@ export function createChatGPTAdapter(deps: ChatGPTAdapterDeps): IProviderAdapter
         yield {
           kind: 'stream_error',
           message:
-            'ChatGPT 桥接未连接：请在浏览器里打开并登录 https://chatgpt.com/ ，并保持该标签页一直开着'
-            + '（标签页关闭或跳转到别的页面就会断开桥接；扩展不会自动帮你打开它）。',
+            'ChatGPT 桥接未连接：扩展已尝试打开自己的 chatgpt.com 标签页（独立窗口）但没能连上。'
+            + '请保持该标签页处于打开状态并已登录 chatgpt.com（若被关闭，下次请求会自动重建）；'
+            + '页面首次加载较慢时稍后重试。',
         };
         return;
       }
