@@ -116,9 +116,12 @@ declare global { interface Window { __deepApiChatGPTRelay?: { isAlive(): boolean
     try {
       p = chrome.runtime.connect({ name: RELAY_PORT_NAME });
     } catch (e) {
-      // 上下文失效属终态：停机，打一条可行动的提示（刷新页面重新注入新脚本）
+      // 上下文失效属终态：停机，打一条可行动的提示（刷新页面重新注入新脚本）。
+      // 2026-10-05（chore/chatgpt-relay-info）：与 bridge-relay.ts 对齐降为 info——扩展刚重载过
+      // 后的预期路径（relay-recovery 会自动重注入新 relay 接管），不是故障；warn 会被宿主页面的
+      // 错误收集器（如 Paseo IDE 的 Errors 面板）收走刷成噪音。非终态失败仍是 warn。
       if (isContextInvalidated(e)) {
-        console.warn('[deep.api chatgpt-bridge-relay] extension context invalidated — refresh this page to restore the bridge (retry stopped)');
+        console.info('[deep.api chatgpt-bridge-relay] extension context invalidated — refresh this page to restore the bridge (retry stopped)');
         return;
       }
       console.warn('[deep.api chatgpt-bridge-relay] connect failed, retrying', e);
