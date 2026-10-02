@@ -106,8 +106,11 @@ declare global { interface Window { __deepApiRelay?: { isAlive(): boolean } } }
       // 上下文已被 Chrome 销毁，connect 永远抛 "Extension context invalidated"，旧上下文永不恢复。
       // 旧实现照常退避重试 → 每个老标签页永久刷错（用户实测 localhost:5173 页面 console 堆栈）。
       // 上下文失效属终态：停机，打一条可行动的提示（刷新页面重新注入新脚本）。
+      // 2026-10-05（chore/relay-invalidated-info）：这条从 warn 降为 info——它不是故障，是
+      // 「扩展刚重载过」的预期路径（v0.2.7 起 relay-recovery 会自动重注入新 relay 接管），
+      // 而宿主页面（如 Paseo IDE）的错误收集器会把 warn 收进 Errors 面板刷成噪音。
       if (isContextInvalidated(e)) {
-        console.warn('[deep.api bridge-relay] extension context invalidated — refresh this page to restore the bridge (retry stopped)');
+        console.info('[deep.api bridge-relay] extension context invalidated — refresh this page to restore the bridge (retry stopped)');
         return;
       }
       console.warn('[deep.api bridge-relay] connect failed, retrying', e);
