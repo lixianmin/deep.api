@@ -12,6 +12,7 @@ const shared = { bundle: true, sourcemap: false, minify: true, target: 'es2022',
 await Promise.all([
   build({ ...shared, entryPoints: ['src/background/sw.ts'], outfile: 'extension/sw.js', format: 'esm' }),
   build({ ...shared, entryPoints: ['src/content/bridge-main.ts'], outfile: 'extension/bridge-main.js', format: 'iife' }),
+  build({ ...shared, entryPoints: ['src/content/chatgpt-bridge-main.ts'], outfile: 'extension/chatgpt-bridge-main.js', format: 'iife' }),
   build({ ...shared, entryPoints: ['src/content/bridge-relay.ts'], outfile: 'extension/bridge-relay.js', format: 'iife' }),
   build({ ...shared, entryPoints: ['src/content/models-sync.ts'], outfile: 'extension/models-sync.js', format: 'iife' }),
   build({ ...shared, entryPoints: ['src/popup/popup.ts'], outfile: 'extension/popup.js', format: 'iife' }),
