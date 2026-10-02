@@ -1,4 +1,4 @@
-import type { ModelInfo, ToolDef } from '../../shared/api-types';
+import type { Message, ModelInfo, ToolDef } from '../../shared/api-types';
 
 export type ProviderId = 'deepseek' | (string & {});
 /** provider 内部的「模型变体」标识。共享层不规定取值——各 adapter 自定义
@@ -51,6 +51,12 @@ export interface ProviderCompletion {
   refFileIds?: string[];
   overrides?: CompletionOverrides;
   requestId: string;
+  // 2026-10-01（feat/chatgpt-bridge）：v1 范围守卫需要原始请求的工具/消息参数。
+  // router 已把上游 `tools` / `messages` 直接挂到 req 上（不经渲染）——adapter 拿这两个
+  // 字段做「v1 是否支持」判断（如 ChatGPT 不支持 tools/vision/reasoning/search，统一抛 400）。
+  // DeepSeek 等不查这些字段的 adapter 无视即可；这是纯加性扩展。
+  tools?: ToolDef[];
+  messages?: Message[];
 }
 export interface ResolvedModel { modelId: string; variant: ModelVariant; supportsImages: boolean; thinking: boolean; limitChars: number }
 export interface ProviderAdapter {

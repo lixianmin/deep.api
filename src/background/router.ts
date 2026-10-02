@@ -302,7 +302,7 @@ export class Router {
         return mirror.length;
       })()
       : undefined;
-    const handle = await this.runCompletion(provider, resolved, messages, stringMessages, toolCtx, conversationId, ctx, overrides, refFileIds);
+    const handle = await this.runCompletion(provider, resolved, messages, stringMessages, toolCtx, conversationId, ctx, overrides, refFileIds, p.tools as ToolDef[] | undefined);
     // 2026-09-10（diag/request-snapshot）：出站参数快照——两条路径共用本函数，差异只可能在输入侧
     // （tools 集合 / overrides / prompt 长度）。记下来用户就能拿 demo 与 spice 两条日志直接 diff。
     // 2026-09-11（fix/review-r1）：改为在 done() 里现算——handle 的会话/promptLen 可能被
@@ -395,6 +395,10 @@ export class Router {
     conversationId: string | undefined, ctx: ProviderContext,
     overrides?: { thinking?: boolean | null; search?: boolean; reasoningEffort?: 'low' | 'medium' | 'high' | 'max' },
     refFileIds: string[] = [],
+    // 2026-10-01（feat/chatgpt-bridge）：v1 范围守卫需要原始 tools 参数。
+    // 默认 undefined——v1 之前的 provider（DeepSeek）不读该参数；ChatGPT adapter 拿它做
+    // 「是否带 function calling」判断。
+    toolsParam?: ToolDef[],
   ): Promise<RunHandle> {
     const pid = provider.id;
     const decision = this.d.mapper.decide(pid, messages, conversationId, resolved.variant);
@@ -442,7 +446,17 @@ export class Router {
       throw err('invalid_request_error', `transcript too long: ${prompt.length} > ${resolved.limitChars}（建议缩短历史或分批）`, 400);
     }
     const run: RunState = { parentMessageId: null, repairDone: false, model: resolved, promptLen: prompt.length, continueAttempts: 0, emittedThinkChars: 0, emittedContentChars: 0, specMode };
-    const req: ProviderCompletion = { session, prompt, model: { variant: resolved.variant, thinking: resolved.thinking }, overrides, requestId: ctx.requestId, ...(refFileIds.length ? { refFileIds } : {}) };
+    const req: ProviderCompletion = {
+      session, prompt,
+      model: { variant: resolved.variant, thinking: resolved.thinking },
+      overrides, requestId: ctx.requestId,
+      // 2026-10-01（feat/chatgpt-bridge）：v1 范围守卫需要原始请求参数。
+      // adapter 自己判断是否支持 tools/vision/reasoning/search（router 不再做硬拒——避免
+      // 各 provider 误用同一拒绝文案）。tools/messages 是加性字段，DeepSeek 等旧 adapter 忽略。
+      ...(refFileIds.length ? { refFileIds } : {}),
+      ...(toolsParam ? { tools: toolsParam } : {}),
+      ...(messages ? { messages } : {}),
+    };
     const handle: RunHandle = {
       stream: null as unknown as AsyncIterable<ProviderStreamEvent>,
       session, convId, thread, run,

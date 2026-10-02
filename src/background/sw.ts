@@ -9,6 +9,10 @@ import { PowSolver, instantiateDeepSeekWasm, type WasmInstance } from './provide
 import { isBridgeRequest, BridgeError, type BridgeResponseMsg } from '../shared/protocol';
 import type { ChatCompletionChunk } from '../shared/api-types';
 import { createRegistry } from './providers/registry';
+// 2026-10-01（feat/chatgpt-bridge）：ChatGPT provider（网页桥接型）—— SW 侧用 bridge-client
+// 接收 chatgpt.com ISOLATED relay 转发的消息，包装成 ProviderAdapter 注册到 router。
+import { createChatGPTAdapter } from './providers/chatgpt/adapter';
+import { createBridgeClient } from './providers/chatgpt/bridge-client';
 // 2026-09-14（fix/models-v4-retired）：`onCatalogUpdate` 不再用——仅 register-catalog-listener.ts 调用。
 import { registerCatalogListener } from './register-catalog-listener';
 // 2026-09-15（fix/auth-flip-flop）：auth.sync 采纳策略收拢到 auth-sync.ts（可单测）。
@@ -109,6 +113,12 @@ function probeHeaders(token: string): Record<string, string> {
 
 let cached: { router: Router; log: RingLog; mapper: SessionMapper } | null = null;
 const panelPorts = new Set<chrome.runtime.Port>();   // 当前打开的 popup 面板 port
+
+// 2026-10-01（feat/chatgpt-bridge）：chatgpt.com ISOLATED relay 连接到本 SW 时收请求的 bridge-client。
+// 提为模块级单例：build() 可能会被反复调用（cached 短路），但 chrome.runtime.onConnect.addListener
+// 只注册一次——听者引用本单例，避免「build() 调用了新实例，port listener 还在旧实例上」的错位。
+// MV3 SW 终止重启后本单例也会丢；重新加载 chatgpt.com 标签页时会重新注册 port 到新单例。
+const chatgptBridge = createBridgeClient({ now: () => Date.now(), defaultTimeoutMs: 120_000 });
 
 /** 2026-09-11（fix/review-r1）：SessionMapper 的 deleteSession 真实现。
  *  旧注入是 `async () => {}`，mapper.fail() / TTL 过期 / LRU 淘汰承诺的 best-effort deleteSession
@@ -236,8 +246,12 @@ async function build(): Promise<{ router: Router; log: RingLog; mapper: SessionM
     now: () => Date.now(),
   };
   const adapter = createDeepSeekAdapter(deps);
+  // 2026-10-01（feat/chatgpt-bridge）：ChatGPT provider 复用模块级 chatgptBridge（见文件顶部声明）——
+  // bridge 是 module-level 的，确保 onConnect 注册的 port.onMessage listener 与 build() 内的
+  // adapter 拿到同一份 bridge 引用。
+  const chatgptAdapter = createChatGPTAdapter({ bridge: chatgptBridge, now: () => Date.now() });
   const router = new Router({
-    registry: createRegistry(adapter),
+    registry: createRegistry(adapter, chatgptAdapter),
     mapper,
     queue: new Queue({ timeoutMs: 60_000, concurrency: cfg.poolSize }),
     storage: { get: async (k) => (await STORAGE.get(k as unknown as string))?.[k as unknown as string] },
@@ -329,6 +343,17 @@ self.addEventListener('unhandledrejection', (ev) => {
 registerCatalogListener();
 
 chrome.runtime.onConnect.addListener((port) => {
+  if (port.name === 'deepapi-chatgpt') {
+    // 2026-10-01（feat/chatgpt-bridge）：chatgpt.com ISOLATED relay 接入。bridge-client 自己
+    // 负责 onMessage / onDisconnect 处理（过滤 __deepApiChatGPT 消息 + 维护 alive 状态）。
+    // 这里只需把 port 转交给它。
+    chatgptBridge.registerPort({
+      postMessage: (m) => { try { port.postMessage(m); } catch { /* port closed mid-send */ } },
+      onMessage: (cb) => port.onMessage.addListener((m) => { cb(m); }),
+      onDisconnect: (cb) => port.onDisconnect.addListener(() => { cb(); }),
+    });
+    return;
+  }
   if (port.name === 'deepapi') {
     // port 存活追踪：页面进 bfcache / 导航离开时 port 会被 Chrome 关闭，
     // 后续 postMessage 会抛 Unchecked runtime.lastError。所有发送都走 safePost。
