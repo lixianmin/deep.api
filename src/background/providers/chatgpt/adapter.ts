@@ -138,6 +138,26 @@ export function createChatGPTAdapter(deps: ChatGPTAdapterDeps): IProviderAdapter
       // v1 守卫——入口即查（throw 而非 yield stream_error，否则 consumer 会以「流正常结束」处理）
       assertV1Scope(req);
 
+      // 2026-10-03（fix/chatgpt-no-tab-clear-error）：无桥接连接时提前报可行动错。
+      // 不提前的话，bridge.request 的 throw（'no chatgpt tab connected'）发生在 async
+      // generator 体内，要等第一次 .next() 才冒出来，且它是普通 Error：router 的 mapErrStatic
+      // 逐 adapter 问 isRateLimited/isAuthExpired/isUnavailable，chatgpt 三个全 false → 归成
+      // 500 internal_error，用户既看不到原因也不知道该干什么（实测：无 chatgpt.com 标签页时
+      // debug 页发送后零反馈、日志 tab 空白）。
+      // 为什么 yield stream_error 而不是 throw：router 在流内 case 'stream_error' 会记下
+      // message，流末统一抛 503 provider_unavailable 并把 message 原文透给调用方——正是我们
+      // 想要的「可行动提示」。throw 只会得到 500。
+      // 位置在 v1 守卫之后：请求本身不合法（400）是更前置的问题，不该被「没开标签页」盖住。
+      if (!deps.bridge.hasConnection()) {
+        yield {
+          kind: 'stream_error',
+          message:
+            'ChatGPT 桥接未连接：请在浏览器里打开并登录 https://chatgpt.com/ ，并保持该标签页一直开着'
+            + '（标签页关闭或跳转到别的页面就会断开桥接；扩展不会自动帮你打开它）。',
+        };
+        return;
+      }
+
       // 与 bridge.request 对话：把 prep 中已发但未拿到的 conversationId 作为 conversationId 传入
       // （router 拿到的 req.session.webSessionId 是 mapper 注册时用的占位 webSessionId；
       // 对 ChatGPT 来说，webSessionId === conversationId。incremental 时 mapper 填的是上一轮的

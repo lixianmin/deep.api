@@ -252,9 +252,64 @@ describe('ChatGPTAdapter.streamCompletion v1 范围守卫', () => {
 });
 
 // ===== 4. streamCompletion：桥事件 → ProviderStreamEvent =====
+// 2026-10-03（fix/chatgpt-no-tab-clear-error）：用户没打开 chatgpt.com 标签页时，
+// bridge.request 抛的 Error 会经 router 的 mapErrStatic 归成 500 internal_error——
+// 三个分类器全 false，用户看不到任何可行动信息。改为在 adapter 里提前判连接并 yield
+// stream_error（router 把它转成 503 provider_unavailable 并把 message 透给用户）。
+describe('ChatGPTAdapter.streamCompletion 无桥接连接', () => {
+  it('hasConnection()=false → 恰好产一条 stream_error，且完全不调 bridge.request', async () => {
+    let requestCalled = false;
+    const fakeBridge: ChatGPTBridge = {
+      hasConnection: () => false,
+      request: ((_opts) => { requestCalled = true; return makeRequestReturning([{ kind: 'done' }])(_opts); }),
+    };
+    const a = createChatGPTAdapter(mkDeps({ bridge: fakeBridge }));
+    const events = await toArray(a.streamCompletion(mkCtx(), mkReq()));
+    expect(requestCalled).toBe(false);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.kind).toBe('stream_error');
+  });
+
+  it('无连接提示可行动：包含 chatgpt.com / 打开 / 保持标签页打开的引导', async () => {
+    const fakeBridge: ChatGPTBridge = {
+      hasConnection: () => false,
+      request: makeRequestReturning([{ kind: 'done' }]),
+    };
+    const a = createChatGPTAdapter(mkDeps({ bridge: fakeBridge }));
+    const events = await toArray(a.streamCompletion(mkCtx(), mkReq()));
+    const message = (events[0] as { message: string } | undefined)?.message ?? '';
+    expect(message).toMatch(/chatgpt\.com/);
+    expect(message).toMatch(/打开/);
+    // 关键引导：标签页关掉桥就断了——只说「打开」不够
+    expect(message).toMatch(/标签页/);
+    expect(message).toMatch(/保持|不要关闭|别关/);
+  });
+
+  it('防回归：hasConnection()=true → 走原有路径（调 bridge.request，不产 stream_error）', async () => {
+    let requestCalled = false;
+    const fakeBridge: ChatGPTBridge = {
+      hasConnection: () => true,
+      request: (() => {
+        requestCalled = true;
+        return makeRequestReturning([
+          { kind: 'frame', event: null, data: '{"type":"message_marker","marker":"final_channel_token","event":"first"}' },
+          { kind: 'frame', event: 'delta', data: '{"p":"/message/content/parts/0","o":"append","v":"hi"}' },
+          { kind: 'done' },
+        ]);
+      })(),
+    };
+    const a = createChatGPTAdapter(mkDeps({ bridge: fakeBridge }));
+    const events = await toArray(a.streamCompletion(mkCtx(), mkReq()));
+    expect(requestCalled).toBe(true);
+    expect(events.some((e) => e.kind === 'stream_error')).toBe(false);
+    expect(events.some((e) => e.kind === 'content_delta' && e.content === 'hi')).toBe(true);
+  });
+});
+
 describe('ChatGPTAdapter.streamCompletion 事件翻译', () => {
   it('frame + done → content_delta 后迭代器自然结束', async () => {
     const fakeBridge = mkBridge({
+      hasConnection: () => true,
       request: makeRequestReturning([
         { kind: 'frame', event: 'delta', data: '{"p":"/message/content/parts/0","o":"append","v":"你好"}' },
         { kind: 'done' },
@@ -270,6 +325,7 @@ describe('ChatGPTAdapter.streamCompletion 事件翻译', () => {
 
   it('frame 在切通道后 → content_delta', async () => {
     const fakeBridge = mkBridge({
+      hasConnection: () => true,
       request: makeRequestReturning([
         // 先发 final_channel_token（adapter 不直接处理这个 kind——它由 stream.ts 在每个 frame 解释时切通道）
         { kind: 'frame', event: null, data: '{"type":"message_marker","marker":"final_channel_token","event":"first"}' },
@@ -284,6 +340,7 @@ describe('ChatGPTAdapter.streamCompletion 事件翻译', () => {
 
   it('error 帧 → stream_error 事件', async () => {
     const fakeBridge = mkBridge({
+      hasConnection: () => true,
       request: makeRequestReturning([
         { kind: 'frame', event: 'delta', data: '{"type":"error","content":"oops","finish_reason":"generation_err"}' },
         { kind: 'done' },
@@ -298,6 +355,7 @@ describe('ChatGPTAdapter.streamCompletion 事件翻译', () => {
 
   it('bridge 顶层 error（kind=error）→ 直接产 stream_error 事件', async () => {
     const fakeBridge = mkBridge({
+      hasConnection: () => true,
       request: makeRequestReturning([
         { kind: 'error', message: 'chatgpt tab gone' },
       ]),
@@ -309,6 +367,7 @@ describe('ChatGPTAdapter.streamCompletion 事件翻译', () => {
 
   it('stream-start 不产事件（consumer 不需要这个信号）', async () => {
     const fakeBridge = mkBridge({
+      hasConnection: () => true,
       request: makeRequestReturning([
         { kind: 'stream-start' },
         { kind: 'frame', event: 'delta', data: '{"p":"/message/content/parts/0","o":"append","v":"hi"}' },
@@ -324,6 +383,7 @@ describe('ChatGPTAdapter.streamCompletion 事件翻译', () => {
 
   it('conversation 事件：更新 session.webSessionId 为新 conversation_id', async () => {
     const fakeBridge = mkBridge({
+      hasConnection: () => true,
       request: makeRequestReturning([
         { kind: 'frame', event: 'delta', data: '{"p":"/message/content/parts/0","o":"append","v":"x"}' },
         { kind: 'conversation', conversationId: 'conv-new-123' },
