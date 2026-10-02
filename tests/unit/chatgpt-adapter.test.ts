@@ -10,7 +10,7 @@
  *   - v1 范围守卫（brief 明确：必须报错不能静默忽略）：tools / vision / search。
  *   - reasoning override 例外：接受但忽略（2026-10-02 修复 debug 页 ChatGPT 每次必拒的 bug）——
  *     是否思考由 ChatGPT 网页侧决定，adapter 无通道可拒绝，只能忽略。
- *   - bridge-client 行为：消息路由、queue 串行、超时、断线。
+ *   - bridge-client 行为：消息路由、queue 串行、超时、断线、导航交接（port 断开后由新 port 接管）。
  *
  * 设计决策（写下来备查）：
  *  - 测试只新建这一个文件（brief 约束）；bridge-client 与 adapter 紧耦合，bridge 的核心
@@ -20,7 +20,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createChatGPTAdapter, type ChatGPTBridge, type ChatGPTAdapterDeps } from '../../src/background/providers/chatgpt/adapter';
-import { createBridgeClient, type ChatGPTBridgeEvent, type ChatGPTPortLike } from '../../src/background/providers/chatgpt/bridge-client';
+import { createBridgeClient, REATTACH_TIMEOUT_MS, type ChatGPTBridgeEvent, type ChatGPTPortLike } from '../../src/background/providers/chatgpt/bridge-client';
 import type { ProviderCompletion, ProviderContext } from '../../src/background/providers/adapter';
 import type { Message } from '../../src/shared/api-types';
 
@@ -47,6 +47,18 @@ function mkPort(): FakePort {
     sent,
     deliver: (m: unknown) => { if (onMsg) onMsg(m); },
     disconnect: () => { if (onDis) onDis(); },
+  };
+}
+
+/**
+ * 已死但 onDisconnect 还没派发的 port：postMessage 立刻抛错（走 pumpQueue 的 catch 分支）。
+ * 对应「标签页正在导航、旧上下文已销毁」的窗口。
+ */
+function mkDeadPort(): ChatGPTPortLike {
+  return {
+    postMessage: () => { throw new Error('Attempting to use a disconnected port object'); },
+    onMessage: () => { /* 死 port 不会再来消息 */ },
+    onDisconnect: () => { /* 本用例只测 postMessage 抛错这条路径 */ },
   };
 }
 
@@ -617,19 +629,203 @@ describe('bridge-client', () => {
     await collectAll(it2);
   });
 
-  it('port 断开：在飞 request 立即产 error + 后续 request 拒绝（无连接）', async () => {
+  // 2026-10-04（fix/chatgpt-nav-port-handoff）：断线语义从「立即判死」改为「先等重新接管」。
+  // 本用例保留的是**真故障**那条路径（专属窗口被关、页面一直不恢复）：仍然报
+  // 'chatgpt tab disconnected'，只是时点由「立即」改为 REATTACH_TIMEOUT_MS 之后。
+  // 这是本次修复唯一动过期望值的既有断言（其余断言原样保留）。
+  it('port 断开且无人接管：REATTACH_TIMEOUT_MS 后产 error + 后续 request 拒绝（无连接）', async () => {
     const bc = createBridgeClient({ now: () => now });
     const port = mkPort();
     bc.registerPort(port.p);
     const iter = bc.request({ requestId: 'r1', text: 'hi', conversationId: null });
-    port.disconnect();
     const events: ChatGPTBridgeEvent[] = [];
-    for await (const e of iter) events.push(e);
+    const consuming = (async () => { for await (const e of iter) events.push(e); })();
+    port.disconnect();
+    // 窗口内不判死（不产事件、不结束）
+    await vi.advanceTimersByTimeAsync(REATTACH_TIMEOUT_MS - 1);
+    expect(events).toEqual([]);
+    // 窗口到期 → 仍是同一条错误文案
+    await vi.advanceTimersByTimeAsync(10);
+    await consuming;
     expect(events.some((e) => e.kind === 'error')).toBe(true);
+    expect((events[0] as { message: string }).message).toBe('chatgpt tab disconnected');
     // 后续 request 应抛 logged_out
     let err: unknown = null;
     try { for await (const _ of bc.request({ requestId: 'r2', text: 'x', conversationId: null })) void _; } catch (e) { err = e; }
     expect((err as Error).message).toMatch(/no chatgpt tab connected|logged_out/i);
+  });
+
+  // ===== 2026-10-04（fix/chatgpt-nav-port-handoff）：导航交接不是故障 =====
+  // 页面侧在 conversationId === null 且当前路径不是 '/'（标签页已被上一次请求带到 /c/<id>）时
+  // 会 location.assign('/')（chatgpt-bridge-main.ts 的 decideSendNavigation）——旧文档销毁 →
+  // content script 的 port 必然断开，而指令已存进 sessionStorage、新文档重注入后接着跑。
+  // 旧实现把这个交接当致命断线，且 port 已死、error 事件发不出去 → 「第一次请求成功后，之后
+  // 每次请求（新线程必触发导航）完全无响应」。以下用例锁定新语义：窗口内新 port 接管即续跑。
+
+  it('导航交接成功：老 port 断开 → 窗口内新 port 接管 → 请求正常完成且无 error 事件', async () => {
+    const bc = createBridgeClient({ now: () => now });
+    const oldPort = mkPort();
+    bc.registerPort(oldPort.p);
+    const iter = bc.request({ requestId: 'r1', text: 'hi', conversationId: null });
+    expect(oldPort.sent).toHaveLength(1);
+    // 页面侧同源导航：旧文档销毁，老 port 断开
+    oldPort.disconnect();
+    // 导航 + 重注入约 1-4 秒，远早于接管窗口到期
+    await vi.advanceTimersByTimeAsync(1_500);
+    const newPort = mkPort();
+    bc.registerPort(newPort.p);
+    // 新文档按 sessionStorage 里的 pendingSend 继续跑，回帧带同一个 requestId
+    newPort.deliver({ __deepApiChatGPT: true, kind: 'stream-start', requestId: 'r1' });
+    newPort.deliver({ __deepApiChatGPT: true, kind: 'conversation', requestId: 'r1', conversationId: 'conv-1' });
+    newPort.deliver({ __deepApiChatGPT: true, kind: 'frame', requestId: 'r1', event: 'delta', data: '{"v":1}' });
+    newPort.deliver({ __deepApiChatGPT: true, kind: 'done', requestId: 'r1' });
+    const events: ChatGPTBridgeEvent[] = [];
+    for await (const e of iter) {
+      events.push(e);
+      if (e.kind === 'done' || e.kind === 'error') break;   // 同生产 consumer：break → return() 释放 active
+    }
+    expect(events.map((e) => e.kind)).toEqual(['stream-start', 'conversation', 'frame', 'done']);
+    // 推进远超接管窗口：不得再有残留定时器产 error / 泄漏
+    await vi.advanceTimersByTimeAsync(REATTACH_TIMEOUT_MS * 3);
+    expect(events.some((e) => e.kind === 'error')).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('接管后新 port 的帧按 requestId 流入同一 active 请求；下一个请求也发到新 port', async () => {
+    const bc = createBridgeClient({ now: () => now });
+    const oldPort = mkPort();
+    bc.registerPort(oldPort.p);
+    const it1 = bc.request({ requestId: 'r1', text: 'A', conversationId: null });
+    oldPort.disconnect();
+    const newPort = mkPort();
+    bc.registerPort(newPort.p);
+    newPort.deliver({ __deepApiChatGPT: true, kind: 'frame', requestId: 'r1', event: 'delta', data: '{"v":"from-new-port"}' });
+    newPort.deliver({ __deepApiChatGPT: true, kind: 'done', requestId: 'r1' });
+    const events1: ChatGPTBridgeEvent[] = [];
+    for await (const e of it1) {
+      events1.push(e);
+      if (e.kind === 'done' || e.kind === 'error') break;   // 同生产 consumer：break → return() 释放 active
+    }
+    expect(events1.map((e) => e.kind)).toEqual(['frame', 'done']);
+    expect((events1[0] as { data: string }).data).toBe('{"v":"from-new-port"}');
+    // active.port 已指向新 port：后续请求的 send 不会写到那个死掉的老 port
+    const it2 = bc.request({ requestId: 'r2', text: 'B', conversationId: null });
+    expect(oldPort.sent).toHaveLength(1);   // 老 port 只有 r1（且此时已断开）
+    expect(newPort.sent).toHaveLength(1);
+    expect(newPort.sent[0]).toMatchObject({ kind: 'send', requestId: 'r2' });
+    newPort.deliver({ __deepApiChatGPT: true, kind: 'done', requestId: 'r2' });
+    await collectAll(it2);
+  });
+
+  it('接管后别的 requestId 的帧不得混入（requestId 过滤在交接后仍然生效）', async () => {
+    const bc = createBridgeClient({ now: () => now });
+    const oldPort = mkPort();
+    bc.registerPort(oldPort.p);
+    const it1 = bc.request({ requestId: 'r1', text: 'A', conversationId: null });
+    oldPort.disconnect();
+    const newPort = mkPort();
+    bc.registerPort(newPort.p);
+    // 老请求的残留回包（tap 仍在读）不得进 r1
+    newPort.deliver({ __deepApiChatGPT: true, kind: 'frame', requestId: 'r-stale', event: 'delta', data: '{"v":"STALE"}' });
+    newPort.deliver({ __deepApiChatGPT: true, kind: 'done', requestId: 'r-stale' });
+    // 自己的帧必须进
+    newPort.deliver({ __deepApiChatGPT: true, kind: 'frame', requestId: 'r1', event: 'delta', data: '{"v":"mine"}' });
+    newPort.deliver({ __deepApiChatGPT: true, kind: 'done', requestId: 'r1' });
+    const events: ChatGPTBridgeEvent[] = [];
+    for await (const e of it1) {
+      events.push(e);
+      if (e.kind === 'done' || e.kind === 'error') break;   // 同生产 consumer：break → return() 释放 active
+    }
+    expect(events.map((e) => e.kind)).toEqual(['frame', 'done']);
+    expect((events[0] as { data: string }).data).toBe('{"v":"mine"}');
+  });
+
+  it('send 时 postMessage 抛错：同样走交接等待（不是立即判死），新 port 接管后正常完成', async () => {
+    const bc = createBridgeClient({ now: () => now });
+    bc.registerPort(mkDeadPort());
+    const iter = bc.request({ requestId: 'r1', text: 'hi', conversationId: null });   // 此处 postMessage 抛错
+    const events: ChatGPTBridgeEvent[] = [];
+    const consuming = (async () => {
+      for await (const e of iter) {
+        events.push(e);
+        if (e.kind === 'done' || e.kind === 'error') break;   // 同生产 consumer：break → return() 释放 active
+      }
+    })();
+    // 窗口内没有 error（旧实现在 postMessage 抛错那一瞬就产 'chatgpt tab disconnected'）
+    await vi.advanceTimersByTimeAsync(REATTACH_TIMEOUT_MS - 1);
+    expect(events).toEqual([]);
+    const fresh = mkPort();
+    bc.registerPort(fresh.p);
+    fresh.deliver({ __deepApiChatGPT: true, kind: 'done', requestId: 'r1' });
+    await consuming;
+    expect(events.map((e) => e.kind)).toEqual(['done']);
+    expect(vi.getTimerCount()).toBe(0);   // 接管定时器已清、总超时已随 done 释放
+  });
+
+  it('send 时 postMessage 抛错且无人接管：REATTACH_TIMEOUT_MS 后仍产 error（不永久 hang）', async () => {
+    const bc = createBridgeClient({ now: () => now });
+    bc.registerPort(mkDeadPort());
+    const iter = bc.request({ requestId: 'r1', text: 'hi', conversationId: null });
+    const events: ChatGPTBridgeEvent[] = [];
+    const consuming = (async () => { for await (const e of iter) events.push(e); })();
+    await vi.advanceTimersByTimeAsync(REATTACH_TIMEOUT_MS + 1);
+    await consuming;
+    expect(events.map((e) => e.kind)).toEqual(['error']);
+    expect((events[0] as { message: string }).message).toBe('chatgpt tab disconnected');
+  });
+
+  it('cancel（iter.return）清掉 reattachTimer：窗口过后不产事件，也不打扰下一个请求', async () => {
+    const bc = createBridgeClient({ now: () => now });
+    const oldPort = mkPort();
+    bc.registerPort(oldPort.p);
+    const it1 = bc.request({ requestId: 'r1', text: 'A', conversationId: null });
+    oldPort.disconnect();   // 进入「等待重新接管」
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(it1.return).toBeDefined();
+    await it1.return?.();
+    // 总超时 + 接管定时器都必须清掉（否则窗口到期时会误判/泄漏）
+    expect(vi.getTimerCount()).toBe(0);
+    // 推进远超窗口：没有残留定时器误产事件，后续请求照常
+    const newPort = mkPort();
+    bc.registerPort(newPort.p);
+    const events: ChatGPTBridgeEvent[] = [];
+    const it2 = bc.request({ requestId: 'r2', text: 'B', conversationId: null });
+    await vi.advanceTimersByTimeAsync(REATTACH_TIMEOUT_MS * 3);
+    newPort.deliver({ __deepApiChatGPT: true, kind: 'done', requestId: 'r2' });
+    for await (const e of it2) events.push(e);
+    expect(events.map((e) => e.kind)).toEqual(['done']);
+  });
+
+  it('已取消的请求不会被接管逻辑复活：迟到帧直接丢，也不重新起定时器', async () => {
+    const bc = createBridgeClient({ now: () => now });
+    const oldPort = mkPort();
+    bc.registerPort(oldPort.p);
+    const it1 = bc.request({ requestId: 'r1', text: 'A', conversationId: null });
+    oldPort.disconnect();
+    await vi.advanceTimersByTimeAsync(500);
+    await it1.return?.();
+    expect(vi.getTimerCount()).toBe(0);
+    const newPort = mkPort();
+    bc.registerPort(newPort.p);
+    // 已取消的 r1 的迟到帧：active 已空 → 直接丢（不会被「重新接管」捡起来）
+    newPort.deliver({ __deepApiChatGPT: true, kind: 'frame', requestId: 'r1', event: 'delta', data: '{"v":"after-cancel"}' });
+    newPort.deliver({ __deepApiChatGPT: true, kind: 'done', requestId: 'r1' });
+    expect(vi.getTimerCount()).toBe(0);   // 没有为死去的 r1 重新起定时器
+    // 后续请求照常，且不携带 r1 的残帧
+    const it2 = bc.request({ requestId: 'r2', text: 'B', conversationId: null });
+    newPort.deliver({ __deepApiChatGPT: true, kind: 'done', requestId: 'r2' });
+    const events: ChatGPTBridgeEvent[] = [];
+    for await (const e of it2) events.push(e);
+    expect(events.map((e) => e.kind)).toEqual(['done']);
+  });
+
+  it('没有在飞请求时的 port 断开：行为不变（只摘掉 port，不产事件、不留定时器）', async () => {
+    const bc = createBridgeClient({ now: () => now });
+    const port = mkPort();
+    bc.registerPort(port.p);
+    port.disconnect();
+    expect(bc.hasConnection()).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('conversation 重复上报不丢消息：同一 requestId 来两次 conversation → 都产出 + 都携同 id（bridge 不实现去重，consumer 自己处理幂等）', async () => {

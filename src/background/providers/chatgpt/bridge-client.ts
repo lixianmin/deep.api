@@ -7,7 +7,9 @@
  *     写到当前活跃 port，等待 MAIN world 流式回包并按 kind 产出事件。
  *  3. 串行：一次只有一个 in-flight request，其它在内部 queue 等待。
  *  4. 超时：默认 120s，命中后产 error 事件 + 自动从 active 退槽（pending 表立即释放）。
- *  5. 断线：port.onDisconnect 触发 → 当前 active request 产 error 结束；port 从池中移除。
+ *  5. 断线：port.onDisconnect 触发 → 当前 active request 转入「等待重新接管」窗口（REATTACH_TIMEOUT_MS）；
+ *     窗口内没有新 port 接管才产 'chatgpt tab disconnected' 结束（见 REATTACH_TIMEOUT_MS 注释：
+ *     页面侧导航交接会主动断 port，那不是故障）；port 从池中移除。
  *
  * 配对策略（brief 与 Ruling 4）：
  *   conversation_id 优先 → 请求 FIFO 次之（**不**靠 requestId 配对）。
@@ -23,6 +25,23 @@
  *     短超时（progress 内置）由 adapter 层处理（用 REQUEST_WATCHDOG_MS）；这里只兜底「永远不发 done」。
  */
 import type { ChatGPTSendMsg } from '../../../shared/chatgpt-protocol';
+
+/**
+ * 「等待重新接管」窗口（ms）：active 请求失去 port 后留给页面重新连上来的时间。
+ *
+ * 为什么必须有这个窗口：页面侧在 conversationId === null 且当前路径不是 '/'（例如标签页已被上一次
+ * 请求带到 /c/<id>）时会 `location.assign('/')`（chatgpt-bridge-main.ts 的 decideSendNavigation），
+ * 这是**设计的一部分**——旧文档销毁前已把指令存进 sessionStorage，新文档重注入后自行接着跑
+ * （见该文件头「跨导航恢复」）。旧文档被销毁 → content script 的 port 必然断开。所以这里的断开
+ * 是**正常交接信号**，不是故障；旧实现把它当致命断线，且 port 已死、error 事件根本发不出去，
+ * 表现为「第一次请求成功后，之后每次请求（新线程必触发导航）都毫无响应」。
+ *
+ * 为什么取 20000：一次交接要走完「导航 → 新文档加载 → content script 注入 → 取回 sessionStorage
+ * → 等 composer 水合」，实测 1-4 秒，20s 与 chatgpt-owned-tab 的 readyTimeoutMs 同量级。
+ * 为什么不能再大：它必须**显著小于**请求总超时（默认 120s），否则「用户真把专属窗口关了」这类
+ * 真故障会被拖到总超时才报错，用户白等两分钟。
+ */
+export const REATTACH_TIMEOUT_MS = 20_000;
 
 export interface ChatGPTPortLike {
   postMessage(m: unknown): void;
@@ -85,6 +104,8 @@ interface PendingRequest {
   wake: (() => void) | null;
   /** 超时定时器句柄。 */
   timer: ReturnType<typeof setTimeout> | null;
+  /** 「等待重新接管」定时器句柄（仅 port 断开后存在；见 REATTACH_TIMEOUT_MS）。 */
+  reattachTimer: ReturnType<typeof setTimeout> | null;
   cancelled: boolean;
 }
 
@@ -148,14 +169,48 @@ export function createBridgeClient(deps: BridgeClientDeps): BridgeClient {
     return null;
   }
 
+  /** 清掉一个 pending 自己的全部定时器（总超时 + 等待接管）。收口点，避免漏清导致泄漏 / 误报。 */
+  function clearTimers(p: PendingRequest): void {
+    if (p.timer) { clearTimeout(p.timer); p.timer = null; }
+    if (p.reattachTimer) { clearTimeout(p.reattachTimer); p.reattachTimer = null; }
+  }
+
   /** 把 active 推到下一阶段（清掉 timer、置 null）；若 queue 非空则启动下一个。 */
   function releaseActive(): void {
-    if (active && active.timer) {
-      clearTimeout(active.timer);
-      active.timer = null;
-    }
+    if (active) clearTimers(active);
     active = null;
     pumpQueue();
+  }
+
+  /**
+   * active 请求与它的 port 失去联系 → 转入「等待重新接管」，**不**判死。
+   *
+   * 2026-10-04（fix/chatgpt-nav-port-handoff）：旧实现在这里立刻产 'chatgpt tab disconnected'
+   * 并收尾，而 port 断开恰恰是页面侧**故意**做的导航交接（见 REATTACH_TIMEOUT_MS 注释）。
+   * 现在：置空 port（不再往死 port 写）、保留总超时 timer（「永不回包」的兜底不撤）、
+   * 另起 reattachTimer；窗口内有新 port 注册就由 registerPort 重新接管。
+   * 注意**不清** buffer / 不 releaseActive：请求还在飞，只是暂时没有传输通道。
+   */
+  function detachActivePort(): void {
+    if (active === null || active.port === null) return;   // 没有在飞 / 已经处于等待接管态
+    active.port = null;
+    if (active.reattachTimer) clearTimeout(active.reattachTimer);
+    active.reattachTimer = setTimeout(() => {
+      if (active === null || active.done) return;
+      active.reattachTimer = null;
+      if (active.port !== null) return;   // 已被新 port 接管（registerPort 会清掉本 timer，这里再兜一层）
+      // 窗口内没人接管 → 真故障（专属窗口被关 / 页面一直不恢复）。文案与释放路径保持与旧行为一致。
+      active.done = true;
+      active.error = 'chatgpt tab disconnected';
+      active.buffer.push({ kind: 'error', message: active.error });
+      if (active.wake) { const w = active.wake; active.wake = null; w(); }
+      queueMicrotask(() => {
+        if (active !== null && active.done && active.buffer.length === 0) {
+          active = null;
+          pumpQueue();
+        }
+      });
+    }, REATTACH_TIMEOUT_MS);
   }
 
   function pumpQueue(): void {
@@ -194,12 +249,9 @@ export function createBridgeClient(deps: BridgeClientDeps): BridgeClient {
       try {
         port.postMessage(msg);
       } catch {
-        // postMessage 抛错（port 已死但 onDisconnect 还没触发）—— 走断线路径
-        next.done = true;
-        next.error = 'chatgpt tab disconnected';
-        next.buffer.push({ kind: 'error', message: next.error });
-        if (next.wake) { const w = next.wake; next.wake = null; w(); }
-        releaseActive();
+        // postMessage 抛错（port 已死但 onDisconnect 还没触发）—— 与 onDisconnect 同一条路径：
+        // 也可能是交接（旧文档刚销毁），不判死，等新 port 接管。
+        detachActivePort();
       }
       return;
     }
@@ -271,21 +323,18 @@ export function createBridgeClient(deps: BridgeClientDeps): BridgeClient {
       const v = ports.get(port);
       if (v) v.alive = false;
       ports.delete(port);
-      // 如果断的是当前 active 用的 port → 立刻产 error
-      if (active !== null && active.port === port) {
-        active.done = true;
-        active.error = 'chatgpt tab disconnected';
-        active.buffer.push({ kind: 'error', message: active.error });
-        if (active.timer) { clearTimeout(active.timer); active.timer = null; }
-        if (active.wake) { const w = active.wake; active.wake = null; w(); }
-        queueMicrotask(() => {
-          if (active !== null && active.done && active.buffer.length === 0) {
-            active = null;
-            pumpQueue();
-          }
-        });
-      }
+      // 断的是当前 active 用的 port → 转入等待接管（不判死；没有在飞请求时行为不变，只是删 port）
+      if (active !== null && active.port === port) detachActivePort();
     });
+    // 新 port 注册时，若有一个正停在「等待重新接管」的 active 请求 → 交给它接管。
+    // 这里**不重发** send：页面侧已用 sessionStorage 的 pendingSend 接住同一个请求，新文档的
+    // content script 会继续推进并回帧；帧按 requestId 匹配路由（dispatchIncoming 不看 port），
+    // 所以新 port 的帧本来就能流进同一个 active 请求。
+    if (active !== null && active.port === null && active.reattachTimer !== null) {
+      active.port = port;
+      clearTimeout(active.reattachTimer);
+      active.reattachTimer = null;
+    }
     // 若当前有等在 queue 里的请求，立即尝试 pump
     if (active === null) pumpQueue();
   }
@@ -315,7 +364,7 @@ export function createBridgeClient(deps: BridgeClientDeps): BridgeClient {
       },
       async return(): Promise<IteratorResult<ChatGPTBridgeEvent>> {
         p.cancelled = true;
-        if (p.timer) { clearTimeout(p.timer); p.timer = null; }
+        clearTimers(p);   // cancel 也要连 reattachTimer 一起清：已取消的请求不得被接管逻辑复活
         if (p.wake) { const w = p.wake; p.wake = null; w(); }
         // 如果是 active 的被取消 → 释放 + pump 下一个
         if (active === p) {
@@ -326,7 +375,7 @@ export function createBridgeClient(deps: BridgeClientDeps): BridgeClient {
       },
       async throw(e: unknown): Promise<IteratorResult<ChatGPTBridgeEvent>> {
         p.cancelled = true;
-        if (p.timer) { clearTimeout(p.timer); p.timer = null; }
+        clearTimers(p);   // 同 return()：清理总超时 + 等待接管定时器
         if (p.wake) { const w = p.wake; p.wake = null; w(); }
         if (active === p) {
           active = null;
@@ -354,6 +403,7 @@ export function createBridgeClient(deps: BridgeClientDeps): BridgeClient {
       error: null,
       wake: null,
       timer: null,
+      reattachTimer: null,
       cancelled: false,
     };
     queue.push(p);
