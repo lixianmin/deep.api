@@ -5,7 +5,9 @@
  *   - adapter 契约：models 列出 `gpt-5-5` 等；resolveModel 接受 `gpt-*`/auto、拒绝未知；
  *     streamCompletion 在收到 `frame` 后产出对应事件、收到 `done` 后结束；
  *     getAuthStatus 无桥接时返回 `logged_out`。
- *   - v1 范围守卫（brief 明确：必须报错不能静默忽略）：tools / vision / reasoning / search。
+ *   - v1 范围守卫（brief 明确：必须报错不能静默忽略）：tools / vision / search。
+ *   - reasoning override 例外：接受但忽略（2026-10-02 修复 debug 页 ChatGPT 每次必拒的 bug）——
+ *     是否思考由 ChatGPT 网页侧决定，adapter 无通道可拒绝，只能忽略。
  *   - bridge-client 行为：消息路由、queue 串行、超时、断线。
  *
  * 设计决策（写下来备查）：
@@ -176,13 +178,42 @@ describe('ChatGPTAdapter.streamCompletion v1 范围守卫', () => {
     expect((err as { error: { error: { message: string } } }).error.error.message).toMatch(/v1.*不支持|不支持.*v1|image|vision/i);
   });
 
-  it('overrides.reasoning 非 undefined → 抛 400（v1 不支持自定义 reasoning 等级）', async () => {
-    const a = createChatGPTAdapter(mkDeps());
+  // 2026-10-02（fix/chatgpt-v1-guard-reasoning）：这条断言的方向从「抛 400」改成「不抛错」。
+  // 原守卫让 debug 页选 ChatGPT 模型时每次都失败（reasoning 下拉默认 high 且每次都带上）。
+  // 改为接受但忽略：思考与否由 ChatGPT 网页侧自主决定，adapter 根本没有可拒绝的通道。
+  it('overrides.reasoning 非 undefined → 不抛错（接受但忽略），正常走完流', async () => {
+    let requestCalled = false;
+    const fakeBridge: ChatGPTBridge = {
+      hasConnection: () => true,
+      request: (() => {
+        requestCalled = true;
+        return makeRequestReturning([
+          { kind: 'frame', event: null, data: '{"type":"message_marker","marker":"final_channel_token","event":"first"}' },
+          { kind: 'frame', event: 'delta', data: '{"p":"/message/content/parts/0","o":"append","v":"x"}' },
+          { kind: 'done' },
+        ]);
+      })(),
+    };
+    const a = createChatGPTAdapter(mkDeps({ bridge: fakeBridge }));
     const req = mkReq({ overrides: { reasoning: 'high' } });
-    let err: unknown = null;
-    try { for await (const _ of a.streamCompletion(mkCtx(), req)) void _; } catch (e) { err = e; }
-    expect(err).toMatchObject({ status: 400, error: { error: { code: 'invalid_request_error' } } });
-    expect((err as { error: { error: { message: string } } }).error.error.message).toMatch(/v1.*不支持|不支持.*v1|reasoning|reason/i);
+    const events = await toArray(a.streamCompletion(mkCtx(), req));
+    expect(requestCalled).toBe(true);
+    expect(events.some((e) => e.kind === 'content_delta')).toBe(true);
+  });
+
+  it('overrides.reasoning=\'off\' → 同样不抛错（接受但忽略）', async () => {
+    let requestCalled = false;
+    const fakeBridge: ChatGPTBridge = {
+      hasConnection: () => true,
+      request: (() => {
+        requestCalled = true;
+        return makeRequestReturning([{ kind: 'done' }]);
+      })(),
+    };
+    const a = createChatGPTAdapter(mkDeps({ bridge: fakeBridge }));
+    const req = mkReq({ overrides: { reasoning: 'off' } });
+    await toArray(a.streamCompletion(mkCtx(), req));
+    expect(requestCalled).toBe(true);
   });
 
   it('overrides.search=true → 抛 400（v1 不支持搜索）', async () => {

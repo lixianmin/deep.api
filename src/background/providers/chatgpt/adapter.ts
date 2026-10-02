@@ -5,10 +5,16 @@
  * 钩子 → chatgpt.com 页面 fetch → 流式 SSE → 旁路 tap → MAIN world postMessage → ISOLATED
  * relay → ChatGPTBridge → adapter 把 frame 喂给 ChatGPT stream 解释器 → ProviderStreamEvent。
  *
- * v1 范围（brief 铁律）：不支持 tool_calls / vision / reasoning / search。
+ * v1 范围（brief 铁律）：不支持 tool_calls / vision / search。
  * 收到这些参数必须抛 400 invalid_request_error 并说明「v1 不支持」——不能静默忽略
  * （静默会让 spice 等调用方误以为能力存在）。守卫位置在 streamCompletion 入口，过 gate
  * 失败即抛；bridge 不发。
+ *
+ * 例外：overrides.reasoning 接受但忽略（2026-10-02 fix/chatgpt-v1-guard-reasoning）。
+ * 是否思考由 ChatGPT 网页侧自主决定，页面桥接没有任何可关闭思考流的通道——抛错并不能让
+ * 调用方拿到「不思考」，只会让 ChatGPT 完全不可用（debug 页 reasoning 下拉默认 high，
+ * 结果每次请求都失败）。tools/vision/search 仍拒：那是真实能力缺失，静默会让调用方
+ * 以为能力存在而做出错误决策。
  *
  * 设计取舍（写下来备查）：
  *  - Bridge 用 PortLike 抽象 + ChatGPTBridge 接口隔离：adapter 只关心「桥事件序列」，
@@ -66,8 +72,9 @@ function v1GuardError(message: string): BridgeError {
   );
 }
 
-/** v1 范围守卫：tools / vision / reasoning / search 任意一个出现即抛 400。
- *  不能让请求走到 bridge 才失败——bridge 不会拒绝，会傻傻把 send 发出去再等 done。 */
+/** v1 范围守卫：tools / vision / search 任意一个出现即抛 400。
+ *  不能让请求走到 bridge 才失败——bridge 不会拒绝，会傻傻把 send 发出去再等 done。
+ *  reasoning 不在其中：接受但忽略（理由见文件头注释）。 */
 function assertV1Scope(req: ProviderCompletion): void {
   if (req.tools !== undefined && req.tools.length > 0) {
     throw v1GuardError(`tools（function calling）暂未实现，请移除 tools 参数或改用 deepseek provider`);
@@ -83,10 +90,10 @@ function assertV1Scope(req: ProviderCompletion): void {
       }
     }
   }
-  // overrides.reasoning 非 undefined → 拒（v1 不支持自定义 reasoning 等级，ChGPT 网页自有流量通道）
-  if (req.overrides?.reasoning !== undefined) {
-    throw v1GuardError(`reasoning override 暂未实现（v1 由 ChatGPT 网页侧自主决定思考流，请移除 reasoning 字段）`);
-  }
+  // overrides.reasoning：接受但忽略（2026-10-02）。思考流由 ChatGPT 网页侧自主决定，桥接
+  // 没有透传/关闭通道；抛错不能让调用方得到「不思考」，只会让 ChatGPT 在默认带 reasoning 的
+  // 调用方（如 debug 页）完全不可用。adapter 层没有 LogEntry.warnings 之类的通道（该字段由
+  // router 写），故不新造日志系统，只在此注释说明忽略行为。
   // overrides.search=true → 拒（v1 不支持搜索开关）
   if (req.overrides?.search === true) {
     throw v1GuardError(`search override 暂未实现（v1 不暴露搜索开关）`);

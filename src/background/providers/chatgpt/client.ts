@@ -29,7 +29,7 @@ export function resolveModel(modelId: string): ResolvedModel | null {
     modelId,
     variant: modelId as ModelVariant,
     supportsImages: false,   // v1：不支持图片（adapter 抛 400 拒绝 vision 请求）
-    thinking: false,         // v1：不内置 thinking 开关（reasoning 字段也被 adapter 拒绝）
+    thinking: false,         // v1：不内置 thinking 开关（reasoning 字段被 adapter 接受但忽略）
     // limitChars 取一个远大于实际的数——v1 不在 SW 端做长度校验（实际由 chatgpt.com composer 拦截）；
     // 这里给个保守值避免 router 的 transcript too long 检查误触发。
     limitChars: Number.MAX_SAFE_INTEGER,
