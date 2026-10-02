@@ -155,6 +155,14 @@ const chatgptOwnedTab = createOwnedChatGPTTab({
   },
   hasBridgeConnection: () => chatgptBridge.hasConnection(),
   adoptOwnedTab: (tabId) => { chatgptBridge.setOwnedTab(tabId); },
+  // 2026-10-05（chore/bump-0-2-18-heal-stale-tab）：扩展重载/更新后，专属 tab 里旧的 relay 上下文
+  // 已销毁且终态停机（永不重连），必须重载该 tab 让 content script 重新注入，否则这个窗口永久瘫痪。
+  // best-effort：tab 恰好被用户关掉时 chrome.tabs.reload 会 reject，吞掉即可——后面的等待会自己超时。
+  reloadTab: async (tabId) => {
+    try {
+      await chrome.tabs.reload(tabId);
+    } catch { /* tab 已关闭：无需重载 */ }
+  },
   now: () => Date.now(),
   sleep: (ms) => new Promise<void>((r) => setTimeout(r, ms)),
   log: (msg) => console.log(msg),

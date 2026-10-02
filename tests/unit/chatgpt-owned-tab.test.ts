@@ -7,8 +7,11 @@
  *
  * 覆盖：
  *  - ensureOwnedTab：复用 storage 记录的 tab、用户关掉后重建、tab 被跳到别的站点后重建
- *    （防浏览器复用 tabId 劫持用户标签页）、新建走独立窗口且 focused:false、不抢焦点。
+ *    （防浏览器复用 tabId 劫持用户标签页）、新建走独立窗口且 focused:false、不抢焦点；
+ *    返回值区分「本次新建」与「复用已存在」（自愈策略依赖它）。
  *  - ensureReady：adopt 归属 → 轮询等 relay 连上 → 超时不抛（由 adapter 转 stream_error）。
+ *  - ensureReady 自愈：扩展重载后旧 relay 终态停机，复用的 tab 宽限内连不上就重载一次
+ *    （重新注入 content script）；新开的 tab 不重载；健康的（宽限内自愈）tab 不被误伤。
  */
 import { describe, it, expect } from 'vitest';
 import { createOwnedChatGPTTab, type OwnedChatGPTTabDeps } from '../../src/background/chatgpt-owned-tab';
@@ -18,6 +21,7 @@ interface Harness {
   created: Array<{ url: string; focused: boolean }>;
   written: number[];
   adopted: Array<number | null>;
+  reloaded: number[];
   sleeps: number[];
   logs: string[];
 }
@@ -27,6 +31,7 @@ function mkHarness(over: Partial<OwnedChatGPTTabDeps> = {}): Harness {
   const created: Array<{ url: string; focused: boolean }> = [];
   const written: number[] = [];
   const adopted: Array<number | null> = [];
+  const reloaded: number[] = [];
   const sleeps: number[] = [];
   const logs: string[] = [];
   let t = 0;
@@ -38,13 +43,14 @@ function mkHarness(over: Partial<OwnedChatGPTTabDeps> = {}): Harness {
     createWindow: async (createData) => { created.push(createData); return nextTabId++; },
     hasBridgeConnection: () => false,
     adoptOwnedTab: (id) => { adopted.push(id); },
+    reloadTab: async (id) => { reloaded.push(id); },
     now: () => t,
     sleep: async (ms) => { sleeps.push(ms); t += ms; },
     readyTimeoutMs: 20_000,
     log: (msg) => { logs.push(msg); },
     ...over,
   };
-  return { deps, created, written, adopted, sleeps, logs };
+  return { deps, created, written, adopted, reloaded, sleeps, logs };
 }
 
 describe('ensureOwnedTab（复用自己的标签页，不动用户的）', () => {
@@ -53,16 +59,18 @@ describe('ensureOwnedTab（复用自己的标签页，不动用户的）', () =>
       readOwnedTabId: async () => 5,
       getTab: async (id) => (id === 5 ? { id: 5, url: 'https://chatgpt.com/c/abc-123' } : null),
     });
-    const tabId = await createOwnedChatGPTTab(h.deps).ensureOwnedTab();
+    const { tabId, created } = await createOwnedChatGPTTab(h.deps).ensureOwnedTab();
     expect(tabId).toBe(5);
+    expect(created).toBe(false);   // 复用：ensureReady 会走「探活 + 必要时重载」路径
     expect(h.created).toHaveLength(0);
     expect(h.written).toHaveLength(0);
   });
 
   it('记录的 tab 已被用户关掉（getTab → null）→ 新开一个并写回 storage', async () => {
     const h = mkHarness({ readOwnedTabId: async () => 5, getTab: async () => null });
-    const tabId = await createOwnedChatGPTTab(h.deps).ensureOwnedTab();
+    const { tabId, created } = await createOwnedChatGPTTab(h.deps).ensureOwnedTab();
     expect(tabId).toBe(100);
+    expect(created).toBe(true);   // 本次新建：ensureReady 只给完整等待，不重载
     expect(h.written).toEqual([100]);
   });
 
@@ -71,15 +79,17 @@ describe('ensureOwnedTab（复用自己的标签页，不动用户的）', () =>
       readOwnedTabId: async () => 5,
       getTab: async () => ({ id: 5, url: 'https://news.example.com/' }),
     });
-    const tabId = await createOwnedChatGPTTab(h.deps).ensureOwnedTab();
+    const { tabId, created } = await createOwnedChatGPTTab(h.deps).ensureOwnedTab();
     expect(tabId).toBe(100);
+    expect(created).toBe(true);
     expect(h.written).toEqual([100]);
   });
 
   it('首次使用（storage 无记录）→ 新开独立窗口、focused:false（不抢用户焦点）', async () => {
     const h = mkHarness();
-    const tabId = await createOwnedChatGPTTab(h.deps).ensureOwnedTab();
+    const { tabId, created } = await createOwnedChatGPTTab(h.deps).ensureOwnedTab();
     expect(tabId).toBe(100);
+    expect(created).toBe(true);
     expect(h.created).toEqual([{ url: 'https://chatgpt.com/', focused: false }]);
   });
 
@@ -120,6 +130,8 @@ describe('ensureReady（先确保专属 tab 就绪，再让 adapter 判连接）
   });
 
   it('relay 一直没连上 → 到点返回（不抛），留日志；由 adapter 决定给用户什么文案', async () => {
+    // 注：复用的 tab 现在会先走短宽限探活 → reload（本 harness 记账）→ 再等 readyTimeoutMs。
+    // 断言不变：仍恰好一条日志、仍含 relay、不抛。重载属自愈动作，不额外记日志（怕刷屏）。
     const h = mkHarness({
       readOwnedTabId: async () => 5,
       getTab: async () => ({ id: 5, url: 'https://chatgpt.com/' }),
@@ -128,5 +140,66 @@ describe('ensureReady（先确保专属 tab 就绪，再让 adapter 判连接）
     await createOwnedChatGPTTab(h.deps).ensureReady();
     expect(h.logs.length).toBe(1);
     expect(h.logs[0]).toMatch(/relay/i);
+  });
+});
+
+// 2026-10-05（chore/bump-0-2-18-heal-stale-tab）：扩展每次重载/更新都会让专属 tab 里旧的 relay
+// 上下文被销毁并终态停机（永不重连），那个窗口就永久瘫痪。修法：复用已存在的 tab 时先探活，
+// 宽限内连不上就重载一次（content script 重新注入 → relay 恢复健康）。
+describe('ensureReady 自愈（扩展重载后被遗弃的专属 tab）', () => {
+  it('复用 tab + relay 一直不连 → 宽限后 reload 一次，重载后连上就 resolve', async () => {
+    let connected = false;
+    let reloadedAfterMs = 0;
+    const h = mkHarness({
+      readOwnedTabId: async () => 5,
+      getTab: async () => ({ id: 5, url: 'https://chatgpt.com/' }),
+      hasBridgeConnection: () => connected,
+      // 重载前先记下已等多久：虚拟时钟只靠 sleep 推进，累加即耗时。
+      reloadTab: async (id) => {
+        h.reloaded.push(id);
+        reloadedAfterMs = h.sleeps.reduce((a, b) => a + b, 0);
+        connected = true;
+      },
+    });
+    await createOwnedChatGPTTab(h.deps).ensureReady();
+    expect(h.reloaded).toEqual([5]);
+    // 重载前只等了一个「短宽限」：够健康 relay 重连一次退避（1s 起），远小于 readyTimeoutMs 的 20s。
+    expect(reloadedAfterMs).toBeGreaterThanOrEqual(1_000);
+    expect(reloadedAfterMs).toBeLessThan(20_000);
+    expect(h.logs).toHaveLength(0);   // 自愈成功不算异常
+  });
+
+  it('复用 tab + 宽限内 relay 自行重连 → 不 reload（健康标签页不许被误伤）', async () => {
+    let polls = 0;
+    const h = mkHarness({
+      readOwnedTabId: async () => 5,
+      getTab: async () => ({ id: 5, url: 'https://chatgpt.com/' }),
+      // 第 1 次是快路径探测，第 2 次轮询仍假，第 3 次（仍在宽限内）连上
+      hasBridgeConnection: () => { polls++; return polls >= 3; },
+    });
+    await createOwnedChatGPTTab(h.deps).ensureReady();
+    expect(h.reloaded).toEqual([]);
+    expect(h.logs).toHaveLength(0);
+  });
+
+  it('新建 tab + relay 一直不连 → 不 reload，按 readyTimeoutMs 等满再返回', async () => {
+    const h = mkHarness({ readOwnedTabId: async () => null, readyTimeoutMs: 1_000 });
+    await createOwnedChatGPTTab(h.deps).ensureReady();
+    expect(h.reloaded).toEqual([]);   // 全新页面连不上另有原因，重载只是白等
+    expect(h.sleeps.reduce((a, b) => a + b, 0)).toBe(1_000);
+    const relayLogs = h.logs.filter((m) => /relay/i.test(m));   // 另有「created owned chatgpt tab」一条
+    expect(relayLogs).toHaveLength(1);
+    expect(relayLogs[0]).not.toMatch(/after reload/);   // 没重载，日志不得声称重载过
+  });
+
+  it('一开始就连上 → 立即返回：不等待、不 reload（复用路径同样不探活）', async () => {
+    const h = mkHarness({
+      readOwnedTabId: async () => 5,
+      getTab: async () => ({ id: 5, url: 'https://chatgpt.com/' }),
+      hasBridgeConnection: () => true,
+    });
+    await createOwnedChatGPTTab(h.deps).ensureReady();
+    expect(h.sleeps).toHaveLength(0);
+    expect(h.reloaded).toEqual([]);
   });
 });
