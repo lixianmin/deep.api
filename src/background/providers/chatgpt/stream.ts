@@ -45,6 +45,16 @@ const CITE_END = '\uE201';
 /** 成对标记（\uE200…\uE201，含中间的分隔符 U+E202 与来源名）。非贪婪：连续多个标记逐个匹配。 */
 const CITE_MARKER_RE = /\uE200[\s\S]*?\uE201/g;
 
+/**
+ * 扣留缓冲的长度上界（字符数）：超过它，挂起内容就不再当标记看，改当正文原样放出。
+ *
+ * 取 64 的来由：完整标记实测形态 \uE200cite\uE202turn0newsN\uE201 只有 ~20 个字符（13 个固定字符
+ * + 来源编号），64 是它的 3 倍余量——足够容忍任意变形（多来源、长编号、夹杂空白），又远小于
+ * 任何一段正文。没有上限时，一个永不闭合的 U+E200 会把其后所有正文一直扣住、流结束时整体丢弃，
+ * 用户拿到被静默截断的回答（真实数据里出现过残缺标记：正文里内联着没闭合的 \uE200cite\uE202turn0）。
+ */
+const CITE_PENDING_MAX_LEN = 64;
+
 /** 跨帧继承状态（持续聊天 + 增量流必需）。 */
 export interface ChatGPTStreamState {
   /** 上一次 delta 帧的 path（缺省时继承给下一帧）。空串表示「未设置」+ 是 patch 顶层标识。 */
@@ -56,7 +66,8 @@ export interface ChatGPTStreamState {
   /**
    * 引用标记清洗的扣留缓冲：最后一个 U+E200 之后还没出现 U+E201 的那半截标记。
    * 未设置（undefined）= 无挂起。与 lastP/lastO 同一层，跨帧持久化。
-   * 流结束时不清空也不补发：残缺标记不是正文，直接丢弃。
+   * 长度被 CITE_PENDING_MAX_LEN 封顶——超界即判定不是标记，原样当正文放出（见 stripCiteMarkers）。
+   * 阈值内未闭合的挂起在流结束时不清空也不补发：残缺标记不是正文，直接丢弃。
    */
   pendingCite?: string;
 }
@@ -208,14 +219,22 @@ function processSingleOp(p: string, op: string, v: unknown, state: ChatGPTStream
  * 正则只能吃掉同一片内的完整标记，分片处的那半截会原样泄漏给用户，所以先把「最后一个 U+E200
  * 之后没有 U+E201」的尾巴扣在 state.pendingCite 里，等下一帧到了再拼起来一起判。
  * 用户已拍板：标记直接删（不换成链接、不保留来源名），故闭合标记连同中间内容整段丢掉。
+ *
+ * 扣留有上界（CITE_PENDING_MAX_LEN）：挂起长度超界即「这不可能是标记」，原样当正文放出。
+ * 宁可泄漏几个私有区字符，也不能让一个残缺的 U+E200 把其后整段回答吞掉（流结束时挂起内容
+ * 是不补发的）。
  */
 function stripCiteMarkers(chunk: string, state: ChatGPTStreamState): string {
   const text = (state.pendingCite ?? '') + chunk;
   const lastStart = text.lastIndexOf(CITE_START);
   if (lastStart !== -1 && text.indexOf(CITE_END, lastStart) === -1) {
-    // 未闭合：从最后一个起点起的尾巴全部扣留（含上一帧扣留的部分），前面已能确认的部分先发
-    state.pendingCite = text.slice(lastStart);
-    return text.slice(0, lastStart).replace(CITE_MARKER_RE, '');
+    const tail = text.slice(lastStart);
+    if (tail.length <= CITE_PENDING_MAX_LEN) {
+      // 未闭合且在阈值内：从最后一个起点起的尾巴全部扣留（含上一帧扣留的部分），前面已能确认的部分先发
+      state.pendingCite = tail;
+      return text.slice(0, lastStart).replace(CITE_MARKER_RE, '');
+    }
+    // 超界：不是标记，落到下面的「全部当正文」分支——tail 里没有 U+E201，replace 不会动它
   }
   state.pendingCite = undefined;
   return text.replace(CITE_MARKER_RE, '');

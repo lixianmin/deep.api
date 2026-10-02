@@ -706,7 +706,48 @@ describe('interpretFrame × 引用标记清洗', () => {
   });
 });
 
-// ===== 11. 真实抓帧回归（2026-10-02 联网回答，36 帧） =====
+// ===== 11. 引用标记扣留的长度上界（防残缺标记吞掉整段回答） =====
+// 真实场景：回答正文里出现残缺的 "\uE200cite\uE202turn0"（用户实测某条回答：今天（10月2日）北京
+// 天气如下：\uE200cite\uE202turn0，标记没闭合），U+E201 永不到来。没有上界的扣留会把之后所有
+// 正文一直扣在 state.pendingCite 里，流结束时整体丢弃 → 用户拿到被静默截断的回答。
+// 阈值 64 的来由（stream.ts CITE_PENDING_MAX_LEN 同名常量）：完整标记实测形态
+// \uE200cite\uE202turn0newsN\uE201 只有 ~20 个字符，64 是它的 3 倍余量。
+const CITE_PENDING_MAX_LEN = 64;   // 与 stream.ts 保持一致：本节边界断言锁住该值
+
+describe('interpretFrame × 引用标记扣留的长度上界', () => {
+  it('永不闭合且挂起超过上界 → 挂起内容原样作为正文放出，后续正文也不被吞', () => {
+    const state = newStreamState();
+    state.phase = 'content';
+    const half = `${CITE_START}cite\uE202turn0`;                 // 13 字符的残缺标记开头，永等不到 U+E201
+    const body = '北京今天天气晴朗，气温适宜，适合外出。'.repeat(3);   // 57 字符：13 + 57 = 70 > 64
+    const first = interpretFrame(deltaFrame({ p: CONTENT_PATH, o: 'append', v: `今天（10月2日）北京天气如下：${half}` }), state);
+    const second = interpretFrame(deltaFrame({ p: CONTENT_PATH, o: 'append', v: body }), state);
+    // 挂起内容（含残缺标记本身）必须原样出来，而不是被丢弃
+    expect(second).toEqual([{ kind: 'content_delta', content: half + body }]);
+    expect([...first, ...second].map((e) => (e.kind === 'content_delta' ? e.content : '')).join(''))
+      .toBe(`今天（10月2日）北京天气如下：${half}${body}`);
+    expect(state.pendingCite).toBeUndefined();
+    // 上界判定后不再扣留：后续帧照常产出（旧代码把整个流的剩余正文全扣死在这里）
+    expect(interpretFrame(deltaFrame({ p: CONTENT_PATH, o: 'append', v: '后续正文' }), state))
+      .toEqual([{ kind: 'content_delta', content: '后续正文' }]);
+  });
+
+  it('边界：挂起恰好等于上界仍扣留，刚超过上界立即放出', () => {
+    const state = newStreamState();
+    state.phase = 'content';
+    // 尾部挂起长度恰好 = 64（+1 个前导正文，避免断言落在空字符串事件上）
+    const atLimit = CITE_START + 'x'.repeat(CITE_PENDING_MAX_LEN - 1);
+    expect(interpretFrame(deltaFrame({ p: CONTENT_PATH, o: 'append', v: `前${atLimit}` }), state))
+      .toEqual([{ kind: 'content_delta', content: '前' }]);
+    expect(state.pendingCite).toBe(atLimit);
+    // 再来一个字符 → 挂起长度 65 > 上界 → 判定不是标记，整段原样放出
+    expect(interpretFrame(deltaFrame({ v: '后' }), state))
+      .toEqual([{ kind: 'content_delta', content: atLimit + '后' }]);
+    expect(state.pendingCite).toBeUndefined();
+  });
+});
+
+// ===== 12. 真实抓帧回归（2026-10-02 联网回答，36 帧） =====
 // 夹具来源：真实 ChatGPT 联网回答抓帧，含 8 个 ops 批次帧（其中 6 个帧级无 p/o）。
 // EXPECTED_NEWS_TEXT = 页面 DOM 真值（536 字符）。
 // Bug 现场：旧代码只产出 194 字（6 个批次整批丢弃），从中段开始错位、结尾断在半句。
