@@ -2,7 +2,9 @@
  * ChatGPT provider adapter + bridge-client 测试。
  *
  * 覆盖范围（brief Step 1）：
- *   - adapter 契约：models 列出 `gpt-5-5` 等；resolveModel 接受 `gpt-*`/auto、拒绝未知；
+ *   - adapter 契约：models 只暴露 `chatgpt-web` 单条目（模型由 ChatGPT 网页按账号套餐决定，
+ *     扩展不提供选择）；resolveModel 只接受 `chatgpt-web`，旧的全量目录假 ID（gpt-5-5 / auto
+ *     等）返回 null；
  *     streamCompletion 在收到 `frame` 后产出对应事件、收到 `done` 后结束；
  *     getAuthStatus 无桥接时返回 `logged_out`。
  *   - v1 范围守卫（brief 明确：必须报错不能静默忽略）：tools / vision / search。
@@ -71,7 +73,7 @@ const mkReq = (over: Partial<ProviderCompletion> = {}): ProviderCompletion => ({
   session: { providerId: 'chatgpt', webSessionId: '', parentMessageId: null },
   prompt: '你好',
   // ProviderCompletion.model 只有 { variant, thinking }；modelId 在 router 那层单独走 resolveModel。
-  model: { variant: 'gpt-5-5', thinking: false },
+  model: { variant: 'chatgpt-web', thinking: false },
   requestId: 'req-test-001',
   ...over,
 });
@@ -100,35 +102,38 @@ describe('ChatGPTAdapter.models / resolveModel', () => {
     expect(a.auth.loginPageUrl).toBe('https://chatgpt.com/');
   });
 
-  it('models 列出全部 6 个实测 ID（含 auto，按 id 排序）', () => {
+  // 回归断言：曾经暴露 6 个来自 /backend-api/models 全量目录的 ID（gpt-5-5 / auto 等），
+  // 但模型名从不上游（页面自己写死 request body 的 model 字段），且全量目录与用户套餐无关——
+  // 给出的是一排不生效的假选项。只留一个 chatgpt-web。
+  it('models 只暴露 chatgpt-web 一个条目', () => {
     const a = createChatGPTAdapter(mkDeps());
-    const ids = a.models.map((m) => m.id).sort();
-    expect(ids).toEqual(['auto', 'gpt-5-3-mini', 'gpt-5-5', 'gpt-5-5-mini', 'gpt-5-6', 'gpt-5-6-mini']);
+    const ids = a.models.map((m) => m.id);
+    expect(ids).toEqual(['chatgpt-web']);
     for (const m of a.models) {
       expect(m.provider).toBe('chatgpt');
       expect(typeof m.description).toBe('string');
     }
   });
 
-  it('resolveModel 接受 gpt-* 与 auto', () => {
+  it('resolveModel 接受 chatgpt-web', () => {
     const a = createChatGPTAdapter(mkDeps());
-    const r = a.resolveModel('gpt-5-5');
+    const r = a.resolveModel('chatgpt-web');
     expect(r).not.toBeNull();
-    expect(r?.modelId).toBe('gpt-5-5');
-    // v1 范围内：所有 ChatGPT 模型都不支持图片/思考（v1 范围守卫见下文）
+    expect(r?.modelId).toBe('chatgpt-web');
+    // v1 范围内：ChatGPT 模型不支持图片/思考（v1 范围守卫见下文）
     expect(r?.supportsImages).toBe(false);
     expect(r?.thinking).toBe(false);
-    // variant 用模型 ID 本身——传到 MAIN world 后会被原样用作 fetch payload 的 `model` 字段
-    expect(r?.variant).toBe('gpt-5-5');
+    // variant 是占位符——桥接不上送模型名，真实模型由 ChatGPT 网页按账号套餐决定
+    expect(r?.variant).toBe('chatgpt-web');
     // limitChars 不限制（v1 范围内 prompt 直接进 composer，不在 SW 端做长度校验）
     expect(typeof r?.limitChars).toBe('number');
   });
 
-  it('resolveModel 接受 gpt-5-6 / 5-3-mini / 5-5-mini / 5-6-mini / auto', () => {
+  // 回归断言：旧的 6 个假 ID 现在必须返回 null，防止以后又把它们加回来。
+  it('resolveModel 拒绝旧的假 ID（gpt-5-* / auto 不再可选）', () => {
     const a = createChatGPTAdapter(mkDeps());
-    for (const id of ['gpt-5-6', 'gpt-5-3-mini', 'gpt-5-5-mini', 'gpt-5-6-mini', 'auto']) {
-      const r = a.resolveModel(id);
-      expect(r?.modelId).toBe(id);
+    for (const id of ['gpt-5-5', 'gpt-5-6', 'gpt-5-3-mini', 'gpt-5-5-mini', 'gpt-5-6-mini', 'auto']) {
+      expect(a.resolveModel(id)).toBeNull();
     }
   });
 

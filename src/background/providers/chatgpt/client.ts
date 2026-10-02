@@ -1,28 +1,31 @@
 /**
  * ChatGPT provider 模型配置。
  *
- * models 列表来自 `docs/superpowers/specs/2026-10-01-chatgpt-sse-protocol.md`
- * 配套的实测抓帧——用户在 chatgpt.com 网页里观察到的下拉选项 ID。
+ * 只暴露一个条目 `chatgpt-web`：模型完全由 ChatGPT 网页决定，桥接不上送模型名。
+ * chatgpt.com 页面自己构造请求体，其 `model` 字段是页面写死的；我们注入的 fetch 拦截器
+ * 不参与改写。所以这里列多个选项是纯装饰——用户选了哪一档，上游拿到的东西完全一样。
+ *
+ * 曾经的 6 个 ID（gpt-5-5 / gpt-5-6 / gpt-5-3-mini / gpt-5-5-mini / gpt-5-6-mini / auto）
+ * 来自 `/backend-api/models` 全量目录：那是全局目录，与用户账号套餐无关，Free 账号用不到
+ * 其中多数。给一排不生效的假选项比不给更糟（用户以为自己能控模型，实际控制不了），故删除。
+ *
+ * variant 在本 provider 里没有上游含义，仅作占位。
  * 不要在这里面写 deepseek-* / 其他 provider 的 ID——单 provider 单一真相源。
  *
- * variant = modelId 本身：MAIN world 把 variant 作为 fetch payload 的 `model` 字段
- * 原样发出（ChatGPT 端点是按 wire 上 `model` 字段路由到具体子模型的）。
- *
- * v1 范围：所有模型都 supportsImages=false / thinking=false——v1 范围守卫由 adapter 层负责
+ * v1 范围：supportsImages=false / thinking=false——v1 范围守卫由 adapter 层负责
  * 抛 400（不是这里拒绝；这里只是表达「本 provider 在 v1 不暴露这些能力」）。
  */
 import type { ModelInfo, ModelVariant, ResolvedModel } from '../adapter';
 
 export const MODELS: ModelInfo[] = [
-  { id: 'gpt-5-5', provider: 'chatgpt', description: 'GPT-5.5（默认）' },
-  { id: 'gpt-5-6', provider: 'chatgpt', description: 'GPT-5.6（更强推理）' },
-  { id: 'gpt-5-3-mini', provider: 'chatgpt', description: 'GPT-5.3 mini（轻量）' },
-  { id: 'gpt-5-5-mini', provider: 'chatgpt', description: 'GPT-5.5 mini' },
-  { id: 'gpt-5-6-mini', provider: 'chatgpt', description: 'GPT-5.6 mini' },
-  { id: 'auto', provider: 'chatgpt', description: 'Auto（让 ChatGPT 自动选模型）' },
+  {
+    id: 'chatgpt-web',
+    provider: 'chatgpt',
+    description: 'ChatGPT 网页版（模型由网页按你的账号套餐决定，这里不提供选择）',
+  },
 ];
 
-/** ID → ResolvedModel。gpt-* 与 auto 通过；其它（含 deepseek-*）一律 null。 */
+/** ID → ResolvedModel。只认 `chatgpt-web`；其它一律 null。 */
 export function resolveModel(modelId: string): ResolvedModel | null {
   if (!MODELS.some((m) => m.id === modelId)) return null;
   return {
